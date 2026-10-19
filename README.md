@@ -188,7 +188,17 @@ the system-wide file is then ignored entirely. The chosen file is re-read on
 every root listing and repository operation — edits take effect on the next
 refresh (**Ctrl+R**). The plugin never creates or modifies either file.
 
-> **Encoding Note:** Save `restic_plugin.ini` as **ANSI** (system code page) or **UTF-16 LE (with BOM)**. Standard Win32 INI APIs (`GetPrivateProfile*W`) do not decode UTF-8 when the file contains non-ASCII characters.
+The INI is read as **UTF-8** (a UTF-8 or UTF-16 byte-order mark is also
+honoured), so aliases and paths with accented or other non-ASCII characters
+work — just save the file as UTF-8 (the default in most editors). A file
+that is not valid UTF-8 is read in the Windows ANSI code page, so an INI
+saved for version 1.x keeps working.
+
+**Portable Total Commander:** keep your configuration in the
+`restic_plugin.ini` in the plugin folder, which travels with Total
+Commander. Back it up before installing a new version of the plugin, as the
+installation replaces it with the sample. A `%APPDATA%\GHISLER\restic_plugin.ini`
+on the computer you run it on would take precedence.
 
 #### How `restic.exe` Is Located
 

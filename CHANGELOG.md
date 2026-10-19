@@ -41,6 +41,12 @@ upstream 1.x line.
   Commander's `wincmd.ini` was the fallback. **Upgrading from 1.x:** move a
   `restic_plugin.ini` you edited in the plugin folder to
   `%APPDATA%\GHISLER\`, otherwise installing the new version overwrites it.
+- **`restic_plugin.ini` is read as UTF-8**, like in the author's other
+  Total Commander plugins, so repository aliases and paths may contain any
+  characters. A UTF-8 or UTF-16 byte-order mark is honoured, and a file that
+  is not valid UTF-8 is still read in the ANSI code page, as before.
+  Entries too long for the plugin's buffers are now skipped instead of
+  being silently truncated.
 - **Release ZIP** is named `TCResticBrowser.vX.Y.Z.zip` and ships the
   license as `LICENSE.txt`.
 - **Documentation** restructured (README, CONTRIBUTING, this changelog), and

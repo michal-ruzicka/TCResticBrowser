@@ -7,6 +7,7 @@
 #define CONFIG_USER_SUBDIR        L"GHISLER"   /* Total Commander's settings folder under %APPDATA% */
 #define CONFIG_DEFAULT_RESTIC_EXE L"restic.exe"
 #define CONFIG_MAX_PATH           1024
+#define CONFIG_MAX_INI_BYTES      (4 * 1024 * 1024)  /* A larger restic_plugin.ini is not read */
 
 /**
  * Single repository mapping under [Repositories] in restic_plugin.ini.

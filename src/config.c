@@ -218,6 +218,116 @@ BOOL config_resolve_ini_path(WCHAR* out_path, size_t out_capacity) {
 }
 
 /*
+ * Reads a whole INI file into a heap-allocated, NUL-terminated wide string (caller frees).
+ * Encoding: a UTF-16 LE/BE or UTF-8 byte-order mark is honoured; without one the file is UTF-8,
+ * the default of today's editors. The Win32 GetPrivateProfile* APIs are not used because they
+ * read a BOM-less file in the ANSI code page and garble non-ASCII paths saved as UTF-8. A
+ * BOM-less file that is not valid UTF-8 is decoded in the ANSI code page instead, so an INI
+ * written for the 1.x plugin (which required ANSI) keeps working.
+ * Returns NULL when the file cannot be read or exceeds CONFIG_MAX_INI_BYTES.
+ */
+static WCHAR* read_ini_text(const WCHAR* path) {
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+
+    LARGE_INTEGER size = {0};
+    unsigned char* bytes = NULL;
+    DWORD got = 0;
+    if (GetFileSizeEx(h, &size) && size.QuadPart >= 0 && size.QuadPart <= CONFIG_MAX_INI_BYTES) {
+        bytes = (unsigned char*)malloc((size_t)size.QuadPart + 1);
+        if (bytes && !ReadFile(h, bytes, (DWORD)size.QuadPart, &got, NULL)) {
+            free(bytes);
+            bytes = NULL;
+        }
+    }
+    CloseHandle(h);
+    if (!bytes) return NULL;
+
+    WCHAR* text = NULL;
+    if (got >= 2 && ((bytes[0] == 0xFF && bytes[1] == 0xFE) || (bytes[0] == 0xFE && bytes[1] == 0xFF))) {
+        BOOL big_endian = (bytes[0] == 0xFE);
+        size_t count = (got - 2) / 2;
+        text = (WCHAR*)malloc((count + 1) * sizeof(WCHAR));
+        if (text) {
+            for (size_t i = 0; i < count; ++i) {
+                unsigned char b0 = bytes[2 + 2 * i], b1 = bytes[3 + 2 * i];
+                text[i] = (WCHAR)(big_endian ? ((b0 << 8) | b1) : ((b1 << 8) | b0));
+            }
+            text[count] = L'\0';
+        }
+    } else {
+        BOOL has_bom = (got >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF);
+        const char* src = (const char*)bytes + (has_bom ? 3 : 0);
+        int len = (int)got - (has_bom ? 3 : 0);
+        UINT code_page = CP_UTF8;
+        int wlen = (len > 0) ? MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, src, len, NULL, 0) : 0;
+        if (len > 0 && wlen == 0) {
+            code_page = has_bom ? CP_UTF8 : CP_ACP;
+            wlen = MultiByteToWideChar(code_page, 0, src, len, NULL, 0);
+        }
+        text = (WCHAR*)malloc(((size_t)wlen + 1) * sizeof(WCHAR));
+        if (text) {
+            if (wlen > 0 && MultiByteToWideChar(code_page, 0, src, len, text, wlen) != wlen) {
+                wlen = 0;
+            }
+            text[wlen] = L'\0';
+        }
+    }
+    free(bytes);
+    return text;
+}
+
+/*
+ * Walks "key=value" lines of INI text in place (the text is modified). Lines starting with ';'
+ * or '#' and lines without '=' are skipped; "[name]" lines change the current section. Key and
+ * value are trimmed, the value is also unquoted. Section names compare case-insensitively.
+ */
+typedef struct {
+    WCHAR*       cursor;
+    const WCHAR* section;
+} IniReader;
+
+static BOOL ini_next_entry(IniReader* r, WCHAR** key, WCHAR** value) {
+    while (r->cursor && *r->cursor != L'\0') {
+        WCHAR* line = r->cursor;
+        WCHAR* eol = line + wcscspn(line, L"\r\n");
+        r->cursor = (*eol != L'\0') ? eol + 1 : eol;
+        *eol = L'\0';
+
+        while (is_space_char(*line)) line++;
+        if (*line == L'\0' || *line == L';' || *line == L'#') continue;
+
+        if (*line == L'[') {
+            WCHAR* close = wcschr(line, L']');
+            if (close) {
+                *close = L'\0';
+                trim_whitespace(line + 1);
+                r->section = line + 1;
+            }
+            continue;
+        }
+
+        WCHAR* eq = wcschr(line, L'=');
+        if (!eq) continue;
+        *eq = L'\0';
+        trim_whitespace(line);
+        WCHAR* val = eq + 1;
+        trim_whitespace(val);
+        strip_quotes(val);
+        trim_whitespace(val);
+        *key   = line;
+        *value = val;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL ini_in_section(const IniReader* r, const WCHAR* section) {
+    return r->section && _wcsicmp(r->section, section) == 0;
+}
+
+/*
  * Looks for an executable only inside the directories listed in %PATH%. Unlike SearchPathW, the
  * current directory (which follows the Total Commander panel) is never searched, so a planted
  * "restic.exe" in a browsed folder cannot hijack the lookup. Result is an absolute path.
@@ -259,24 +369,21 @@ BOOL config_resolve_restic_path(const WCHAR* ini_path, WCHAR* out_path, size_t o
 
     WCHAR configured_val[CONFIG_MAX_PATH] = {0};
 
-    /* Read [Settings] ResticPath if an existing INI file is provided */
-    if (ini_path && file_exists(ini_path)) {
-        WCHAR full_ini[CONFIG_MAX_PATH] = {0};
-        if (GetFullPathNameW(ini_path, CONFIG_MAX_PATH, full_ini, NULL) == 0) {
-            wcsncpy_s(full_ini, CONFIG_MAX_PATH, ini_path, _TRUNCATE);
+    /* Read [Settings] ResticPath (first occurrence) if an existing INI file is provided */
+    WCHAR* ini_text = (ini_path && file_exists(ini_path)) ? read_ini_text(ini_path) : NULL;
+    if (ini_text) {
+        IniReader reader = {ini_text, NULL};
+        WCHAR *key = NULL, *value = NULL;
+        while (ini_next_entry(&reader, &key, &value)) {
+            if (ini_in_section(&reader, L"Settings") && _wcsicmp(key, L"ResticPath") == 0) {
+                /* An over-long value is ignored rather than truncated into a different path */
+                if (wcslen(value) < CONFIG_MAX_PATH) {
+                    wcsncpy_s(configured_val, CONFIG_MAX_PATH, value, _TRUNCATE);
+                }
+                break;
+            }
         }
-
-        GetPrivateProfileStringW(
-            L"Settings",
-            L"ResticPath",
-            L"",
-            configured_val,
-            CONFIG_MAX_PATH,
-            full_ini
-        );
-        trim_whitespace(configured_val);
-        strip_quotes(configured_val);
-        trim_whitespace(configured_val);
+        free(ini_text);
     }
 
     /* 1. Explicit [Settings] ResticPath priority */
@@ -371,7 +478,7 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
         return FALSE;
     }
 
-    /* Normalize INI path so Win32 Profile APIs do not default to %WINDIR% */
+    /* Normalize the INI path (a relative one is resolved against the current directory) */
     if (GetFullPathNameW(ini_path, CONFIG_MAX_PATH, out_config->ini_path, NULL) == 0) {
         wcsncpy_s(out_config->ini_path, CONFIG_MAX_PATH, ini_path, _TRUNCATE);
     }
@@ -381,75 +488,36 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
     if (!file_exists(out_config->ini_path)) {
         return FALSE;
     }
-
-    /* Read [Repositories] section with dynamic buffer expansion */
-    DWORD buf_cap = 16384;
-    WCHAR* section_buf = NULL;
-    DWORD chars_read = 0;
-
-    while (buf_cap <= 262144) {
-        WCHAR* new_buf = (WCHAR*)realloc(section_buf, buf_cap * sizeof(WCHAR));
-        if (!new_buf) {
-            free(section_buf);
-            return FALSE;
-        }
-        section_buf = new_buf;
-
-        chars_read = GetPrivateProfileSectionW(
-            L"Repositories",
-            section_buf,
-            buf_cap,
-            out_config->ini_path
-        );
-        if (chars_read < buf_cap - 2) {
-            break;
-        }
-        buf_cap *= 2;
+    WCHAR* ini_text = read_ini_text(out_config->ini_path);
+    if (!ini_text) {
+        return FALSE;
     }
 
+    /* Every [Repositories] line is "<Alias>=<Target>"; a repeated alias updates the earlier entry */
     size_t repo_capacity = 0;
-    const WCHAR* cursor = section_buf;
-
-    while (chars_read > 0 && *cursor != L'\0') {
-        size_t line_len = wcslen(cursor);
-        WCHAR line[CONFIG_MAX_PATH * 2];
-        wcsncpy_s(line, _countof(line), cursor, _TRUNCATE);
-        cursor += line_len + 1;
-
-        trim_whitespace(line);
-        if (line[0] == L'\0' || line[0] == L';' || line[0] == L'#') {
+    IniReader reader = {ini_text, NULL};
+    WCHAR *alias = NULL, *target = NULL;
+    while (ini_next_entry(&reader, &alias, &target)) {
+        if (!ini_in_section(&reader, L"Repositories")) {
             continue;
         }
-
-        WCHAR* eq = wcschr(line, L'=');
-        if (!eq) {
-            continue;
-        }
-
-        *eq = L'\0';
-        WCHAR* alias  = line;
-        WCHAR* target = eq + 1;
-
-        trim_whitespace(alias);
         strip_quotes(alias);
         trim_whitespace(alias);
 
-        trim_whitespace(target);
-        strip_quotes(target);
-        trim_whitespace(target);
-
-        if (!is_valid_alias(alias) || target[0] == L'\0') {
+        /* Over-long entries are skipped: truncating a target could name a different repository */
+        if (!is_valid_alias(alias) || target[0] == L'\0' ||
+            wcslen(alias) >= MAX_PATH || wcslen(target) >= CONFIG_MAX_PATH) {
             continue;
         }
 
         if (!upsert_repo_entry(out_config, &repo_capacity, alias, target)) {
-            free(section_buf);
+            free(ini_text);
             config_free(out_config);
             return FALSE;
         }
     }
 
-    free(section_buf);
+    free(ini_text);
     return TRUE;
 }
 

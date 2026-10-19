@@ -296,6 +296,123 @@ static void test_repositories_parsing_and_wfx_root(void) {
     RemoveDirectoryW(plugin_dir);
 }
 
+/* Helper: writes raw bytes (may contain NULs) to disk */
+static BOOL write_bytes(const WCHAR* path, const void* data, DWORD len) {
+    HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
+    DWORD written = 0;
+    BOOL ok = WriteFile(h, data, len, &written, NULL) && written == len;
+    CloseHandle(h);
+    return ok;
+}
+
+/* Helper: writes `text` as UTF-8 (optionally with BOM) or UTF-16 LE/BE with BOM */
+typedef enum { ENC_UTF8, ENC_UTF8_BOM, ENC_UTF16LE, ENC_UTF16BE } TestEncoding;
+
+static BOOL write_encoded(const WCHAR* path, const WCHAR* text, TestEncoding enc) {
+    static unsigned char buf[16384];
+    size_t len = 0, n = wcslen(text);
+    if (enc == ENC_UTF8 || enc == ENC_UTF8_BOM) {
+        if (enc == ENC_UTF8_BOM) { buf[0] = 0xEF; buf[1] = 0xBB; buf[2] = 0xBF; len = 3; }
+        int m = WideCharToMultiByte(CP_UTF8, 0, text, (int)n, (char*)buf + len, (int)(sizeof(buf) - len), NULL, NULL);
+        if (m <= 0) return FALSE;
+        len += (size_t)m;
+    } else {
+        if (2 * (n + 1) > sizeof(buf)) return FALSE;
+        BOOL be = (enc == ENC_UTF16BE);
+        buf[0] = be ? 0xFE : 0xFF; buf[1] = be ? 0xFF : 0xFE; len = 2;
+        for (size_t i = 0; i < n; ++i) {
+            unsigned char hi = (unsigned char)(text[i] >> 8), lo = (unsigned char)(text[i] & 0xFF);
+            buf[len++] = be ? hi : lo;
+            buf[len++] = be ? lo : hi;
+        }
+    }
+    return write_bytes(path, buf, (DWORD)len);
+}
+
+/* Test 5: INI encodings (UTF-8 default, BOMs, ANSI fallback) and the line syntax of the own reader */
+static void test_ini_encodings_and_syntax(void) {
+    WCHAR plugin_dir[CONFIG_MAX_PATH] = {0}, tools_dir[CONFIG_MAX_PATH] = {0};
+    WCHAR ini_path[CONFIG_MAX_PATH] = {0}, custom_restic[CONFIG_MAX_PATH] = {0};
+    make_temp_dir(L"restic_enc_plug", plugin_dir, CONFIG_MAX_PATH);
+    make_temp_dir(L"restic_enc_N\u00e1stroje_\u65e5\u672c", tools_dir, CONFIG_MAX_PATH);
+    swprintf_s(ini_path, CONFIG_MAX_PATH, L"%ls\\%ls", plugin_dir, CONFIG_INI_FILENAME);
+    swprintf_s(custom_restic, CONFIG_MAX_PATH, L"%ls\\restic.exe", tools_dir);
+    write_text_file(custom_restic, "MZ_DUMMY");
+    config_set_plugin_dir(plugin_dir);
+
+    /* Non-ASCII alias, target and ResticPath; LF, CRLF and CR line endings; foreign section ignored */
+    static WCHAR body[4096];
+    swprintf_s(body, _countof(body),
+               L"; \u010de\u0161tina \u65e5\u672c\u8a9e\n"
+               L"[settings]\r\n"
+               L"  ResticPath = \"%ls\"\n"
+               L"ResticPath=C:\\second\\is\\ignored.exe\r"
+               L"[Other]\n"
+               L"Ignored=D:\\other\n"
+               L"[REPOSITORIES]\r\n"
+               L"Z\u00e1lohy=D:\\Z\u00e1lohy\\repo\r\n"
+               L"\u65e5\u672c = rest:https://\u65e5\u672c.example/repo\n"
+               L"NoNewlineAtEnd=E:\\last",
+               custom_restic);
+
+    const TestEncoding encodings[] = {ENC_UTF8, ENC_UTF8_BOM, ENC_UTF16LE, ENC_UTF16BE};
+    for (size_t i = 0; i < _countof(encodings); ++i) {
+        EXPECT_TRUE(write_encoded(ini_path, body, encodings[i]), "Write encoded INI");
+        ResticConfig cfg;
+        EXPECT_TRUE(config_load_from_file(ini_path, &cfg), "Encoded INI loads");
+        EXPECT_TRUE(cfg.repo_count == 3, "Three repositories, the [Other] section is not mixed in");
+        const ResticRepoEntry* r = config_find_repo(&cfg, L"Z\u00e1lohy");
+        EXPECT_TRUE(r != NULL, "Non-ASCII alias found");
+        EXPECT_WSTR_EQ(r->target, L"D:\\Z\u00e1lohy\\repo", "Non-ASCII target decoded");
+        r = config_find_repo(&cfg, L"\u65e5\u672c");
+        EXPECT_TRUE(r != NULL, "CJK alias found");
+        EXPECT_WSTR_EQ(r->target, L"rest:https://\u65e5\u672c.example/repo", "CJK target decoded");
+        r = config_find_repo(&cfg, L"NoNewlineAtEnd");
+        EXPECT_TRUE(r != NULL, "Last line without a line break is read");
+        EXPECT_WSTR_EQ(r->target, L"E:\\last", "Last line target");
+        EXPECT_WSTR_EQ(cfg.restic_path, custom_restic, "First non-ASCII ResticPath in [Settings] is used");
+        config_free(&cfg);
+    }
+
+    /* A BOM-less file that is not valid UTF-8 is an ANSI file from the 1.x plugin */
+    const char ansi_ini[] = "[Repositories]\r\nOld=D:\\Z\xE1lohy\r\n";
+    WCHAR expected[64] = {0};
+    MultiByteToWideChar(CP_ACP, 0, "D:\\Z\xE1lohy", -1, expected, _countof(expected));
+    EXPECT_TRUE(write_bytes(ini_path, ansi_ini, (DWORD)strlen(ansi_ini)), "Write ANSI INI");
+    ResticConfig cfg;
+    EXPECT_TRUE(config_load_from_file(ini_path, &cfg) && cfg.repo_count == 1, "ANSI INI loads");
+    EXPECT_WSTR_EQ(cfg.repos[0].target, expected, "Invalid UTF-8 falls back to the ANSI code page");
+    config_free(&cfg);
+
+    /* Over-long entries are skipped, never truncated into a different repository */
+    static char long_ini[4096];
+    int pos = snprintf(long_ini, sizeof(long_ini), "[Repositories]\r\nTooLong=D:\\");
+    for (int i = 0; i < CONFIG_MAX_PATH; ++i) long_ini[pos++] = 'x';
+    snprintf(long_ini + pos, sizeof(long_ini) - (size_t)pos, "\r\nShort=D:\\ok\r\n");
+    EXPECT_TRUE(write_text_file(ini_path, long_ini), "Write INI with an over-long target");
+    EXPECT_TRUE(config_load_from_file(ini_path, &cfg) && cfg.repo_count == 1 &&
+                config_find_repo(&cfg, L"Short") != NULL && config_find_repo(&cfg, L"TooLong") == NULL,
+                "Over-long target is skipped");
+    config_free(&cfg);
+
+    /* A file above CONFIG_MAX_INI_BYTES is not read at all */
+    char* huge = (char*)malloc(CONFIG_MAX_INI_BYTES + 1);
+    EXPECT_TRUE(huge != NULL, "Allocate oversized INI");
+    memset(huge, ';', CONFIG_MAX_INI_BYTES + 1);
+    memcpy(huge, "[Repositories]\nA=D:\\a\n", 22);
+    BOOL written = write_bytes(ini_path, huge, CONFIG_MAX_INI_BYTES + 1);
+    free(huge);
+    EXPECT_TRUE(written, "Write oversized INI");
+    EXPECT_TRUE(!config_load_from_file(ini_path, &cfg) && cfg.repo_count == 0, "Oversized INI is refused");
+    config_free(&cfg);
+
+    DeleteFileW(ini_path);
+    DeleteFileW(custom_restic);
+    RemoveDirectoryW(tools_dir);
+    RemoveDirectoryW(plugin_dir);
+}
+
 /* Helper: reads the current value of an environment variable into a heap string (or NULL) */
 static WCHAR* dup_env(const WCHAR* name) {
     DWORD need = GetEnvironmentVariableW(name, NULL, 0);
@@ -611,6 +728,7 @@ int main(void) {
     test_ini_path_resolution_priority();
     test_restic_binary_resolution();
     test_repositories_parsing_and_wfx_root();
+    test_ini_encodings_and_syntax();
     test_restic_lookup_ignores_current_directory();
     test_large_repository_list();
     test_wfx_routing_and_callbacks();
