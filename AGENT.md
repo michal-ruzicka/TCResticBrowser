@@ -194,12 +194,13 @@ typedef struct {
 - Snapshot IDs go on the command line unquoted, so they are validated as hexadecimal (max 64 chars) before anything is spawned; `"--help"`, whitespace or `NULL` yield `RESTIC_ERR_INVALID_ARG`.
 - The `ls` filter path (arbitrary bytes from the backed-up file system, e.g. Linux names containing a double quote) goes through `restic_quote_arg()`, which implements the `CommandLineToArgvW` escaping rules (backslashes before quotes doubled, quotes escaped). A round-trip test against `CommandLineToArgvW` covers it.
 - Paths up to 1023 UTF-16 units (Total Commander's limit) are supported end to end (UTF-8 buffer of 3073 bytes).
-- Known limitation: a Linux file name containing a literal backslash cannot be addressed, because the backslash is the WFX path separator.
+- Known limitation: a Linux file name containing a literal backslash cannot be addressed, because the backslash is the WFX path separator. Such entries are not listed at all (see 7.4).
 
 ### 7.4 Parsing Rules (`restic_parse_*`)
 
 - `snapshots --json`: a literal `null` is an empty list; entries with an invalid time or non-hex ID are skipped (the directory name must never contain separators). Directory name = snapshot time **as recorded by Restic (its own UTC offset)**; the `FILETIME` fields are converted to UTC.
 - `ls --json` NDJSON: strict - a malformed line aborts with `RESTIC_ERR_JSON_PARSE` (stdout contains JSON only). Only direct children of the filter path are returned. The filtered directory's own node is consumed to prove existence: a filter other than `/` whose node is missing or is not a `dir` yields `RESTIC_ERR_PATH_NOT_FOUND`. This distinguishes "missing" from "empty directory", which Total Commander needs (`ERROR_NO_MORE_FILES` = exists but empty, any other error = does not exist).
+- Name safety (`is_safe_component`): only names that are exactly one path component are reported. Total Commander appends the reported name to build both the next virtual path and, on `F5`, the local target path, so a name containing `\` or `/` (a legal Linux file name such as `..\..\x`) would let a recursive copy write outside the chosen target directory. Names consisting only of dots and spaces (`.`, `..`, `...`, `.. `) are skipped too, because Win32 strips trailing dots and spaces from path components. Dot files and names merely ending in a dot are kept.
 - Entry mapping: `dir` -> `FILE_ATTRIBUTE_DIRECTORY`; everything else (files, **symlinks**, devices) -> plain file, as the WFX specification requires ("Links should be returned as files"). All entries carry `FILE_ATTRIBUTE_READONLY`. 64-bit sizes are split into `nFileSizeHigh/Low`.
 - Unknown dates: when `mtime` is missing or unparsable the entry gets Total Commander's "no date" marker (`FS_SET_TIME_UNKNOWN`: high `0xFFFFFFFF`, low `0xFFFFFFFE`); repository aliases at the root use it too.
 

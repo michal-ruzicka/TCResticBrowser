@@ -314,6 +314,23 @@ static void test_parse_ls_ndjson(void) {
                 "Empty, '.' and '..' node names are skipped");
     free(items);
 
+    /* A name that is not a single component would let a recursive copy (F5) escape the target
+       directory: backslashes are legal in Linux file names, and Win32 strips trailing dots/spaces */
+    res = restic_parse_ls_ndjson(HEADER_LINE
+        "{\"name\":\"..\\\\..\\\\evil.exe\",\"type\":\"file\",\"path\":\"/..\\\\..\\\\evil.exe\",\"message_type\":\"node\"}\r\n"
+        "{\"name\":\"a\\\\b\",\"type\":\"dir\",\"path\":\"/a\\\\b\",\"message_type\":\"node\"}\r\n"
+        "{\"name\":\"x/y\",\"type\":\"file\",\"path\":\"/xy\",\"message_type\":\"node\"}\r\n"
+        "{\"name\":\"...\",\"type\":\"dir\",\"path\":\"/...\",\"message_type\":\"node\"}\r\n"
+        "{\"name\":\".. \",\"type\":\"dir\",\"path\":\"/.. \",\"message_type\":\"node\"}\r\n"
+        "{\"name\":\" \",\"type\":\"file\",\"path\":\"/ \",\"message_type\":\"node\"}\r\n"
+        "{\"name\":\".hidden\",\"type\":\"file\",\"path\":\"/.hidden\",\"message_type\":\"node\"}\r\n"
+        "{\"name\":\"a..\",\"type\":\"file\",\"path\":\"/a..\",\"message_type\":\"node\"}\r\n",
+        "/", &items, &count);
+    EXPECT_TRUE(res == RESTIC_OK && count == 2, "Only the two single-component names are reported");
+    EXPECT_TRUE(find_entry(items, count, L".hidden") != NULL && find_entry(items, count, L"a..") != NULL,
+                "Dot files and names merely ending in dots are kept");
+    free(items);
+
     /* Existing but empty directory vs. missing path vs. file used as directory */
     res = restic_parse_ls_ndjson(HEADER_LINE
         "{\"name\":\"empty_dir\",\"type\":\"dir\",\"path\":\"/a/empty_dir\",\"message_type\":\"node\"}\r\n",

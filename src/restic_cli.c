@@ -399,6 +399,24 @@ static BOOL is_direct_child_path(const char* node_path, const char* filter_path)
     return strchr(node_path + filter_len + 1, '/') == NULL;
 }
 
+/*
+ * TRUE when a name taken from a snapshot can be handed to Total Commander as one path component.
+ *
+ * Total Commander builds both the next virtual path and, on copy (F5), the local target path by
+ * appending the reported name. A name containing a separator is therefore not one component but
+ * several: a file named `..\..\x` on a Linux machine is a single legitimate name there, and would
+ * make a recursive copy write outside the chosen target directory here. A name made only of dots
+ * and spaces is refused too, because Win32 strips trailing dots and spaces from path components and
+ * `...` or `.. ` would collapse into `.` or `..`.
+ */
+static BOOL is_safe_component(const WCHAR* name) {
+    if (wcschr(name, L'\\') != NULL || wcschr(name, L'/') != NULL) return FALSE;
+    for (const WCHAR* p = name; *p != L'\0'; ++p) {
+        if (*p != L'.' && *p != L' ') return TRUE;
+    }
+    return FALSE; /* Empty, or nothing but dots and spaces */
+}
+
 /* Fills a WIN32_FIND_DATAW from one `restic ls --json` node object. Returns FALSE to skip it. */
 static BOOL node_to_find_data(const JsonValue* obj, WIN32_FIND_DATAW* fd) {
     const char* name  = json_string(json_object_get(obj, "name"));
@@ -411,9 +429,8 @@ static BOOL node_to_find_data(const JsonValue* obj, WIN32_FIND_DATAW* fd) {
     if (!name || MultiByteToWideChar(CP_UTF8, 0, name, -1, fd->cFileName, MAX_PATH) <= 0) {
         return FALSE;
     }
-    /* Empty names and "."/".." would break Total Commander's navigation: never report them */
-    if (fd->cFileName[0] == L'\0' || wcscmp(fd->cFileName, L".") == 0 ||
-        wcscmp(fd->cFileName, L"..") == 0) {
+    /* Empty names, "."/"..", and anything that is not a single path component: never report them */
+    if (!is_safe_component(fd->cFileName)) {
         return FALSE;
     }
 
