@@ -11,6 +11,7 @@
 #include <crtdbg.h>
 #endif
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "json.h"
 
@@ -191,6 +192,102 @@ static void test_depth_limit(void) {
     }
 }
 
+/* Holds `len` bytes of input that may contain NUL bytes */
+typedef struct {
+    const char* text;
+    size_t len;
+} RawInput;
+
+#define RAW(lit) {(lit), sizeof(lit) - 1}
+
+/*
+ * Edge cases from JSONTestSuite (https://github.com/nst/JSONTestSuite, MIT License, by Nicolas
+ * Seriot), the reference conformance corpus for JSON parsers, as of commit 1ef36fa. The whole
+ * suite was run against this reader once: every n_ case is rejected and every y_ case accepted
+ * except the two containing \u0000, which this reader refuses by design. The cases kept here are
+ * the ones not already covered above; the file each comes from is noted next to it.
+ */
+static void test_jsontestsuite_cases(void) {
+    static const RawInput must_reject[] = {
+        RAW("[\"x\"]]"),                    /* n_array_extra_close */
+        RAW("[\"\"],"),                     /* n_array_comma_after_close */
+        RAW("[1,,2]"),                      /* n_array_double_comma */
+        RAW("[-012]"),                      /* n_number_neg_int_starting_with_zero */
+        RAW("[-01]"),                       /* n_number_-01 */
+        RAW("[-Infinity]"),                 /* n_number_minus_infinity */
+        RAW("[2.e3]"),                      /* n_number_2.e3 */
+        RAW("[0.e1]"),                      /* n_number_0.e1 */
+        RAW("[-.123]"),                     /* n_number_neg_real_without_int_part */
+        RAW("[-2.]"),                       /* n_number_-2. */
+        RAW("[0E+]"),                       /* n_number_0_capital_E+ */
+        RAW("[1ea]"),                       /* n_number_real_garbage_after_e */
+        RAW("[1 000.0]"),                   /* n_number_1_000 */
+        RAW("[\xef\xbc\x91]"),              /* n_number_U+FF11_fullwidth_digit_one */
+        RAW("[1e\xe5]"),                    /* n_number_real_with_invalid_utf8_after_e */
+        RAW("{1:1}"),                       /* n_object_non_string_key */
+        RAW("{\"x\"::\"b\"}"),              /* n_object_double_colon */
+        RAW("{\"a\":\"b\"}/**/"),           /* n_object_trailing_comment */
+        RAW("{\"a\": true} \"x\""),         /* n_structure_object_with_trailing_garbage */
+        RAW("[\"\\a\"]"),                   /* n_string_invalid_backslash_esc */
+        RAW("[\"\\u00A\"]"),                /* n_string_incomplete_escaped_character */
+        RAW("[\"\\uD800\\u1\"]"),           /* n_string_1_surrogate_then_escape_u1 */
+        RAW("['single quote']"),            /* n_string_single_quote */
+        RAW("[\"\\"),                       /* n_string_start_escape_unclosed */
+        RAW("[\0]"),                        /* n_structure_null-byte-outside-string */
+        RAW("[\f]"),                        /* n_structure_whitespace_formfeed */
+        RAW("[\xe2\x81\xa0]"),              /* n_structure_U+2060_word_joined */
+        RAW("\xef\xbb\xbf{}"),              /* i_structure_UTF-8_BOM_empty_object (rejected) */
+    };
+    for (size_t i = 0; i < sizeof(must_reject) / sizeof(must_reject[0]); ++i) {
+        JsonDoc* d = json_parse(must_reject[i].text, must_reject[i].len);
+        if (d) printf("       accepted case #%u\n", (unsigned)i);
+        json_free(d);
+        EXPECT_TRUE(d == NULL, "JSONTestSuite n_ case rejected");
+    }
+
+    static const RawInput must_accept[] = {
+        RAW("[0e1]"), RAW("[0E+1]"), RAW("[-0]"), RAW("[1E22]"),    /* y_number_* */
+        RAW("[123e-10000000]"),             /* y_number_very_big_negative_exponent... */
+        RAW("[1.5e+9999]"),                 /* i_number_huge_exp (lexeme kept, never converted) */
+        RAW(" [] "),                        /* y_structure_whitespace_array */
+        RAW("[\"a\"]\n"),                   /* y_structure_trailing_newline */
+        RAW("{\"a\":\"b\",\"a\":\"c\"}"),   /* y_object_duplicated_key */
+        RAW("{\"\":0}"),                    /* y_object_empty_key */
+        RAW("[\"a\x7f\"]"),                 /* y_string_with_del_character */
+        RAW("[\"\xef\xbf\xbf\"]"),          /* y_string_nonCharacterInUTF-8_U+FFFF */
+        RAW("[\"\\uFFFE\"]"),               /* y_string_unicode_U+FFFE_nonchar */
+        RAW("-0.1"), RAW("\"asd\""), RAW("null"),                   /* y_structure_lonely_* */
+    };
+    for (size_t i = 0; i < sizeof(must_accept) / sizeof(must_accept[0]); ++i) {
+        JsonDoc* d = json_parse(must_accept[i].text, must_accept[i].len);
+        if (!d) printf("       rejected case #%u\n", (unsigned)i);
+        json_free(d);
+        EXPECT_TRUE(d != NULL, "JSONTestSuite y_ case accepted");
+    }
+
+    /* y_string_allowed_escapes: every escape the grammar allows, decoded */
+    JsonDoc* d = parse_str("[\"\\\"\\\\\\/\\b\\f\\n\\r\\t\"]");
+    const JsonValue* root = json_root(d);
+    EXPECT_TRUE(root && root->child && str_eq(json_string(root->child), "\"\\/\b\f\n\r\t"),
+                "All simple escapes decoded");
+    json_free(d);
+
+    /* y_string_surrogates_U+1D11E with lowercase hex: U+1D11E as 4-byte UTF-8 */
+    d = parse_str("\"\\uD834\\uDd1e\"");
+    EXPECT_TRUE(d && str_eq(json_string(json_root(d)), "\xf0\x9d\x84\x9e"),
+                "Surrogate pair with mixed-case hex decoded");
+    json_free(d);
+
+    /* n_structure_100000_opening_arrays: refused at the depth limit, no stack exhaustion */
+    enum { DEEP = 100000 };
+    char* deep = (char*)malloc(DEEP);
+    EXPECT_TRUE(deep != NULL, "Allocation for the deep-nesting case");
+    memset(deep, '[', DEEP);
+    d = json_parse(deep, DEEP);
+    free(deep);
+    EXPECT_TRUE(d == NULL, "100000 opening brackets rejected");
+}
+
 /* Large documents span several arena blocks */
 static void test_large_document(void) {
     enum { COUNT = 20000 };
@@ -262,6 +359,7 @@ int main(void) {
     test_strings();
     test_containers();
     test_depth_limit();
+    test_jsontestsuite_cases();
     test_large_document();
     test_restic_shapes();
 
