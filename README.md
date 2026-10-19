@@ -120,7 +120,7 @@ The plugin never auto-creates or modifies `restic_plugin.ini` at runtime. On eve
 ### How `restic.exe` Is Located
 
 When executing a command, the plugin searches for `restic.exe` in this order:
-1. The path configured in `ResticPath=` under `[Settings]` (absolute path, or relative to the directory containing `restic_plugin.ini`).
+1. The path configured in `ResticPath=` under `[Settings]` (absolute path, or relative to the plugin directory).
 2. `<plugin_dir>\restic.exe` (next to the plugin DLL).
 3. The system `PATH` environment variable *(for security against working-directory hijacking, the process current directory is never searched)*.
 
