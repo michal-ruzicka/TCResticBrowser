@@ -7,6 +7,9 @@
  *    file properties ("Details" tab).
  */
 
+/* UTF-8 source: the copyright notice below contains non-ASCII characters */
+#pragma code_page(65001)
+
 #include <winver.h>
 #include "version.h"
 
@@ -35,7 +38,7 @@ BEGIN
             VALUE "FileDescription",  "Restic Backup Browser - Total Commander File System Plugin (WFX)\0"
             VALUE "FileVersion",      RESTIC_WFX_VERSION_STR "\0"
             VALUE "InternalName",     RESTIC_WFX_FILE_NAME "\0"
-            VALUE "LegalCopyright",   "Copyright (c) 2026 Pietro Partescano. Licensed under the MIT License.\0"
+            VALUE "LegalCopyright",   "Copyright (c) 2026 Pietro Partescano, 2026 Michal Růžička. Licensed under the MIT License.\0"
             VALUE "OriginalFilename", RESTIC_WFX_FILE_NAME "\0"
             VALUE "ProductName",      "Restic WFX Plugin for Total Commander\0"
             VALUE "ProductVersion",   RESTIC_WFX_PRODUCT_VER "\0"
