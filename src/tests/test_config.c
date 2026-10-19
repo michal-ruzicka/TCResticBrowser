@@ -472,10 +472,16 @@ static void test_missing_ini_is_harmless(void) {
     EXPECT_TRUE(RemoveDirectoryW(plugin_dir), "Plugin directory is still empty (no INI auto-created)");
     EXPECT_TRUE(RemoveDirectoryW(fallback_dir), "Fallback directory is still empty (no INI auto-created)");
 
-    /* Verify that the sample restic_plugin.ini staged in build\ by the build system is valid and all-commented */
+    /* Verify that the sample restic_plugin.ini the build stages next to this test is valid and all-commented */
+    WCHAR sample_ini[MAX_PATH];
+    DWORD n = GetModuleFileNameW(NULL, sample_ini, MAX_PATH);
+    WCHAR* slash = (n > 0 && n < MAX_PATH) ? wcsrchr(sample_ini, L'\\') : NULL;
+    EXPECT_TRUE(slash != NULL, "Directory of the test executable is known");
+    *slash = L'\0';
+    wcscat_s(sample_ini, MAX_PATH, L"\\restic_plugin.ini");
     ResticConfig sample_cfg;
-    EXPECT_TRUE(config_load_from_file(L"build\\restic_plugin.ini", &sample_cfg) && sample_cfg.repo_count == 0,
-                "Staged build\\restic_plugin.ini template exists and has all repositories commented out");
+    EXPECT_TRUE(config_load_from_file(sample_ini, &sample_cfg) && sample_cfg.repo_count == 0,
+                "Staged restic_plugin.ini template exists and has all repositories commented out");
     config_free(&sample_cfg);
 
     FsInitW(0, NULL, NULL, NULL);

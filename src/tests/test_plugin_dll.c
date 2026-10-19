@@ -1,7 +1,10 @@
 /*
  * Black-box smoke test of the built plugin DLL: it is loaded the way Total Commander loads it
  * (LoadLibrary + GetProcAddress) and driven through the exported WFX entry points only.
- * Requires build\restic.wfx64 (skipped when absent, e.g. in AddressSanitizer test runs).
+ * Expects the plugin (restic.wfx64 or restic.wfx, matching this test's bitness) and the staged
+ * pluginst.inf in the directory of this executable, where the build puts them; skipped when the
+ * plugin is absent, e.g. in AddressSanitizer test runs. The live tests read tmp\ relative to the
+ * current directory, which the build sets to the repository root.
  */
 #ifndef UNICODE
 #define UNICODE
@@ -15,7 +18,9 @@
 #include <wchar.h>
 #include "version.h"
 
-#define PLUGIN_DLL L"build\\restic.wfx64"
+/* Full paths of the built plugin and the staged pluginst.inf next to this executable */
+static WCHAR g_plugin_dll[MAX_PATH];
+static WCHAR g_pluginst_inf[MAX_PATH];
 
 static int g_tests_run    = 0;
 static int g_tests_failed = 0;
@@ -112,8 +117,8 @@ static BOOL write_file(const WCHAR* path, const char* text) {
 static BOOL load_plugin_copy(const WCHAR* dir, Plugin* p) {
     WCHAR dest[MAX_PATH];
     memset(p, 0, sizeof(*p));
-    swprintf_s(dest, MAX_PATH, L"%ls\\restic.wfx64", dir);
-    if (!CopyFileW(PLUGIN_DLL, dest, FALSE)) return FALSE;
+    swprintf_s(dest, MAX_PATH, L"%ls\\" RESTIC_WFX_FILE_NAME, dir);
+    if (!CopyFileW(g_plugin_dll, dest, FALSE)) return FALSE;
     p->module = LoadLibraryW(dest);
     if (!p->module) return FALSE;
     p->init_w            = (PFN_InitW)(void*)GetProcAddress(p->module, "FsInitW");
@@ -132,13 +137,13 @@ static void unload_plugin_copy(Plugin* p, const WCHAR* dir) {
     WCHAR dest[MAX_PATH];
     if (p->module) FreeLibrary(p->module);
     p->module = NULL;
-    swprintf_s(dest, MAX_PATH, L"%ls\\restic.wfx64", dir);
+    swprintf_s(dest, MAX_PATH, L"%ls\\" RESTIC_WFX_FILE_NAME, dir);
     DeleteFileW(dest);
 }
 
 /* Exact export surface: read-only + file extraction entry points present, write/delete/move absent */
 static void test_export_surface(void) {
-    HMODULE m = LoadLibraryW(PLUGIN_DLL);
+    HMODULE m = LoadLibraryW(g_plugin_dll);
     EXPECT_TRUE(m != NULL, "Plugin DLL loads");
 
     const char* required[] = {"FsInit", "FsInitW", "FsFindFirst", "FsFindFirstW", "FsFindNext",
@@ -196,14 +201,14 @@ static void test_export_surface(void) {
     }
     EXPECT_TRUE(foundFixed, "VS_FIXEDFILEINFO matches RESTIC_WFX_VERSION_CSV and VFT_DLL");
 
-    /* Verify staged build\pluginst.inf manifest matches Total Commander auto-install specification */
+    /* Verify the staged pluginst.inf manifest matches Total Commander auto-install specification */
     WCHAR infType[32] = {0}, infFile[64] = {0}, infVer[32] = {0};
-    GetPrivateProfileStringW(L"plugininstall", L"type", L"", infType, _countof(infType), L"build\\pluginst.inf");
-    GetPrivateProfileStringW(L"plugininstall", L"file", L"", infFile, _countof(infFile), L"build\\pluginst.inf");
-    GetPrivateProfileStringW(L"plugininstall", L"version", L"", infVer, _countof(infVer), L"build\\pluginst.inf");
-    EXPECT_TRUE(wcscmp(infType, L"wfx") == 0 && wcscmp(infFile, L"restic.wfx64") == 0 &&
+    GetPrivateProfileStringW(L"plugininstall", L"type", L"", infType, _countof(infType), g_pluginst_inf);
+    GetPrivateProfileStringW(L"plugininstall", L"file", L"", infFile, _countof(infFile), g_pluginst_inf);
+    GetPrivateProfileStringW(L"plugininstall", L"version", L"", infVer, _countof(infVer), g_pluginst_inf);
+    EXPECT_TRUE(wcscmp(infType, L"wfx") == 0 && wcscmp(infFile, L"restic.wfx") == 0 &&
                 wcscmp(infVer, L"" RESTIC_WFX_PRODUCT_VER) == 0,
-                "Staged build\\pluginst.inf has valid [plugininstall] type, file, and version");
+                "Staged pluginst.inf has valid [plugininstall] type, file, and version");
 
     FreeLibrary(m);
 }
@@ -994,10 +999,26 @@ static void test_live_end_to_end_navigation(void) {
     RemoveDirectoryW(dir);
 }
 
+/* Fills `out` with `name` in the directory of this executable */
+static BOOL path_next_to_exe(const WCHAR* name, WCHAR* out, size_t cap) {
+    WCHAR exe[MAX_PATH];
+    DWORD n = GetModuleFileNameW(NULL, exe, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return FALSE;
+    WCHAR* slash = wcsrchr(exe, L'\\');
+    if (!slash) return FALSE;
+    *slash = L'\0';
+    return swprintf_s(out, cap, L"%ls\\%ls", exe, name) > 0;
+}
+
 int main(void) {
     printf("Running Restic WFX plugin DLL smoke tests...\n");
-    if (GetFileAttributesW(PLUGIN_DLL) == INVALID_FILE_ATTRIBUTES) {
-        printf("[SKIP] build\\restic.wfx64 not found: DLL smoke tests skipped.\n");
+    if (!path_next_to_exe(L"" RESTIC_WFX_FILE_NAME, g_plugin_dll, MAX_PATH) ||
+        !path_next_to_exe(L"pluginst.inf", g_pluginst_inf, MAX_PATH)) {
+        printf("[FAIL] Cannot determine the directory of this executable.\n");
+        return 1;
+    }
+    if (GetFileAttributesW(g_plugin_dll) == INVALID_FILE_ATTRIBUTES) {
+        printf("[SKIP] %ls not found: DLL smoke tests skipped.\n", g_plugin_dll);
         return 0;
     }
 

@@ -1,5 +1,6 @@
 # Build output
 /build/
+/dist/
 
 # Live-test inputs and fixtures (tmp\restic.exe, tmp\test_fixture\)
 /tmp/

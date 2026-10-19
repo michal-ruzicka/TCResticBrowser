@@ -1,5 +1,5 @@
 /*
- * Windows Resource Script for Restic Total Commander WFX Plugin (restic.wfx64)
+ * Windows Resource Script for Restic Total Commander WFX Plugin (restic.wfx / restic.wfx64)
  *
  * 1. Icon resource (ID 1): Total Commander loads the FIRST icon resource (by index)
  *    found in the WFX DLL and displays it next to "Restic Backups" in Network Neighborhood.
@@ -10,7 +10,7 @@
 #include <winver.h>
 #include "version.h"
 
-1 ICON "logo\\restic_wfx.ico"
+1 ICON "restic_wfx.ico"
 
 #ifdef _DEBUG
 #define VER_FILEFLAGS VS_FF_DEBUG
@@ -34,9 +34,9 @@ BEGIN
             VALUE "CompanyName",      "Pietro Partescano\0"
             VALUE "FileDescription",  "Restic Backup Browser - Total Commander File System Plugin (WFX)\0"
             VALUE "FileVersion",      RESTIC_WFX_VERSION_STR "\0"
-            VALUE "InternalName",     "restic.wfx64\0"
+            VALUE "InternalName",     RESTIC_WFX_FILE_NAME "\0"
             VALUE "LegalCopyright",   "Copyright (c) 2026 Pietro Partescano. Licensed under the MIT License.\0"
-            VALUE "OriginalFilename", "restic.wfx64\0"
+            VALUE "OriginalFilename", RESTIC_WFX_FILE_NAME "\0"
             VALUE "ProductName",      "Restic WFX Plugin for Total Commander\0"
             VALUE "ProductVersion",   RESTIC_WFX_PRODUCT_VER "\0"
         END

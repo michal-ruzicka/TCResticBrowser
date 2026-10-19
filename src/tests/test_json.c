@@ -2,8 +2,8 @@
  * Unit tests for the minimal JSON reader (src/json.c).
  *
  * Portable C11 with no Win32 dependency, like the reader itself: it builds with MSVC as part of
- * `nmake test` and equally with any hosted C compiler, e.g.
- *   gcc -std=c11 -Iinclude -fsanitize=address,undefined tests/test_json.c src/json.c
+ * build.cmd and equally with any hosted C compiler, e.g. from src/:
+ *   gcc -std=c11 -I. -fsanitize=address,undefined tests/test_json.c json.c
  */
 #if defined(_MSC_VER) && defined(_DEBUG) && !defined(__SANITIZE_ADDRESS__)
 #define _CRTDBG_MAP_ALLOC
