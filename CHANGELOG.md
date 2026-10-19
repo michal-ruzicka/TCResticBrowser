@@ -15,6 +15,9 @@ upstream 1.x line.
 - **32-bit plugin.** The release ZIP now contains `TCResticBrowser.wfx` for
   32-bit Total Commander next to `TCResticBrowser.wfx64`; the auto-installer
   picks the right one.
+- **Configurable root folder name.** `RootName=` under `[Settings]` names the
+  plugin's folder in Network Neighborhood; *Restic Backups* stays the
+  default. Total Commander reads it only while installing the plugin.
 - **Reproducible builds.** The same sources and pinned toolchain produce a
   byte-identical ZIP (`/Brepro`, `/BREPRO`, `/pathmap`, pinned MSVC toolset
   and Windows SDK, ZIP timestamps from `release-date=` in `pluginst.inf`).

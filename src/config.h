@@ -6,6 +6,7 @@
 #define CONFIG_INI_FILENAME       L"TCResticBrowser.ini"
 #define CONFIG_USER_SUBDIR        L"GHISLER"   /* Total Commander's settings folder under %APPDATA% */
 #define CONFIG_DEFAULT_RESTIC_EXE L"restic.exe"
+#define CONFIG_DEFAULT_ROOT_NAME  L"Restic Backups"  /* Network Neighborhood name without [Settings] RootName */
 #define CONFIG_MAX_PATH           1024
 #define CONFIG_MAX_INI_BYTES      (4 * 1024 * 1024)  /* A larger TCResticBrowser.ini is not read */
 
@@ -23,6 +24,7 @@ typedef struct {
 typedef struct {
     WCHAR ini_path[CONFIG_MAX_PATH];     /* Full path to the active TCResticBrowser.ini */
     WCHAR restic_path[CONFIG_MAX_PATH];  /* Resolved path or command for restic.exe */
+    WCHAR root_name[MAX_PATH];           /* [Settings] RootName, or CONFIG_DEFAULT_ROOT_NAME */
     ResticRepoEntry* repos;              /* Heap-allocated array of repository entries */
     size_t repo_count;                   /* Number of repositories in repos */
 } ResticConfig;
@@ -69,7 +71,9 @@ BOOL config_resolve_ini_path(WCHAR* out_path, size_t out_capacity);
 BOOL config_resolve_restic_path(const WCHAR* ini_path, WCHAR* out_path, size_t out_capacity);
 
 /**
- * Loads configuration and repository list from a specific INI file path.
+ * Loads configuration and repository list from a specific INI file path. root_name is always
+ * filled: with a valid [Settings] RootName, otherwise (also when the file is missing) with
+ * CONFIG_DEFAULT_ROOT_NAME.
  * Caller must release allocated resources via config_free().
  */
 BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config);

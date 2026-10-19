@@ -413,6 +413,75 @@ static void test_ini_encodings_and_syntax(void) {
     RemoveDirectoryW(plugin_dir);
 }
 
+/* Test 6: [Settings] RootName and the name FsGetDefRootName reports */
+static void test_root_name(void) {
+    WCHAR plugin_dir[CONFIG_MAX_PATH] = {0}, ini_path[CONFIG_MAX_PATH] = {0};
+    make_temp_dir(L"restic_root_plug", plugin_dir, CONFIG_MAX_PATH);
+    swprintf_s(ini_path, CONFIG_MAX_PATH, L"%ls\\%ls", plugin_dir, CONFIG_INI_FILENAME);
+    DeleteFileW(ini_path);
+    config_set_plugin_dir(plugin_dir);
+
+    ResticConfig cfg;
+    char ansi[MAX_PATH];
+    EXPECT_TRUE(!config_load(&cfg), "No INI");
+    EXPECT_WSTR_EQ(cfg.root_name, CONFIG_DEFAULT_ROOT_NAME, "Default root name without an INI");
+    config_free(&cfg);
+    FsGetDefRootName(ansi, (int)sizeof(ansi));
+    EXPECT_TRUE(strcmp(ansi, "Restic Backups") == 0, "FsGetDefRootName default without an INI");
+
+    write_text_file(ini_path, "[Settings]\r\nResticPath=restic.exe\r\n");
+    EXPECT_TRUE(config_load(&cfg), "INI without RootName loads");
+    EXPECT_WSTR_EQ(cfg.root_name, CONFIG_DEFAULT_ROOT_NAME, "Default root name without RootName");
+    config_free(&cfg);
+
+    /* First RootName in [Settings] wins; a RootName line elsewhere is not the setting */
+    write_text_file(ini_path,
+                    "[Repositories]\r\nRootName=D:\\repo\r\n"
+                    "[settings]\r\n  rootname = \"My Backups\" \r\nRootName=Second\r\n");
+    EXPECT_TRUE(config_load(&cfg), "INI with RootName loads");
+    EXPECT_WSTR_EQ(cfg.root_name, L"My Backups", "Configured root name (trimmed, unquoted)");
+    EXPECT_TRUE(cfg.repo_count == 1 && config_find_repo(&cfg, L"RootName") != NULL,
+                "RootName under [Repositories] is an ordinary alias");
+    config_free(&cfg);
+    FsGetDefRootName(ansi, (int)sizeof(ansi));
+    EXPECT_TRUE(strcmp(ansi, "My Backups") == 0, "FsGetDefRootName reports the configured name");
+    char tiny[4];
+    FsGetDefRootName(tiny, (int)sizeof(tiny));
+    EXPECT_TRUE(strcmp(tiny, "Res") == 0, "A name longer than maxlen falls back to the (truncated) default");
+
+    /* Invalid or empty names keep the default; so does a first invalid one followed by a valid one */
+    const char* invalid[] = {
+        "[Settings]\r\nRootName=a\\b\r\n",
+        "[Settings]\r\nRootName=a:b\r\n",
+        "[Settings]\r\nRootName=..\r\n",
+        "[Settings]\r\nRootName=\r\n",
+        "[Settings]\r\nRootName=bad|name\r\nRootName=Good\r\n",
+    };
+    for (size_t i = 0; i < _countof(invalid); ++i) {
+        write_text_file(ini_path, invalid[i]);
+        EXPECT_TRUE(config_load(&cfg), "INI with an invalid RootName loads");
+        EXPECT_WSTR_EQ(cfg.root_name, CONFIG_DEFAULT_ROOT_NAME, "Invalid RootName keeps the default");
+        config_free(&cfg);
+    }
+
+    /* A non-ASCII name: reported as is when the ANSI code page has it, otherwise the default */
+    EXPECT_TRUE(write_encoded(ini_path, L"[Settings]\nRootName=Z\u00e1lohy \u65e5\u672c\n", ENC_UTF8), "Write UTF-8 INI");
+    EXPECT_TRUE(config_load(&cfg), "UTF-8 INI with RootName loads");
+    EXPECT_WSTR_EQ(cfg.root_name, L"Z\u00e1lohy \u65e5\u672c", "Non-ASCII root name decoded");
+    config_free(&cfg);
+    char expected[MAX_PATH];
+    BOOL lossy = FALSE;
+    BOOL utf8_acp = (GetACP() == CP_UTF8);
+    WideCharToMultiByte(CP_ACP, utf8_acp ? 0 : WC_NO_BEST_FIT_CHARS, L"Z\u00e1lohy \u65e5\u672c", -1,
+                        expected, (int)sizeof(expected), NULL, utf8_acp ? NULL : &lossy);
+    FsGetDefRootName(ansi, (int)sizeof(ansi));
+    EXPECT_TRUE(strcmp(ansi, lossy ? "Restic Backups" : expected) == 0,
+                "Name not representable in the ANSI code page falls back to the default");
+
+    DeleteFileW(ini_path);
+    RemoveDirectoryW(plugin_dir);
+}
+
 /* Helper: reads the current value of an environment variable into a heap string (or NULL) */
 static WCHAR* dup_env(const WCHAR* name) {
     DWORD need = GetEnvironmentVariableW(name, NULL, 0);
@@ -631,6 +700,7 @@ static void test_missing_ini_is_harmless(void) {
     ResticConfig sample_cfg;
     EXPECT_TRUE(config_load_from_file(sample_ini, &sample_cfg) && sample_cfg.repo_count == 0,
                 "Staged TCResticBrowser.ini template exists and has all repositories commented out");
+    EXPECT_WSTR_EQ(sample_cfg.root_name, CONFIG_DEFAULT_ROOT_NAME, "Sample INI leaves RootName commented out");
     config_free(&sample_cfg);
 
     FsInitW(0, NULL, NULL, NULL);
@@ -729,6 +799,7 @@ int main(void) {
     test_restic_binary_resolution();
     test_repositories_parsing_and_wfx_root();
     test_ini_encodings_and_syntax();
+    test_root_name();
     test_restic_lookup_ignores_current_directory();
     test_large_repository_list();
     test_wfx_routing_and_callbacks();

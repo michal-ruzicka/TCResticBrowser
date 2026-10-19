@@ -327,6 +327,15 @@ static void test_user_ini_overrides_plugin_ini(void) {
     EXPECT_TRUE(!p.find_next_w(h, &fd), "Plugin-directory INI is not merged in");
     p.find_close(h);
 
+    /* RootName from the active INI is what the installer gets from FsGetDefRootName */
+    char root_name[64] = {0};
+    p.get_root_name(root_name, (int)sizeof(root_name));
+    EXPECT_TRUE(strcmp(root_name, "Restic Backups") == 0, "Default root name without RootName");
+    EXPECT_TRUE(write_file(user_ini, "[Settings]\r\nRootName=Personal Backups\r\n[Repositories]\r\nPersonal=D:\\repo\r\n"),
+                "Write per-user INI with RootName");
+    p.get_root_name(root_name, (int)sizeof(root_name));
+    EXPECT_TRUE(strcmp(root_name, "Personal Backups") == 0, "Configured RootName reported by FsGetDefRootName");
+
     unload_plugin_copy(&p, dir);
     DeleteFileW(user_ini);
     DeleteFileW(plug_ini);

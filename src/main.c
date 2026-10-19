@@ -138,6 +138,14 @@ static void clear_password_session(void) {
     ReleaseSRWLockExclusive(&g_SessionLock);
 }
 
+/* The Network Neighborhood root name: [Settings] RootName, or CONFIG_DEFAULT_ROOT_NAME */
+static void load_root_name(WCHAR* out, size_t capacity) {
+    ResticConfig cfg;
+    config_load(&cfg);
+    wcsncpy_s(out, capacity, cfg.root_name, _TRUNCATE);
+    config_free(&cfg);
+}
+
 /* Logs an important error and displays an OK message dialog in Total Commander */
 static void report_plugin_error(const WCHAR* repo_alias, const WCHAR* detail) {
     WCHAR msg[1024]; /* alias (<260) + Restic message (<512) + decoration always fits; _TRUNCATE anyway */
@@ -164,7 +172,9 @@ static void report_plugin_error(const WCHAR* repo_alias, const WCHAR* detail) {
     }
     if (g_RequestProc) {
         WCHAR unused[4] = {0};
-        g_RequestProc(g_PluginNr, RT_MsgOK, L"Restic Backups", msg, unused, _countof(unused));
+        WCHAR title[MAX_PATH];
+        load_root_name(title, _countof(title));
+        g_RequestProc(g_PluginNr, RT_MsgOK, title, msg, unused, _countof(unused));
     }
 }
 
@@ -468,10 +478,27 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
     return TRUE;
 }
 
+/*
+ * Total Commander calls this only while installing the plugin (without FsInitW) and stores the
+ * answer in wincmd.ini, so a later change of RootName needs the plugin to be added again. The
+ * API is ANSI: a configured name the ANSI code page cannot represent, or one longer than maxlen,
+ * yields the default name instead of question marks or a truncated name.
+ */
 void __stdcall FsGetDefRootName(char* DefRootName, int maxlen) {
-    if (DefRootName != NULL && maxlen > 0) {
-        strncpy_s(DefRootName, (size_t)maxlen, "Restic Backups", _TRUNCATE);
+    if (DefRootName == NULL || maxlen <= 0) return;
+
+    WCHAR name[MAX_PATH];
+    load_root_name(name, _countof(name));
+
+    char ansi[MAX_PATH * 4];
+    BOOL lossy = FALSE;
+    BOOL utf8_acp = (GetACP() == CP_UTF8); /* lpUsedDefaultChar must be NULL for CP_UTF8 */
+    int n = WideCharToMultiByte(CP_ACP, utf8_acp ? 0 : WC_NO_BEST_FIT_CHARS, name, -1,
+                                ansi, (int)sizeof(ansi), NULL, utf8_acp ? NULL : &lossy);
+    if (n <= 0 || lossy || n > maxlen) {
+        WideCharToMultiByte(CP_ACP, 0, CONFIG_DEFAULT_ROOT_NAME, -1, ansi, (int)sizeof(ansi), NULL, NULL);
     }
+    strncpy_s(DefRootName, (size_t)maxlen, ansi, _TRUNCATE);
 }
 
 int __stdcall FsInit(

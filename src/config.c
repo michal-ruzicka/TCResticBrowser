@@ -472,6 +472,7 @@ static BOOL upsert_repo_entry(
 BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
     if (!out_config) return FALSE;
     memset(out_config, 0, sizeof(ResticConfig));
+    wcsncpy_s(out_config->root_name, MAX_PATH, CONFIG_DEFAULT_ROOT_NAME, _TRUNCATE);
 
     if (!ini_path || ini_path[0] == L'\0') {
         config_resolve_restic_path(NULL, out_config->restic_path, CONFIG_MAX_PATH);
@@ -495,9 +496,18 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
 
     /* Every [Repositories] line is "<Alias>=<Target>"; a repeated alias updates the earlier entry */
     size_t repo_capacity = 0;
+    BOOL root_name_seen = FALSE;
     IniReader reader = {ini_text, NULL};
     WCHAR *alias = NULL, *target = NULL;
     while (ini_next_entry(&reader, &alias, &target)) {
+        if (ini_in_section(&reader, L"Settings") && _wcsicmp(alias, L"RootName") == 0) {
+            /* First occurrence wins; an empty, over-long or invalid name keeps the default */
+            if (!root_name_seen && is_valid_alias(target) && wcslen(target) < MAX_PATH) {
+                wcsncpy_s(out_config->root_name, MAX_PATH, target, _TRUNCATE);
+            }
+            root_name_seen = TRUE;
+            continue;
+        }
         if (!ini_in_section(&reader, L"Repositories")) {
             continue;
         }

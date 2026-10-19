@@ -33,7 +33,8 @@
 that lets you browse [Restic](https://restic.net) backup repositories and
 copy files out of their snapshots, right in Total Commander's panels.**
 
-The plugin adds `\\\Restic Backups` to Network Neighborhood. Its top level
+The plugin adds `\\\Restic Backups` to Network Neighborhood (the name is
+[configurable](#root-folder-name)). Its top level
 lists the repositories configured in `TCResticBrowser.ini`; inside each one you
 find its snapshots, and inside a snapshot the backed-up directory tree.
 Everything is strictly read-only: the plugin runs the official `restic.exe`
@@ -96,7 +97,9 @@ auto-installer:**
    plugin — **confirm** (default folder: `plugins\wfx\TCResticBrowser`).
 4. Copy `TCResticBrowser.ini` from the plugin folder to
    `%APPDATA%\GHISLER\TCResticBrowser.ini` and add your repositories to the
-   copy (see [Configuration](#configuration)).
+   copy (see [Configuration](#configuration)). For a different folder name
+   than *Restic Backups*, see [Root Folder Name](#root-folder-name): it is
+   read only while the plugin is being installed.
 5. Open **Network Neighborhood** (`\\\` in the command line, or the `\`
    drive button → Network) and enter **Restic Backups**.
 
@@ -200,6 +203,18 @@ Commander. Back it up before installing a new version of the plugin, as the
 installation replaces it with the sample. A `%APPDATA%\GHISLER\TCResticBrowser.ini`
 on the computer you run it on would take precedence.
 
+#### Root Folder Name
+
+`RootName=` under `[Settings]` sets the name of the plugin's folder in
+Network Neighborhood; without it (or when it is empty or not a valid folder
+name) the folder is called **Restic Backups**. Total Commander asks the
+plugin for this name only while installing it and then remembers it, so a
+later change takes effect only after removing the plugin under
+**Configuration → Options → Plugins → File system plugins** and installing
+it again. The name has to be representable in the Windows ANSI code page,
+because Total Commander asks for it through an ANSI function; otherwise the
+default is used.
+
 #### How `restic.exe` Is Located
 
 When executing a command, the plugin searches for `restic.exe` in this order:
@@ -219,10 +234,13 @@ When executing a command, the plugin searches for `restic.exe` in this order:
 ; If omitted or commented out, the plugin checks <plugin_dir>\restic.exe first
 ; and then searches the system PATH.
 ResticPath=C:\Tools\restic\restic.exe
+; Optional name of the plugin's folder in Network Neighborhood
+; (default: Restic Backups; read only when the plugin is installed).
+RootName=Backups
 
 [Repositories]
 ; Format: <Alias>=<Repository Path or URL>
-; Each <Alias> is displayed as a top-level folder inside "\\\Restic Backups\".
+; Each <Alias> is displayed as a top-level folder inside "\\\Backups\".
 
 ; 1. Local disk repository
 LocalDocs=D:\Backups\restic_docs
