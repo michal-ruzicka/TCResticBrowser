@@ -93,7 +93,7 @@ auto-installer:**
 1. **Download** `TCResticBrowser.vX.Y.Z.zip` from the [**latest release**](https://github.com/michal-ruzicka/TCResticBrowser/releases).
 2. In Total Commander, **navigate to the ZIP** file and press **Enter**.
 3. TC detects the bundled `pluginst.inf` and asks whether to install the
-   plugin — **confirm** (default folder: `plugins\wfx\restic`).
+   plugin — **confirm** (default folder: `plugins\wfx\TCResticBrowser`).
 4. Copy `restic_plugin.ini` from the plugin folder to
    `%APPDATA%\GHISLER\restic_plugin.ini` and add your repositories to the
    copy (see [Configuration](#configuration)).
@@ -101,8 +101,8 @@ auto-installer:**
    drive button → Network) and enter **Restic Backups**.
 
 If you prefer to install manually, unzip the archive into a persistent
-folder (for example `C:\Tools\TCResticBrowser\`) and add `restic.wfx`
-(32-bit TC) or `restic.wfx64` (64-bit TC) under **Configuration →
+folder (for example `C:\Tools\TCResticBrowser\`) and add `TCResticBrowser.wfx`
+(32-bit TC) or `TCResticBrowser.wfx64` (64-bit TC) under **Configuration →
 Options → Plugins → File system plugins → Configure → Add**.
 
 > Upgrading replaces the files in the plugin folder, including the sample

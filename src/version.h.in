@@ -14,7 +14,7 @@
 #define RESTIC_WFX_VERSION_STR    "@RESTIC_WFX_VER_MAJOR@.@RESTIC_WFX_VER_MINOR@.@RESTIC_WFX_VER_PATCH@.0"
 #define RESTIC_WFX_PRODUCT_VER    "@RESTIC_WFX_VERSION@"  /* as in pluginst.inf, e.g. "2.0.0-devel" */
 
-/* restic.wfx (32-bit) or restic.wfx64 (64-bit): the name Total Commander requires per bitness */
+/* TCResticBrowser.wfx (32-bit) or TCResticBrowser.wfx64 (64-bit): the name Total Commander requires per bitness */
 #define RESTIC_WFX_FILE_NAME      "@RESTIC_WFX_FILE_NAME@"
 
 #endif /* RESTIC_WFX_VERSION_H */

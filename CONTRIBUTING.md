@@ -301,14 +301,14 @@ appears at 16 px in Network Neighborhood.
 
 ## Architecture
 
-A single artifact: the plugin DLL (`restic.wfx` 32-bit / `restic.wfx64`
+A single artifact: the plugin DLL (`TCResticBrowser.wfx` 32-bit / `TCResticBrowser.wfx64`
 64-bit), a Total Commander **File System plugin** (WFX). The DLL does no
 repository access itself; it runs the official `restic.exe` as a hidden
 child process and parses its JSON output.
 
 ```
 Total Commander process
-└── restic.wfx[64]
+└── TCResticBrowser.wfx[64]
     ├── FsFindFirstW / FsFindNextW   \                     -> aliases from restic_plugin.ini
     │                                \<alias>              -> restic snapshots --json
     │                                \<alias>\<snapshot>\… -> restic ls --json (one level)

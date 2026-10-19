@@ -34,7 +34,7 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 8)
 else()
     set(RESTIC_WFX_SUFFIX ".wfx")
 endif()
-set(RESTIC_WFX_FILE_NAME "restic${RESTIC_WFX_SUFFIX}")
+set(RESTIC_WFX_FILE_NAME "TCResticBrowser${RESTIC_WFX_SUFFIX}")
 
 configure_file(version.h.in version.h @ONLY)
 
@@ -104,7 +104,7 @@ add_library(restic_core OBJECT
 )
 
 # ---------------------------------------------------------------------------
-# Plugin DLL: restic.wfx (32-bit) or restic.wfx64 (64-bit)
+# Plugin DLL: TCResticBrowser.wfx (32-bit) or TCResticBrowser.wfx64 (64-bit)
 #
 # Not built under AddressSanitizer: Total Commander never loads an
 # instrumented DLL, so the ASan run covers the unit tests only.
@@ -117,6 +117,7 @@ if(NOT RESTIC_WFX_ASAN)
         restic_wfx.rc   # plugin icon (Network Neighborhood) + VERSIONINFO
     )
     set_target_properties(restic PROPERTIES
+        OUTPUT_NAME "TCResticBrowser"
         PREFIX ""
         SUFFIX "${RESTIC_WFX_SUFFIX}"
     )

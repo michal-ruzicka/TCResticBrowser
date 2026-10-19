@@ -20,8 +20,8 @@ REM   src\                              (all source files — committed)
 REM   tmp\restic.exe                    (optional, git-ignored: enables the
 REM                                      live tests against a real restic)
 REM   build\stage\                      (transient staging for ZIP contents)
-REM     restic.wfx                      (32-bit plugin DLL)
-REM     restic.wfx64                    (64-bit plugin DLL)
+REM     TCResticBrowser.wfx             (32-bit plugin DLL)
+REM     TCResticBrowser.wfx64           (64-bit plugin DLL)
 REM     sha256sums.sha256               (SHA-256 of every other staged file)
 REM     pluginst.inf                    (TC auto-installer metadata)
 REM     restic_plugin.ini               (sample config)
@@ -143,8 +143,8 @@ if exist "%STAGE%" rmdir /S /Q "%STAGE%"
 mkdir "%STAGE%"
 if not exist "%OUT%" mkdir "%OUT%"
 
-copy /Y "%BUILD%\x64\restic.wfx64"   "%STAGE%\"             >nul
-copy /Y "%BUILD%\x86\restic.wfx"     "%STAGE%\"             >nul
+copy /Y "%BUILD%\x64\TCResticBrowser.wfx64" "%STAGE%\"             >nul
+copy /Y "%BUILD%\x86\TCResticBrowser.wfx"   "%STAGE%\"             >nul
 copy /Y "%SRC%\pluginst.inf"         "%STAGE%\"             >nul
 copy /Y "%SRC%\restic_plugin.ini"    "%STAGE%\"             >nul
 copy /Y "%ROOT%\README.md"           "%STAGE%\"             >nul

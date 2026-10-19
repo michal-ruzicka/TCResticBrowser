@@ -1,7 +1,7 @@
 /*
  * Black-box smoke test of the built plugin DLL: it is loaded the way Total Commander loads it
  * (LoadLibrary + GetProcAddress) and driven through the exported WFX entry points only.
- * Expects the plugin (restic.wfx64 or restic.wfx, matching this test's bitness) and the staged
+ * Expects the plugin (TCResticBrowser.wfx64 or TCResticBrowser.wfx, matching this test's bitness) and the staged
  * pluginst.inf in the directory of this executable, where the build puts them; skipped when the
  * plugin is absent, e.g. in AddressSanitizer test runs. The live tests read tmp\ relative to the
  * current directory, which the build sets to the repository root.
@@ -206,7 +206,7 @@ static void test_export_surface(void) {
     GetPrivateProfileStringW(L"plugininstall", L"type", L"", infType, _countof(infType), g_pluginst_inf);
     GetPrivateProfileStringW(L"plugininstall", L"file", L"", infFile, _countof(infFile), g_pluginst_inf);
     GetPrivateProfileStringW(L"plugininstall", L"version", L"", infVer, _countof(infVer), g_pluginst_inf);
-    EXPECT_TRUE(wcscmp(infType, L"wfx") == 0 && wcscmp(infFile, L"restic.wfx") == 0 &&
+    EXPECT_TRUE(wcscmp(infType, L"wfx") == 0 && wcscmp(infFile, L"TCResticBrowser.wfx") == 0 &&
                 wcscmp(infVer, L"" RESTIC_WFX_PRODUCT_VER) == 0,
                 "Staged pluginst.inf has valid [plugininstall] type, file, and version");
 

@@ -12,8 +12,8 @@ upstream 1.x line.
 
 ### Added
 
-- **32-bit plugin.** The release ZIP now contains `restic.wfx` for 32-bit
-  Total Commander next to `restic.wfx64`; the auto-installer picks the right
+- **32-bit plugin.** The release ZIP now contains `TCResticBrowser.wfx` for
+  32-bit Total Commander next to `TCResticBrowser.wfx64`; the auto-installer picks the right
   one.
 - **Reproducible builds.** The same sources and pinned toolchain produce a
   byte-identical ZIP (`/Brepro`, `/BREPRO`, `/pathmap`, pinned MSVC toolset
@@ -55,6 +55,14 @@ upstream 1.x line.
   versions. The sources are SVG files in `logo\`, including a separate
   version fitted to the 16 px pixel grid; the detailed raster illustration
   they replace was illegible at 16 px and had no editable source.
+- **Plugin files renamed after the project**, like the author's other
+  Total Commander plugins: `restic.wfx`/`restic.wfx64` became
+  `TCResticBrowser.wfx`/`TCResticBrowser.wfx64`, and the auto-installer's
+  default folder is `plugins\wfx\TCResticBrowser` instead of
+  `plugins\wfx\restic`. **Upgrading from 1.x** therefore installs the plugin
+  next to the old one: remove the old `restic` entry under *Configuration →
+  Options → Plugins → File system plugins* and delete its folder, after
+  moving an edited `restic_plugin.ini` from there to `%APPDATA%\GHISLER\`.
 - **Release ZIP** is named `TCResticBrowser.vX.Y.Z.zip` and ships the
   license as `LICENSE.txt`.
 - **Documentation** restructured (README, CONTRIBUTING, this changelog), and
