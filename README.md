@@ -185,7 +185,7 @@ GoogleDrive=rclone:gdrive:Backups/restic_repo
 
 - **Windows 10/11 x64**
 - **MSVC Build Tools (Visual Studio 2022+)** with x64 `cl.exe`, `link.exe`, `rc.exe`, and `nmake.exe` active in your shell environment.
-- **Git** (with submodules initialized: `git submodule update --init --recursive`)
+- **Git**
 - *(Optional)* `tmp\restic.exe` placed in the `tmp\` folder to enable the live end-to-end integration tests (otherwise live tests are gracefully reported as `[SKIP]`).
 
 ### Build Commands
@@ -195,8 +195,8 @@ Using the Git Bash / MSYS2 wrapper (`build.sh`) or directly via `nmake`:
 ```bash
 ./build.sh release       # Build optimized Release DLL (build/restic.wfx64, static CRT /MT) + copy build/restic_plugin.ini
 ./build.sh debug         # Build Debug DLL (build/restic.wfx64, /MTd + CRT debug heap)
-./build.sh test          # Build & run all 3 test suites in Debug mode (with CRT memory-leak verification)
-./build.sh release-test  # Build & run all 3 test suites against the Release build
+./build.sh test          # Build & run all 4 test suites in Debug mode (with CRT memory-leak verification)
+./build.sh release-test  # Build & run all 4 test suites against the Release build
 ./build.sh analyze       # Run MSVC Static Code Analyzer (/analyze) with warnings-as-errors (/W4 /WX)
 ./build.sh asan          # Run unit tests under MSVC AddressSanitizer (/fsanitize=address)
 ./build.sh package       # Clean, build Release, run tests and create build/wfx_restic_<version>_x64.zip
@@ -220,7 +220,6 @@ Build artifacts are generated in `build\`:
 
 ## External Libraries & Acknowledgments
 
-- **[cJSON](https://github.com/DaveGamble/cJSON)** by Dave Gamble — Ultralightweight ANSI C JSON parser, included as a Git submodule under [`cJSON/`](cJSON) and compiled statically with `CJSON_HIDE_SYMBOLS` (**MIT License**).
 - **[Total Commander WFX Plugin SDK](https://www.ghisler.com/plugins.htm)** by Christian Ghisler — File System Plugin interface specification (`include/fsplugin.h`).
 - **[Restic](https://restic.net)** ([github.com/restic/restic](https://github.com/restic/restic)) — Invoked as an external CLI process (`restic.exe`, **BSD 2-Clause License**).
 

@@ -21,6 +21,7 @@ PLUGIN_RES = $(BUILD_DIR)\restic_wfx.res
 TEST_CONFIG_OUT = $(BUILD_DIR)\test_config.exe
 TEST_CLI_OUT    = $(BUILD_DIR)\test_restic_cli.exe
 TEST_DLL_OUT    = $(BUILD_DIR)\test_plugin_dll.exe
+TEST_JSON_OUT   = $(BUILD_DIR)\test_json.exe
 DEF_FILE        = restic_wfx.def
 RC_FILE         = src\restic_wfx.rc
 ICO_FILE        = logo\restic_wfx.ico
@@ -35,7 +36,7 @@ RC   = rc.exe
 
 # Strict pure C11 (/TC /std:c11) compiler flags and security hardening (/GS)
 CFLAGS_COMMON = /nologo /TC /std:c11 /permissive- /W4 /WX /we4013 /GS \
-                /DUNICODE /D_UNICODE /DCJSON_HIDE_SYMBOLS /Iinclude /IcJSON \
+                /DUNICODE /D_UNICODE /Iinclude \
                 /Fo$(BUILD_DIR)\ /Fd$(BUILD_DIR)\vc.pdb
 
 # Linker security hardening (/DYNAMICBASE for ASLR, /NXCOMPAT for DEP)
@@ -67,7 +68,7 @@ LFLAGS_CFG   = $(LFLAGS_CFG) /INCREMENTAL:NO
 
 CFLAGS = $(CFLAGS_COMMON) $(CFLAGS_CFG) $(CFLAGS_EXTRA)
 
-PLUGIN_OBJS = $(BUILD_DIR)\main.obj $(BUILD_DIR)\config.obj $(BUILD_DIR)\restic_cli.obj $(BUILD_DIR)\cJSON.obj
+PLUGIN_OBJS = $(BUILD_DIR)\main.obj $(BUILD_DIR)\config.obj $(BUILD_DIR)\restic_cli.obj $(BUILD_DIR)\json.obj
 
 TEST_CONFIG_OBJS = $(BUILD_DIR)\test_config.obj $(PLUGIN_OBJS)
 TEST_CLI_OBJS    = $(BUILD_DIR)\test_restic_cli.obj $(PLUGIN_OBJS)
@@ -89,11 +90,11 @@ $(BUILD_DIR)\main.obj: $(BUILD_DIR) src\main.c include\fsplugin.h include\config
 $(BUILD_DIR)\config.obj: $(BUILD_DIR) src\config.c include\config.h
 	$(CC) /c $(CFLAGS) src\config.c
 
-$(BUILD_DIR)\restic_cli.obj: $(BUILD_DIR) src\restic_cli.c include\restic_cli.h include\fsplugin.h cJSON\cJSON.h
+$(BUILD_DIR)\restic_cli.obj: $(BUILD_DIR) src\restic_cli.c include\restic_cli.h include\fsplugin.h include\json.h
 	$(CC) /c $(CFLAGS) src\restic_cli.c
 
-$(BUILD_DIR)\cJSON.obj: $(BUILD_DIR) cJSON\cJSON.c cJSON\cJSON.h
-	$(CC) /c /nologo /TC /std:c11 /W3 /GS /DCJSON_HIDE_SYMBOLS $(CFLAGS_CFG) $(CFLAGS_SAN) /IcJSON /Fo$(BUILD_DIR)\ /Fd$(BUILD_DIR)\vc.pdb cJSON\cJSON.c
+$(BUILD_DIR)\json.obj: $(BUILD_DIR) src\json.c include\json.h
+	$(CC) /c $(CFLAGS) src\json.c
 
 $(BUILD_DIR)\test_config.obj: $(BUILD_DIR) tests\test_config.c include\config.h include\fsplugin.h
 	$(CC) /c $(CFLAGS) tests\test_config.c
@@ -110,6 +111,13 @@ $(PLUGIN_OUT): $(PLUGIN_OBJS) $(PLUGIN_RES) $(DEF_FILE)
 $(TEST_CONFIG_OUT): $(TEST_CONFIG_OBJS)
 	$(CC) /nologo $(CFLAGS_CFG) $(CFLAGS_SAN) $(TEST_CONFIG_OBJS) $(SYSLIBS) /link $(LFLAGS_CFG) /OUT:$(TEST_CONFIG_OUT)
 
+# The JSON reader is portable C: its tests link nothing but the reader itself
+$(BUILD_DIR)\test_json.obj: $(BUILD_DIR) tests\test_json.c include\json.h
+	$(CC) /c $(CFLAGS) tests\test_json.c
+
+$(TEST_JSON_OUT): $(BUILD_DIR)\test_json.obj $(BUILD_DIR)\json.obj
+	$(CC) /nologo $(CFLAGS_CFG) $(CFLAGS_SAN) $(BUILD_DIR)\test_json.obj $(BUILD_DIR)\json.obj /link $(LFLAGS_CFG) /OUT:$(TEST_JSON_OUT)
+
 $(TEST_CLI_OUT): $(TEST_CLI_OBJS)
 	$(CC) /nologo $(CFLAGS_CFG) $(CFLAGS_SAN) $(TEST_CLI_OBJS) $(SYSLIBS) $(TEST_LIBS) /link $(LFLAGS_CFG) /OUT:$(TEST_CLI_OUT)
 
@@ -121,18 +129,19 @@ $(TEST_DLL_OUT): $(BUILD_DIR)\test_plugin_dll.obj
 	$(CC) /nologo $(CFLAGS_CFG) $(CFLAGS_SAN) $(BUILD_DIR)\test_plugin_dll.obj /link $(LFLAGS_CFG) /OUT:$(TEST_DLL_OUT)
 
 # The DLL smoke test needs the plugin binary; AddressSanitizer runs only exercise the unit tests
-TEST_DEPS = $(INI_OUT) $(PLUGINST_OUT) $(TEST_CONFIG_OUT) $(TEST_CLI_OUT) $(TEST_DLL_OUT)
+TEST_DEPS = $(INI_OUT) $(PLUGINST_OUT) $(TEST_JSON_OUT) $(TEST_CONFIG_OUT) $(TEST_CLI_OUT) $(TEST_DLL_OUT)
 !IF "$(ASAN)" != "1"
 TEST_DEPS = $(PLUGIN_OUT) $(TEST_DEPS)
 !ENDIF
 
 test: $(TEST_DEPS)
+	$(TEST_JSON_OUT)
 	$(TEST_CONFIG_OUT)
 	$(TEST_CLI_OUT)
 	$(TEST_DLL_OUT)
 
 analyze:
-	$(MAKE) /nologo ANALYZE=1 $(PLUGIN_OUT) $(INI_OUT) $(PLUGINST_OUT) $(TEST_CONFIG_OUT) $(TEST_CLI_OUT) $(TEST_DLL_OUT)
+	$(MAKE) /nologo ANALYZE=1 $(PLUGIN_OUT) $(INI_OUT) $(PLUGINST_OUT) $(TEST_JSON_OUT) $(TEST_CONFIG_OUT) $(TEST_CLI_OUT) $(TEST_DLL_OUT)
 
 package:
 	$(MAKE) /nologo CONFIG=Release all

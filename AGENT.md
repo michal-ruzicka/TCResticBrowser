@@ -24,7 +24,9 @@ The primary goal of Phase 1 (MVP) is to provide interactive, read-only browsing 
    - Invokes `restic.exe` as a hidden child process (`CREATE_NO_WINDOW`) via Win32 API (`CreateProcessW`).
 
 3. **JSON & NDJSON Parsing**
-   - Integrates the open-source **cJSON** library directly in source form from the `cJSON/` directory (`cJSON/cJSON.h`, `cJSON/cJSON.c`).
+   - A minimal, strict, read-only JSON reader of the project's own (`src/json.c`, `include/json.h`, ~350 lines), written for exactly what Restic prints. No third-party JSON library: the plugin parses untrusted repository content inside Total Commander's process, and a reader that does only what is needed is code that can be read in full.
+   - Strict RFC 8259 (no comments, trailing commas, leading zeros), nesting limited to `JSON_MAX_DEPTH` (64), strings containing `\u0000` rejected so every decoded string is a plain C string, lone surrogate escapes decoded as U+FFFD. Integers are read exactly (`json_u64`), so file sizes above 2^53 are not rounded through a `double`. One arena per document: a single `json_free()` releases everything.
+   - Portable C11 without Win32: `tests/test_json.c` builds with any hosted compiler (e.g. `gcc -fsanitize=address,undefined`), not only MSVC.
    - Uses line-by-line NDJSON streaming/parsing for `restic ls --json` output.
 
 4. **Caching Policy (MVP)**
@@ -139,20 +141,20 @@ Restic_WFX_Plugin/
 ├── restic_plugin.ini           # Commented sample configuration file (copied to build\restic_plugin.ini)
 ├── pluginst.inf                # Total Commander auto-install manifest (copied to build\ and packed in the ZIP)
 ├── logo/                       # Plugin icons (.ico 16/24/32/48 + multi-res restic_wfx.ico) & PNG logos (256/512/2048)
-├── cJSON/
-│   ├── cJSON.h                 # cJSON parser header
-│   └── cJSON.c                 # cJSON parser implementation
 ├── include/
 │   ├── fsplugin.h              # Total Commander WFX API declarations (+ FS_SET_TIME_UNKNOWN macro)
 │   ├── config.h                # INI configuration & binary resolution interface
 │   ├── restic_cli.h            # Restic CLI child process & JSON/NDJSON parser interface
+│   ├── json.h                  # Minimal strict read-only JSON reader interface
 │   └── version.h               # Single source of truth for plugin version macros (1.0.0)
 ├── src/
 │   ├── main.c                  # DllMain, WFX entry points, virtual path routing
 │   ├── config.c                # restic_plugin.ini resolution & parsing
 │   ├── restic_cli.c            # Child process execution, Win32 pipes, JSON/NDJSON parsing
+│   ├── json.c                  # Minimal strict read-only JSON reader (portable C11, no Win32)
 │   └── restic_wfx.rc           # Windows resource script (ICON #1 + VS_VERSION_INFO metadata)
 └── tests/
+    ├── test_json.c             # JSON reader: strictness, escapes, surrogates, limits, exact integers
     ├── test_config.c           # Configuration, PATH-lookup security, 300-repo scaling, root enumeration
     ├── test_restic_cli.c       # Parsers, quoting, process execution (cmd.exe stand-in) + live restic.exe tests
     └── test_plugin_dll.c       # Black-box smoke test: LoadLibrary(restic.wfx64) + exported WFX surface
@@ -223,7 +225,7 @@ Because the plugin runs in-process inside `TOTALCMD64.EXE` and handles dynamic m
 - `/TC`: Force compilation strictly as pure C (reject any C++ constructs).
 - `/std:c11`: Enforce modern ISO C11 standard.
 - `/permissive-`: Disable non-conforming MSVC language extensions.
-- `/W4`: Enable high warning level across all project source files (third-party `cJSON.c` is compiled with `/W3`).
+- `/W4`: Enable high warning level across all project source files.
 - `/WX`: Treat all warnings as errors so implicit conversions or uninitialized variables cannot slip through.
 - `/we4013`: Treat implicit function declarations (missing prototypes) as errors—critical on 64-bit x64 architectures to prevent pointer truncation.
 
@@ -241,7 +243,7 @@ Because the plugin runs in-process inside `TOTALCMD64.EXE` and handles dynamic m
 ### 8.5 Binary Security Hardening
 - **Compiler:** `/GS` (Buffer Security Check / stack cookie protection).
 - **Linker:** `/DYNAMICBASE` (ASLR - Address Space Layout Randomization) and `/NXCOMPAT` (DEP - Data Execution Prevention), plus `/DEF:restic_wfx.def` to export undecorated symbol names.
-- **Export surface:** `cJSON` is compiled with `/DCJSON_HIDE_SYMBOLS`. Without it the library marks every API `__declspec(dllexport)` and the plugin would export ~90 `cJSON_*` functions next to the WFX entry points. `tests/test_plugin_dll.c` asserts the exact surface: only the nine read-only `Fs*` functions are exported; `FsGetFile/PutFile/DeleteFile/MkDir/RemoveDir/RenMovFile/SetAttr/SetTime/ExecuteFile` (and any `cJSON_*`) must stay absent, because Total Commander enables an operation as soon as the symbol exists.
+- **Export surface:** only what `restic_wfx.def` lists is exported. `tests/test_plugin_dll.c` asserts the exact surface: only the read-only `Fs*` functions are exported; `FsGetFile/PutFile/DeleteFile/MkDir/RemoveDir/RenMovFile/SetAttr/SetTime/ExecuteFile` (and internal helpers such as `json_parse`) must stay absent, because Total Commander enables an operation as soon as the symbol exists.
 - **Imports:** only `KERNEL32.dll` (static CRT). No extra import libraries are linked into the plugin (`SYSLIBS` is empty; the tests add `Shell32.lib` for `CommandLineToArgvW`).
 
 ### 8.6 Build & Test Commands (`build.sh` & `Makefile`)
@@ -249,7 +251,7 @@ Because the plugin runs in-process inside `TOTALCMD64.EXE` and handles dynamic m
 ```bash
 ./build.sh debug     # Incremental Debug build (build/restic.wfx64, /MTd)
 ./build.sh release   # Optimized Release build (build/restic.wfx64, /MT)
-./build.sh test      # Build plugin + run all three test programs (CRT heap & leak verification)
+./build.sh test      # Build plugin + run all four test programs (CRT heap & leak verification)
 ./build.sh release-test  # Same tests against the optimized /MT /O2 build
 ./build.sh asan      # Rebuild and run unit tests under MSVC AddressSanitizer (DLL smoke test is skipped)
 ./build.sh analyze   # Rebuild plugin & tests with MSVC Static Analyzer (/analyze)
@@ -266,6 +268,7 @@ If Total Commander still has `build/restic.wfx64` loaded, `build.sh` renames the
 
 | Program | Scope |
 | --- | --- |
+| `test_json.c` | The JSON reader on its own (no Win32, builds with any C compiler): rejection of malformed input (trailing commas, leading zeros, bad escapes, unescaped control characters, `\u0000`, trailing garbage, comments), scalars and number lexemes, exact 64-bit integers (`2^53 + 1`, `UINT64_MAX`, overflow refused), escape and surrogate decoding (pairs combined, lone ones -> U+FFFD), member lookup (case-sensitive, first duplicate wins), the nesting limit at exactly `JSON_MAX_DEPTH`, a 20 000-element document spanning several arena blocks, and real `snapshots`/`ls` payload shapes (106 assertions). |
 | `test_config.c` | Directory normalization, INI primary/fallback priority (verifying no INI file is auto-created when missing), `restic.exe` resolution order, **PATH-only lookup (a planted `restic.exe` in the cwd must be ignored)**, `[Repositories]` parsing edge cases, 301-alias scaling (array and INI-section buffer growth), root enumeration through `FsFindFirstW/Next/Close`, WFX path validation, missing-`restic.exe` diagnostic, password prompt cancellation, the **missing-INI scenario** (`FsInitW`/`FsSetDefaultParams`/`FsFindFirstW`/`FsGetFileW` stay inert, no password prompt or popup, and plugin/fallback directories remain empty), and verification that the staged `build\restic_plugin.ini` sample template is valid and has 0 active repositories (79-80 assertions). |
 | `test_restic_cli.c` | ISO-8601 edge cases (exact epoch value, offsets, fractions, invalid calendar dates), snapshot naming, path normalization (1023-char CJK path), `restic_quote_arg` round-trip, snapshot/NDJSON parsers (prefix-sharing siblings, missing/empty/file targets, symlinks, 64-bit sizes, corrupt lines), process execution with `cmd.exe` as a deterministic stand-in (stdout/stderr separation, exit codes, environment injection/stripping/inheritance, timeout, cancellation, >100 KB output, >6000-char command line, spawn failures), and a **self-contained live test** against `tmp\restic.exe` including `restic_dump_file` streaming extraction, mtime preservation, 0-byte and 100 KB files, overwrite protection, binary fidelity (`00/0A/0D/1A` bytes), existing target preserved on every failure or abort, no leftover `~rp*.tmp`, local-side failures, argument validation, plus `test_dump_with_fake_restic` (a fake `restic` batch file that deterministically covers exit codes 10/11/12/other, stderr classification, partial output then failure, empty stderr, environment injection and the inactivity timeout: a silent child is killed, a slow but steady one survives) (273 assertions). |
 | `test_plugin_dll.c` | Loads the built `restic.wfx64` like Total Commander: exact 11-function export surface (`FsGetFile`/`FsGetFileW` included; write/delete/move functions forbidden), embedded `RT_GROUP_ICON` #1 + 5 `RT_ICON` frames (`16x16`..`256x256`), embedded `RT_VERSION` (`VS_VERSION_INFO` / `VS_FIXEDFILEINFO` matching `include/version.h`), root name, primary INI next to the DLL, fallback INI via `FsSetDefaultParams` (no file auto-created when missing), two concurrent find handles, ANSI stub behavior, and **end-to-end live navigation & extraction** across Level 0 -> Level 1 -> Level 2+, `FsGetFileW` single-file and recursive folder copy (`F5`), overwrite prompt protocol (`FS_FILE_EXISTS` -> `FS_COPYFLAGS_OVERWRITE`), `FS_COPYFLAGS_MOVE` rejection, binary fidelity and mtime, failed overwrite keeps the old file, local-side `FS_FILE_WRITEERROR`, invalid remote names, NULL arguments, `ESC` at start and mid-transfer, password flows inside `FsGetFileW` (cancel, 3 wrong, retry, cache reuse), password retry, per-repository sessions (8-slot eviction), empty/cancelled password, 3-strike failure, missing repository, 250-character alias error message, `ProgressProc` (`ESC`) cancellation and 6 concurrent worker threads (160 assertions). |

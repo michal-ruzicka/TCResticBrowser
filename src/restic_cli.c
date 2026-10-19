@@ -16,7 +16,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <wchar.h>
-#include "cJSON.h"
+#include "json.h"
 
 /* 100-nanosecond FILETIME ticks per minute (timezone offset conversion) */
 #define FILETIME_TICKS_PER_MINUTE 600000000ULL
@@ -326,34 +326,32 @@ ResticResult restic_parse_snapshots_json(
     *out_items = NULL;
     *out_count = 0;
 
-    cJSON* root = cJSON_Parse(json_text);
-    if (!root) {
+    JsonDoc* doc = json_parse(json_text, strlen(json_text));
+    if (!doc) {
         return RESTIC_ERR_JSON_PARSE;
     }
-    if (cJSON_IsNull(root)) { /* Older Restic versions print "null" for an empty repository */
-        cJSON_Delete(root);
+    const JsonValue* root = json_root(doc);
+    if (root->type == JSON_NULL) { /* Older Restic versions print "null" for an empty repository */
+        json_free(doc);
         return RESTIC_OK;
     }
-    if (!cJSON_IsArray(root)) {
-        cJSON_Delete(root);
+    if (root->type != JSON_ARRAY) {
+        json_free(doc);
         return RESTIC_ERR_JSON_PARSE;
     }
 
     size_t capacity = 0;
-    cJSON* snap = NULL;
-    cJSON_ArrayForEach(snap, root) {
-        if (!cJSON_IsObject(snap)) continue;
+    for (const JsonValue* snap = root->child; snap; snap = snap->next) {
+        if (snap->type != JSON_OBJECT) continue;
 
-        const cJSON* j_time     = cJSON_GetObjectItemCaseSensitive(snap, "time");
-        const cJSON* j_short_id = cJSON_GetObjectItemCaseSensitive(snap, "short_id");
-        const cJSON* j_id       = cJSON_GetObjectItemCaseSensitive(snap, "id");
-
-        const char* time_str = cJSON_IsString(j_time) ? j_time->valuestring : NULL;
+        const char* time_str = json_string(json_object_get(snap, "time"));
+        const char* short_id = json_string(json_object_get(snap, "short_id"));
+        const char* full_id  = json_string(json_object_get(snap, "id"));
         const char* id_str   = NULL;
-        if (cJSON_IsString(j_short_id) && j_short_id->valuestring[0] != '\0') {
-            id_str = j_short_id->valuestring;
-        } else if (cJSON_IsString(j_id) && j_id->valuestring[0] != '\0') {
-            id_str = j_id->valuestring;
+        if (short_id && short_id[0] != '\0') {
+            id_str = short_id;
+        } else if (full_id && full_id[0] != '\0') {
+            id_str = full_id;
         }
         if (!time_str || !id_str) continue;
 
@@ -374,12 +372,12 @@ ResticResult restic_parse_snapshots_json(
             free(*out_items);
             *out_items = NULL;
             *out_count = 0;
-            cJSON_Delete(root);
+            json_free(doc);
             return RESTIC_ERR_OUT_OF_MEMORY;
         }
     }
 
-    cJSON_Delete(root);
+    json_free(doc);
     return RESTIC_OK;
 }
 
@@ -402,17 +400,15 @@ static BOOL is_direct_child_path(const char* node_path, const char* filter_path)
 }
 
 /* Fills a WIN32_FIND_DATAW from one `restic ls --json` node object. Returns FALSE to skip it. */
-static BOOL node_to_find_data(const cJSON* obj, WIN32_FIND_DATAW* fd) {
-    const cJSON* j_name  = cJSON_GetObjectItemCaseSensitive(obj, "name");
-    const cJSON* j_type  = cJSON_GetObjectItemCaseSensitive(obj, "type");
-    const cJSON* j_size  = cJSON_GetObjectItemCaseSensitive(obj, "size");
-    const cJSON* j_mtime = cJSON_GetObjectItemCaseSensitive(obj, "mtime");
-    const cJSON* j_ctime = cJSON_GetObjectItemCaseSensitive(obj, "ctime");
-    const cJSON* j_atime = cJSON_GetObjectItemCaseSensitive(obj, "atime");
+static BOOL node_to_find_data(const JsonValue* obj, WIN32_FIND_DATAW* fd) {
+    const char* name  = json_string(json_object_get(obj, "name"));
+    const char* type  = json_string(json_object_get(obj, "type"));
+    const char* mtime = json_string(json_object_get(obj, "mtime"));
+    const char* ctime = json_string(json_object_get(obj, "ctime"));
+    const char* atime = json_string(json_object_get(obj, "atime"));
 
     memset(fd, 0, sizeof(*fd));
-    if (!cJSON_IsString(j_name) ||
-        MultiByteToWideChar(CP_UTF8, 0, j_name->valuestring, -1, fd->cFileName, MAX_PATH) <= 0) {
+    if (!name || MultiByteToWideChar(CP_UTF8, 0, name, -1, fd->cFileName, MAX_PATH) <= 0) {
         return FALSE;
     }
     /* Empty names and "."/".." would break Total Commander's navigation: never report them */
@@ -421,12 +417,12 @@ static BOOL node_to_find_data(const cJSON* obj, WIN32_FIND_DATAW* fd) {
         return FALSE;
     }
 
-    if (cJSON_IsString(j_type) && strcmp(j_type->valuestring, "dir") == 0) {
+    if (type && strcmp(type, "dir") == 0) {
         fd->dwFileAttributes = FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY;
     } else { /* Files, symlinks, devices... (the WFX API wants links reported as plain files) */
         fd->dwFileAttributes = FILE_ATTRIBUTE_READONLY;
-        if (cJSON_IsNumber(j_size) && j_size->valuedouble >= 0.0) {
-            unsigned long long sz = (unsigned long long)j_size->valuedouble;
+        unsigned long long sz = 0;
+        if (json_u64(json_object_get(obj, "size"), &sz)) {
             fd->nFileSizeLow  = (DWORD)(sz & 0xFFFFFFFFULL);
             fd->nFileSizeHigh = (DWORD)(sz >> 32);
         }
@@ -434,15 +430,15 @@ static BOOL node_to_find_data(const cJSON* obj, WIN32_FIND_DATAW* fd) {
 
     FILETIME ft;
     FS_SET_TIME_UNKNOWN(fd->ftLastWriteTime);
-    if (cJSON_IsString(j_mtime) && restic_parse_iso8601_time(j_mtime->valuestring, &ft)) {
+    if (mtime && restic_parse_iso8601_time(mtime, &ft)) {
         fd->ftLastWriteTime  = ft;
         fd->ftCreationTime   = ft;
         fd->ftLastAccessTime = ft;
     }
-    if (cJSON_IsString(j_ctime) && restic_parse_iso8601_time(j_ctime->valuestring, &ft)) {
+    if (ctime && restic_parse_iso8601_time(ctime, &ft)) {
         fd->ftCreationTime = ft;
     }
-    if (cJSON_IsString(j_atime) && restic_parse_iso8601_time(j_atime->valuestring, &ft)) {
+    if (atime && restic_parse_iso8601_time(atime, &ft)) {
         fd->ftLastAccessTime = ft;
     }
     return TRUE;
@@ -481,23 +477,22 @@ ResticResult restic_parse_ls_ndjson(
         }
 
         if (line_len > 0) {
-            cJSON* obj = cJSON_ParseWithLength(line_start, line_len);
-            if (!obj || !cJSON_IsObject(obj)) {
+            JsonDoc* doc = json_parse(line_start, line_len);
+            const JsonValue* obj = json_root(doc);
+            if (!obj || obj->type != JSON_OBJECT) {
                 result = RESTIC_ERR_JSON_PARSE;
             } else {
                 parsed_objects++;
-                const cJSON* j_msg  = cJSON_GetObjectItemCaseSensitive(obj, "message_type");
-                const cJSON* j_path = cJSON_GetObjectItemCaseSensitive(obj, "path");
+                const char* msg_type = json_string(json_object_get(obj, "message_type"));
+                const char* path     = json_string(json_object_get(obj, "path"));
 
-                if (cJSON_IsString(j_msg) && strcmp(j_msg->valuestring, "node") == 0 &&
-                    cJSON_IsString(j_path)) {
-                    const char* path = j_path->valuestring;
+                if (msg_type && strcmp(msg_type, "node") == 0 && path) {
                     WIN32_FIND_DATAW fd;
 
                     if (strcmp(path, filter_path) == 0) {
-                        const cJSON* j_type = cJSON_GetObjectItemCaseSensitive(obj, "type");
-                        self_found = TRUE;
-                        self_is_dir = cJSON_IsString(j_type) && strcmp(j_type->valuestring, "dir") == 0;
+                        const char* type = json_string(json_object_get(obj, "type"));
+                        self_found  = TRUE;
+                        self_is_dir = type && strcmp(type, "dir") == 0;
                     } else if (is_direct_child_path(path, filter_path) && node_to_find_data(obj, &fd)) {
                         if (!append_find_data(out_items, out_count, &capacity, &fd)) {
                             result = RESTIC_ERR_OUT_OF_MEMORY;
@@ -505,7 +500,7 @@ ResticResult restic_parse_ls_ndjson(
                     }
                 }
             }
-            cJSON_Delete(obj);
+            json_free(doc);
         }
 
         if (!line_end) break;
@@ -765,17 +760,14 @@ static BOOL find_json_message(const char* text, WCHAR* dst, size_t cap) {
         const char* next = strchr(line, '\n');
         size_t len = next ? (size_t)(next - line) : strlen(line);
         if (len > 0 && *line == '{') {
-            cJSON* obj = cJSON_ParseWithLength(line, len);
-            if (obj) {
-                const cJSON* j_msg = cJSON_GetObjectItemCaseSensitive(obj, "message");
-                if (j_msg != NULL && cJSON_IsString(j_msg) && j_msg->valuestring != NULL &&
-                    j_msg->valuestring[0] != '\0') {
-                    utf8_to_wide_trunc(j_msg->valuestring, dst, cap);
-                    cJSON_Delete(obj);
-                    return TRUE;
-                }
-                cJSON_Delete(obj);
+            JsonDoc* doc = json_parse(line, len);
+            const char* msg = json_string(json_object_get(json_root(doc), "message"));
+            if (msg && msg[0] != '\0') {
+                utf8_to_wide_trunc(msg, dst, cap);
+                json_free(doc);
+                return TRUE;
             }
+            json_free(doc);
         }
         line = next ? next + 1 : NULL;
     }

@@ -157,7 +157,7 @@ static void test_export_surface(void) {
     const char* forbidden[] = {"FsPutFile", "FsPutFileW", "FsDeleteFile", "FsDeleteFileW",
                                "FsMkDir", "FsMkDirW", "FsRemoveDir", "FsRemoveDirW",
                                "FsRenMovFile", "FsRenMovFileW", "FsSetAttr", "FsSetTime",
-                               "FsExecuteFile", "cJSON_Parse", "cJSON_Delete", "DllMain"};
+                               "FsExecuteFile", "json_parse", "json_free", "DllMain"};
     for (size_t i = 0; i < _countof(forbidden); ++i) {
         FARPROC fn = GetProcAddress(m, forbidden[i]);
         g_tests_run++;
