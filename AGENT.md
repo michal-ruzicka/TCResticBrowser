@@ -137,6 +137,7 @@ TCResticBrowser/
 ├── build.cmd                   # Windows build driver: x64 + x86 Release, tests, reproducible ZIP; "check" = Debug/analyze/ASan
 ├── setup-build-environment-example.cmd  # Fresh-machine bootstrap: Build Tools from .vsconfig, then build.cmd
 ├── .vsconfig                   # Pinned Visual Studio Build Tools components (toolset 14.51, SDK 26100, CMake, ASan)
+├── .github/workflows/build.yml # CI on windows-latest: build.cmd, build.cmd check, live tests (pinned restic)
 ├── .clang-format               # Code formatting rules (C11, 4 spaces, 100 cols)
 ├── logo/                       # Logo sources (.ico 16/24/32/48 + PNG 256/512) used to assemble src/restic_wfx.ico
 ├── src/                        # Every build input, and nothing else
