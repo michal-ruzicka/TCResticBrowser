@@ -206,9 +206,10 @@ static void test_export_surface(void) {
     GetPrivateProfileStringW(L"plugininstall", L"type", L"", infType, _countof(infType), g_pluginst_inf);
     GetPrivateProfileStringW(L"plugininstall", L"file", L"", infFile, _countof(infFile), g_pluginst_inf);
     GetPrivateProfileStringW(L"plugininstall", L"version", L"", infVer, _countof(infVer), g_pluginst_inf);
-    EXPECT_TRUE(wcscmp(infType, L"wfx") == 0 && wcscmp(infFile, L"TCResticBrowser.wfx") == 0 &&
-                wcscmp(infVer, L"" RESTIC_WFX_PRODUCT_VER) == 0,
-                "Staged pluginst.inf has valid [plugininstall] type, file, and version");
+    /* Checked one by one so a failure shows the value actually read (empty: no [plugininstall]) */
+    EXPECT_WSTR_EQ(infType, L"wfx", "Staged pluginst.inf: type=");
+    EXPECT_WSTR_EQ(infFile, L"TCResticBrowser.wfx", "Staged pluginst.inf: file= names the 32-bit plugin DLL");
+    EXPECT_WSTR_EQ(infVer, L"" RESTIC_WFX_PRODUCT_VER, "Staged pluginst.inf: version= matches version.h");
 
     FreeLibrary(m);
 }
