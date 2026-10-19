@@ -16,8 +16,7 @@
 #include <string.h>
 
 /* Module-level directory state initialized at plugin load time */
-static WCHAR g_plugin_dir[CONFIG_MAX_PATH]   = {0};
-static WCHAR g_fallback_dir[CONFIG_MAX_PATH] = {0};
+static WCHAR g_plugin_dir[CONFIG_MAX_PATH] = {0};
 
 static BOOL is_space_char(WCHAR c) {
     return (c == L' ' || c == L'\t' || c == L'\r' || c == L'\n');
@@ -179,76 +178,41 @@ const WCHAR* config_get_plugin_dir(void) {
     return g_plugin_dir;
 }
 
-void config_set_fallback_dir(const WCHAR* dir_path) {
-    if (!dir_path) {
-        g_fallback_dir[0] = L'\0';
-        return;
+BOOL config_get_user_ini_path(WCHAR* out_path, size_t out_capacity) {
+    if (!out_path || out_capacity == 0) return FALSE;
+    out_path[0] = L'\0';
+
+    WCHAR appdata[CONFIG_MAX_PATH] = {0};
+    DWORD n = GetEnvironmentVariableW(L"APPDATA", appdata, CONFIG_MAX_PATH);
+    if (n == 0 || n >= CONFIG_MAX_PATH) return FALSE;
+    trim_whitespace(appdata);
+    strip_trailing_separators(appdata);
+    if (appdata[0] == L'\0') return FALSE;
+
+    WCHAR ghisler_dir[CONFIG_MAX_PATH] = {0};
+    if (!join_path(appdata, CONFIG_USER_SUBDIR, ghisler_dir, CONFIG_MAX_PATH) ||
+        !join_path(ghisler_dir, CONFIG_INI_FILENAME, out_path, out_capacity)) {
+        out_path[0] = L'\0';
+        return FALSE;
     }
-    wcsncpy_s(g_fallback_dir, CONFIG_MAX_PATH, dir_path, _TRUNCATE);
-    trim_whitespace(g_fallback_dir);
-    strip_quotes(g_fallback_dir);
-    strip_trailing_separators(g_fallback_dir);
-}
-
-void config_set_fallback_from_default_params(const char* default_ini_name) {
-    if (!default_ini_name || default_ini_name[0] == '\0') {
-        g_fallback_dir[0] = L'\0';
-        return;
-    }
-
-    WCHAR wide_ini_path[CONFIG_MAX_PATH] = {0};
-    int converted = MultiByteToWideChar(
-        CP_ACP,
-        0,
-        default_ini_name,
-        -1,
-        wide_ini_path,
-        CONFIG_MAX_PATH
-    );
-    if (converted <= 0) {
-        g_fallback_dir[0] = L'\0';
-        return;
-    }
-
-    WCHAR parent_dir[CONFIG_MAX_PATH] = {0};
-    extract_parent_dir(wide_ini_path, parent_dir, CONFIG_MAX_PATH);
-    config_set_fallback_dir(parent_dir);
-}
-
-const WCHAR* config_get_fallback_dir(void) {
-    return g_fallback_dir;
+    return TRUE;
 }
 
 BOOL config_resolve_ini_path(WCHAR* out_path, size_t out_capacity) {
     if (!out_path || out_capacity == 0) return FALSE;
     out_path[0] = L'\0';
 
-    WCHAR primary_candidate[CONFIG_MAX_PATH]  = {0};
-    WCHAR fallback_candidate[CONFIG_MAX_PATH] = {0};
+    /* 1. Per-user override: %APPDATA%\GHISLER\restic_plugin.ini */
+    WCHAR user_candidate[CONFIG_MAX_PATH] = {0};
+    if (config_get_user_ini_path(user_candidate, CONFIG_MAX_PATH) && file_exists(user_candidate)) {
+        wcsncpy_s(out_path, out_capacity, user_candidate, _TRUNCATE);
+        return TRUE;
+    }
 
-    /* 1. Existing INI in the plugin directory: <plugin_dir>\restic_plugin.ini */
+    /* 2. System-wide file shipped with the plugin: <plugin_dir>\restic_plugin.ini */
     if (g_plugin_dir[0] != L'\0') {
-        join_path(g_plugin_dir, CONFIG_INI_FILENAME, primary_candidate, CONFIG_MAX_PATH);
-        if (file_exists(primary_candidate)) {
-            wcsncpy_s(out_path, out_capacity, primary_candidate, _TRUNCATE);
-            return TRUE;
-        }
-    }
-
-    /* 2. Existing INI in the fallback directory: <fallback_dir>\restic_plugin.ini */
-    if (g_fallback_dir[0] != L'\0') {
-        join_path(g_fallback_dir, CONFIG_INI_FILENAME, fallback_candidate, CONFIG_MAX_PATH);
-        if (file_exists(fallback_candidate)) {
-            wcsncpy_s(out_path, out_capacity, fallback_candidate, _TRUNCATE);
-            return TRUE;
-        }
-    }
-
-    /* Report the preferred candidate path even when no INI file exists on disk */
-    if (primary_candidate[0] != L'\0') {
-        wcsncpy_s(out_path, out_capacity, primary_candidate, _TRUNCATE);
-    } else if (fallback_candidate[0] != L'\0') {
-        wcsncpy_s(out_path, out_capacity, fallback_candidate, _TRUNCATE);
+        join_path(g_plugin_dir, CONFIG_INI_FILENAME, out_path, out_capacity);
+        return file_exists(out_path);
     }
     return FALSE;
 }

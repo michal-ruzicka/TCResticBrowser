@@ -501,10 +501,12 @@ int __stdcall FsInitW(
     return 0;
 }
 
+/*
+ * DefaultIniName is deliberately ignored: like the author's other Total Commander plugins, the
+ * configuration is looked up in %APPDATA%\GHISLER and the plugin directory (see config.h).
+ */
 void __stdcall FsSetDefaultParams(FsDefaultParamStruct* dps) {
-    if (dps != NULL) {
-        config_set_fallback_from_default_params(dps->DefaultIniName);
-    }
+    (void)dps;
 }
 
 /* Populates a ResticFindHandle for the root path "\" from [Repositories] */

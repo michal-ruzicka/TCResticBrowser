@@ -213,7 +213,7 @@ static void test_export_surface(void) {
     FreeLibrary(m);
 }
 
-/* Scenario A: restic_plugin.ini sits next to the DLL (primary lookup) */
+/* Scenario A: restic_plugin.ini sits next to the DLL (no per-user INI) */
 static void test_primary_ini_next_to_dll(void) {
     WCHAR dir[MAX_PATH], ini[MAX_PATH];
     EXPECT_TRUE(make_unique_dir(L"restic_dll_primary", dir, MAX_PATH), "Create plugin directory");
@@ -270,25 +270,34 @@ static void test_primary_ini_next_to_dll(void) {
     RemoveDirectoryW(dir);
 }
 
-/* Scenario B: no INI next to the DLL -> no file is auto-created; FsSetDefaultParams fallback directory is honored */
-static void test_fallback_ini_from_default_params(void) {
-    WCHAR dir[MAX_PATH], plug_ini[MAX_PATH], fb_dir[MAX_PATH], fb_ini[MAX_PATH];
-    EXPECT_TRUE(make_unique_dir(L"restic_dll_noini", dir, MAX_PATH) &&
-                make_unique_dir(L"restic_dll_fallback", fb_dir, MAX_PATH), "Create directories");
+/* %APPDATA%\GHISLER of this test run (set up in main, so the developer's own INI is never read) */
+static WCHAR g_user_dir[MAX_PATH];
+
+/*
+ * Scenario B: the per-user %APPDATA%\GHISLER\restic_plugin.ini wins over the INI next to the DLL;
+ * DefaultIniName from FsSetDefaultParams is ignored and no INI is ever auto-created.
+ */
+static void test_user_ini_overrides_plugin_ini(void) {
+    WCHAR dir[MAX_PATH], plug_ini[MAX_PATH], user_ini[MAX_PATH], tc_dir[MAX_PATH], tc_ini[MAX_PATH];
+    EXPECT_TRUE(make_unique_dir(L"restic_dll_userini", dir, MAX_PATH) &&
+                make_unique_dir(L"restic_dll_tcconfig", tc_dir, MAX_PATH), "Create directories");
     swprintf_s(plug_ini, MAX_PATH, L"%ls\\restic_plugin.ini", dir);
-    swprintf_s(fb_ini, MAX_PATH, L"%ls\\restic_plugin.ini", fb_dir);
+    swprintf_s(user_ini, MAX_PATH, L"%ls\\restic_plugin.ini", g_user_dir);
+    swprintf_s(tc_ini, MAX_PATH, L"%ls\\restic_plugin.ini", tc_dir);
     DeleteFileW(plug_ini);
-    DeleteFileW(fb_ini);
+    DeleteFileW(user_ini);
 
     Plugin p;
     EXPECT_TRUE(load_plugin_copy(dir, &p), "Load plugin copy");
     EXPECT_TRUE(p.init_w && p.set_default_params && p.find_first_w && p.find_next_w && p.find_close,
                 "Entry points resolved");
 
+    /* Total Commander's settings folder pointing elsewhere (e.g. a portable install) is not consulted */
+    EXPECT_TRUE(write_file(tc_ini, "[Repositories]\r\nFromDefaultIniName=D:\\repo\r\n"), "Write INI next to wincmd.ini");
     DefaultParams dps;
     memset(&dps, 0, sizeof(dps));
     dps.size = (int)sizeof(dps);
-    WideCharToMultiByte(CP_ACP, 0, fb_dir, -1, dps.DefaultIniName, (int)sizeof(dps.DefaultIniName), NULL, NULL);
+    WideCharToMultiByte(CP_ACP, 0, tc_dir, -1, dps.DefaultIniName, (int)sizeof(dps.DefaultIniName), NULL, NULL);
     strcat_s(dps.DefaultIniName, sizeof(dps.DefaultIniName), "\\wincmd.ini");
     p.init_w(1, NULL, NULL, NULL);
     p.set_default_params(&dps);
@@ -297,23 +306,32 @@ static void test_fallback_ini_from_default_params(void) {
     SetLastError(0);
     HANDLE h = p.find_first_w(L"\\", &fd);
     EXPECT_TRUE(h == INVALID_HANDLE_VALUE && GetLastError() == ERROR_NO_MORE_FILES,
-                "Missing INI -> empty root");
+                "No INI in %APPDATA%\\GHISLER or the plugin directory -> empty root");
     EXPECT_TRUE(GetFileAttributesW(plug_ini) == INVALID_FILE_ATTRIBUTES &&
-                GetFileAttributesW(fb_ini) == INVALID_FILE_ATTRIBUTES,
+                GetFileAttributesW(user_ini) == INVALID_FILE_ATTRIBUTES,
                 "No INI file is auto-created on disk");
 
-    /* Placing an INI in the fallback directory resolves it dynamically */
-    EXPECT_TRUE(write_file(fb_ini, "[Repositories]\r\nOnlyOne=D:\\repo\r\n"), "Write fallback INI");
+    /* The shipped INI next to the DLL is used while there is no per-user one */
+    EXPECT_TRUE(write_file(plug_ini, "[Repositories]\r\nShipped=D:\\repo\r\n"), "Write plugin-directory INI");
     h = p.find_first_w(L"\\", &fd);
-    EXPECT_TRUE(h != INVALID_HANDLE_VALUE, "Fallback INI is picked up without reloading the plugin");
-    EXPECT_WSTR_EQ(fd.cFileName, L"OnlyOne", "Alias from fallback INI");
-    EXPECT_TRUE(!p.find_next_w(h, &fd), "Single alias");
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE, "Plugin-directory INI is used");
+    EXPECT_WSTR_EQ(fd.cFileName, L"Shipped", "Alias from the plugin-directory INI");
+    p.find_close(h);
+
+    /* A per-user INI appearing later takes over in full on the next listing, without a reload */
+    EXPECT_TRUE(write_file(user_ini, "[Repositories]\r\nPersonal=D:\\repo\r\n"), "Write per-user INI");
+    h = p.find_first_w(L"\\", &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE, "Per-user INI is picked up without reloading the plugin");
+    EXPECT_WSTR_EQ(fd.cFileName, L"Personal", "Alias from the per-user INI");
+    EXPECT_TRUE(!p.find_next_w(h, &fd), "Plugin-directory INI is not merged in");
     p.find_close(h);
 
     unload_plugin_copy(&p, dir);
-    DeleteFileW(fb_ini);
+    DeleteFileW(user_ini);
+    DeleteFileW(plug_ini);
+    DeleteFileW(tc_ini);
     RemoveDirectoryW(dir);
-    RemoveDirectoryW(fb_dir);
+    RemoveDirectoryW(tc_dir);
 }
 
 /* Mock Total Commander callback state for Scenario C (end-to-end live navigation) */
@@ -1022,10 +1040,23 @@ int main(void) {
         return 0;
     }
 
+    /* Never pick up the developer's own %APPDATA%\GHISLER\restic_plugin.ini */
+    WCHAR appdata_dir[MAX_PATH];
+    if (!make_unique_dir(L"restic_dll_appdata", appdata_dir, MAX_PATH) ||
+        swprintf_s(g_user_dir, MAX_PATH, L"%ls\\GHISLER", appdata_dir) <= 0 ||
+        !(CreateDirectoryW(g_user_dir, NULL) || GetLastError() == ERROR_ALREADY_EXISTS) ||
+        !SetEnvironmentVariableW(L"APPDATA", appdata_dir)) {
+        printf("[FAIL] Cannot set up a temporary %%APPDATA%%.\n");
+        return 1;
+    }
+
     test_export_surface();
     test_primary_ini_next_to_dll();
-    test_fallback_ini_from_default_params();
+    test_user_ini_overrides_plugin_ini();
     test_live_end_to_end_navigation();
+
+    RemoveDirectoryW(g_user_dir);
+    RemoveDirectoryW(appdata_dir);
 
     if (g_tests_failed == 0) {
         printf("[PASS] All %d assertions succeeded.\n", g_tests_run);

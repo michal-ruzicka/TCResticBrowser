@@ -34,6 +34,13 @@ upstream 1.x line.
   strict, read-only reader of about 370 lines (`src\json.c`), so the plugin
   contains no third-party code. File sizes are now read as exact 64-bit
   integers. See *Why the Plugin Has Its Own JSON Reader* in the README.
+- **`restic_plugin.ini` lookup order** now matches the author's other
+  Total Commander plugins: `%APPDATA%\GHISLER\restic_plugin.ini` (per-user
+  override) wins over the file next to the plugin, which is only the shipped
+  sample. Previously the plugin-folder file won and the folder of Total
+  Commander's `wincmd.ini` was the fallback. **Upgrading from 1.x:** move a
+  `restic_plugin.ini` you edited in the plugin folder to
+  `%APPDATA%\GHISLER\`, otherwise installing the new version overwrites it.
 - **Release ZIP** is named `TCResticBrowser.vX.Y.Z.zip` and ships the
   license as `LICENSE.txt`.
 - **Documentation** restructured (README, CONTRIBUTING, this changelog), and

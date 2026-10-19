@@ -4,6 +4,7 @@
 
 /* Configuration file name and default binary name */
 #define CONFIG_INI_FILENAME       L"restic_plugin.ini"
+#define CONFIG_USER_SUBDIR        L"GHISLER"   /* Total Commander's settings folder under %APPDATA% */
 #define CONFIG_DEFAULT_RESTIC_EXE L"restic.exe"
 #define CONFIG_MAX_PATH           1024
 
@@ -41,27 +42,18 @@ void config_set_plugin_dir_from_module(HMODULE hModule);
 const WCHAR* config_get_plugin_dir(void);
 
 /**
- * Sets the fallback configuration directory explicitly.
+ * Builds the per-user INI path %APPDATA%\GHISLER\restic_plugin.ini (whether or not it exists).
+ * Returns FALSE when %APPDATA% is not set.
  */
-void config_set_fallback_dir(const WCHAR* dir_path);
+BOOL config_get_user_ini_path(WCHAR* out_path, size_t out_capacity);
 
 /**
- * Extracts and stores the fallback directory from Total Commander's DefaultIniName (ANSI).
- */
-void config_set_fallback_from_default_params(const char* default_ini_name);
-
-/**
- * Returns the currently configured fallback directory (empty string if unset).
- */
-const WCHAR* config_get_fallback_dir(void);
-
-/**
- * Resolves the path to restic_plugin.ini:
- * 1. Primary: <plugin_dir>\restic_plugin.ini (if existing).
- * 2. Fallback: <fallback_dir>\restic_plugin.ini (if existing).
+ * Resolves the active restic_plugin.ini. The first existing file is used in full (no merging):
+ * 1. %APPDATA%\GHISLER\restic_plugin.ini - per-user override.
+ * 2. <plugin_dir>\restic_plugin.ini - system-wide file shipped with the plugin.
  *
  * Returns TRUE if an existing INI file was found at out_path, or FALSE when neither file exists
- * (in which case out_path receives the preferred candidate path).
+ * (in which case out_path receives the plugin-directory path, if known).
  */
 BOOL config_resolve_ini_path(WCHAR* out_path, size_t out_capacity);
 

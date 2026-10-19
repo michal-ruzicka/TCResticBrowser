@@ -94,8 +94,9 @@ auto-installer:**
 2. In Total Commander, **navigate to the ZIP** file and press **Enter**.
 3. TC detects the bundled `pluginst.inf` and asks whether to install the
    plugin — **confirm** (default folder: `plugins\wfx\restic`).
-4. Edit `restic_plugin.ini` next to the installed plugin and add your
-   repositories (see [Configuration](#configuration)).
+4. Copy `restic_plugin.ini` from the plugin folder to
+   `%APPDATA%\GHISLER\restic_plugin.ini` and add your repositories to the
+   copy (see [Configuration](#configuration)).
 5. Open **Network Neighborhood** (`\\\` in the command line, or the `\`
    drive button → Network) and enter **Restic Backups**.
 
@@ -104,8 +105,9 @@ folder (for example `C:\Tools\TCResticBrowser\`) and add `restic.wfx`
 (32-bit TC) or `restic.wfx64` (64-bit TC) under **Configuration →
 Options → Plugins → File system plugins → Configure → Add**.
 
-> When upgrading, keep your own `restic_plugin.ini`: Total Commander may ask
-> before overwriting files in the plugin folder.
+> Upgrading replaces the files in the plugin folder, including the sample
+> `restic_plugin.ini` there; your own copy in `%APPDATA%\GHISLER` is not
+> touched.
 
 ### Getting Restic
 
@@ -171,18 +173,20 @@ A fully commented sample configuration file
 
 #### Where to Place `restic_plugin.ini`
 
-The plugin never auto-creates or modifies `restic_plugin.ini` at runtime. On every root listing or repository operation, it searches for `restic_plugin.ini` in the following order:
+Settings live in `restic_plugin.ini`. The plugin reads it from two locations
+and uses the **first one that exists** — values are not merged across
+files:
 
-1. **Primary Location (Portable / Next to the Plugin DLL):**
-   ```text
-   <plugin_dir>\restic_plugin.ini
-   ```
-   *(e.g., `C:\TotalCmd\plugins\wfx\restic\restic_plugin.ini` — recommended for portable Total Commander installations)*
-2. **Fallback Location (Total Commander User Configuration Directory):**
-   If no INI file is present next to the plugin DLL (for example, when Total Commander is installed under a read-only `C:\Program Files\` directory), the plugin looks in the directory reported by Total Commander via `FsSetDefaultParams` (the folder containing `wincmd.ini` / `fsplugin.ini`, typically):
-   ```text
-   %APPDATA%\GHISLER\restic_plugin.ini
-   ```
+1. `%APPDATA%\GHISLER\restic_plugin.ini` — per-user override
+2. `<plugin install dir>\restic_plugin.ini` — system-wide default, shipped
+   with the plugin
+
+The shipped INI has every option commented out, so no repositories are
+listed until you add some. To configure the plugin for your user account,
+copy that file to `%APPDATA%\GHISLER\restic_plugin.ini` and edit the copy;
+the system-wide file is then ignored entirely. The chosen file is re-read on
+every root listing and repository operation — edits take effect on the next
+refresh (**Ctrl+R**). The plugin never creates or modifies either file.
 
 > **Encoding Note:** Save `restic_plugin.ini` as **ANSI** (system code page) or **UTF-16 LE (with BOM)**. Standard Win32 INI APIs (`GetPrivateProfile*W`) do not decode UTF-8 when the file contains non-ASCII characters.
 

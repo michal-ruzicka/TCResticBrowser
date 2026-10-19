@@ -69,71 +69,103 @@ static BOOL make_temp_dir(const WCHAR* prefix, WCHAR* out_dir, size_t capacity) 
     return TRUE;
 }
 
-/* Test 1: Directory normalization and FsSetDefaultParams extraction */
-static void test_plugin_and_fallback_dirs(void) {
+/* Points %APPDATA% at `appdata_dir` and returns its GHISLER subdirectory in `out_user_dir` */
+static void use_temp_appdata(const WCHAR* appdata_dir, WCHAR* out_user_dir, size_t capacity) {
+    SetEnvironmentVariableW(L"APPDATA", appdata_dir);
+    swprintf_s(out_user_dir, capacity, L"%ls\\%ls", appdata_dir, CONFIG_USER_SUBDIR);
+    CreateDirectoryW(out_user_dir, NULL);
+}
+
+/* Test 1: Directory normalization; FsSetDefaultParams does not influence the INI lookup */
+static void test_plugin_dir_and_default_params(void) {
     config_set_plugin_dir(L"  \"C:\\TotalCmd\\plugins\\wfx\\restic\\\"  ");
     EXPECT_WSTR_EQ(config_get_plugin_dir(), L"C:\\TotalCmd\\plugins\\wfx\\restic", "Trim and strip trailing backslash");
 
     config_set_plugin_dir(L"C:\\");
     EXPECT_WSTR_EQ(config_get_plugin_dir(), L"C:\\", "Preserve drive root backslash");
 
+    WCHAR saved_appdata[MAX_PATH] = {0};
+    GetEnvironmentVariableW(L"APPDATA", saved_appdata, MAX_PATH);
+    SetEnvironmentVariableW(L"APPDATA", L"C:\\Users\\TestUser\\AppData\\Roaming\\");
+    WCHAR user_ini[MAX_PATH] = {0};
+    EXPECT_TRUE(config_get_user_ini_path(user_ini, MAX_PATH), "Per-user INI path is built from %APPDATA%");
+    EXPECT_WSTR_EQ(user_ini, L"C:\\Users\\TestUser\\AppData\\Roaming\\GHISLER\\restic_plugin.ini",
+                   "Per-user INI lives in Total Commander's settings folder");
+
     FsDefaultParamStruct dps;
     memset(&dps, 0, sizeof(dps));
     dps.size = sizeof(dps);
-    strncpy_s(dps.DefaultIniName, sizeof(dps.DefaultIniName),
-              "C:\\Users\\TestUser\\AppData\\Roaming\\GHISLER\\fsplugin.ini", _TRUNCATE);
-
+    strncpy_s(dps.DefaultIniName, sizeof(dps.DefaultIniName), "D:\\Elsewhere\\fsplugin.ini", _TRUNCATE);
     FsSetDefaultParams(&dps);
-    EXPECT_WSTR_EQ(
-        config_get_fallback_dir(),
-        L"C:\\Users\\TestUser\\AppData\\Roaming\\GHISLER",
-        "Extract parent directory from DefaultIniName"
-    );
+    EXPECT_TRUE(config_get_user_ini_path(user_ini, MAX_PATH), "Per-user INI path still available");
+    EXPECT_WSTR_EQ(user_ini, L"C:\\Users\\TestUser\\AppData\\Roaming\\GHISLER\\restic_plugin.ini",
+                   "DefaultIniName does not move the per-user INI");
+
+    SetEnvironmentVariableW(L"APPDATA", NULL);
+    EXPECT_TRUE(!config_get_user_ini_path(user_ini, MAX_PATH) && user_ini[0] == L'\0',
+                "No per-user INI path without %APPDATA%");
+    SetEnvironmentVariableW(L"APPDATA", saved_appdata);
 }
 
-/* Test 2: INI path resolution (primary plugin dir vs fallback dir) */
+/* Test 2: INI path resolution (per-user %APPDATA%\GHISLER over the plugin directory) */
 static void test_ini_path_resolution_priority(void) {
-    WCHAR plugin_dir[MAX_PATH]   = {0};
-    WCHAR fallback_dir[MAX_PATH] = {0};
+    WCHAR plugin_dir[MAX_PATH] = {0}, appdata_dir[MAX_PATH] = {0}, user_dir[MAX_PATH] = {0};
+    WCHAR saved_appdata[MAX_PATH] = {0};
+    GetEnvironmentVariableW(L"APPDATA", saved_appdata, MAX_PATH);
     make_temp_dir(L"restic_test_plug", plugin_dir, MAX_PATH);
-    make_temp_dir(L"restic_test_fb", fallback_dir, MAX_PATH);
+    make_temp_dir(L"restic_test_appdata", appdata_dir, MAX_PATH);
+    use_temp_appdata(appdata_dir, user_dir, MAX_PATH);
 
-    WCHAR primary_ini[MAX_PATH]  = {0};
-    WCHAR fallback_ini[MAX_PATH] = {0};
-    swprintf_s(primary_ini, MAX_PATH, L"%ls\\%ls", plugin_dir, CONFIG_INI_FILENAME);
-    swprintf_s(fallback_ini, MAX_PATH, L"%ls\\%ls", fallback_dir, CONFIG_INI_FILENAME);
+    WCHAR plugin_ini[MAX_PATH] = {0};
+    WCHAR user_ini[MAX_PATH]   = {0};
+    swprintf_s(plugin_ini, MAX_PATH, L"%ls\\%ls", plugin_dir, CONFIG_INI_FILENAME);
+    swprintf_s(user_ini, MAX_PATH, L"%ls\\%ls", user_dir, CONFIG_INI_FILENAME);
 
-    DeleteFileW(primary_ini);
-    DeleteFileW(fallback_ini);
+    DeleteFileW(plugin_ini);
+    DeleteFileW(user_ini);
 
     config_set_plugin_dir(plugin_dir);
-    config_set_fallback_dir(fallback_dir);
 
     /* Case A: Neither exists -> returns FALSE and does not create any file on disk */
     WCHAR resolved[MAX_PATH] = {0};
     BOOL ok = config_resolve_ini_path(resolved, MAX_PATH);
     EXPECT_TRUE(!ok, "Should return FALSE when no INI file exists");
-    EXPECT_WSTR_EQ(resolved, primary_ini, "Preferred candidate path points to <plugin_dir>\\restic_plugin.ini");
-    EXPECT_TRUE(GetFileAttributesW(primary_ini) == INVALID_FILE_ATTRIBUTES &&
-                GetFileAttributesW(fallback_ini) == INVALID_FILE_ATTRIBUTES,
+    EXPECT_WSTR_EQ(resolved, plugin_ini, "Candidate path points to <plugin_dir>\\restic_plugin.ini");
+    EXPECT_TRUE(GetFileAttributesW(plugin_ini) == INVALID_FILE_ATTRIBUTES &&
+                GetFileAttributesW(user_ini) == INVALID_FILE_ATTRIBUTES,
                 "No INI file is auto-created when missing");
 
-    /* Case B: Only fallback INI exists -> resolves to fallback INI */
-    write_text_file(fallback_ini, "[Settings]\r\nResticPath=restic.exe\r\n");
+    /* Case B: Only the shipped INI in the plugin directory exists -> it is used */
+    write_text_file(plugin_ini, "[Settings]\r\nResticPath=restic.exe\r\n");
     ok = config_resolve_ini_path(resolved, MAX_PATH);
-    EXPECT_TRUE(ok, "Should resolve fallback INI when primary is missing");
-    EXPECT_WSTR_EQ(resolved, fallback_ini, "Resolved path is fallback INI");
+    EXPECT_TRUE(ok, "Should resolve the plugin-directory INI when there is no per-user INI");
+    EXPECT_WSTR_EQ(resolved, plugin_ini, "Resolved path is the plugin-directory INI");
 
-    /* Case C: Both exist -> primary INI in plugin_dir takes priority over fallback INI */
-    write_text_file(primary_ini, "[Settings]\r\nResticPath=restic.exe\r\n");
+    /* Case C: Both exist -> the per-user INI takes precedence */
+    write_text_file(user_ini, "[Settings]\r\nResticPath=restic.exe\r\n");
     ok = config_resolve_ini_path(resolved, MAX_PATH);
-    EXPECT_TRUE(ok, "Should resolve primary INI when present");
-    EXPECT_WSTR_EQ(resolved, primary_ini, "Primary INI in plugin_dir must take precedence over fallback_dir");
+    EXPECT_TRUE(ok, "Should resolve the per-user INI when present");
+    EXPECT_WSTR_EQ(resolved, user_ini, "Per-user INI must take precedence over the plugin directory");
 
-    DeleteFileW(primary_ini);
-    DeleteFileW(fallback_ini);
+    /* Case D: Only the per-user INI exists -> it is used */
+    DeleteFileW(plugin_ini);
+    ok = config_resolve_ini_path(resolved, MAX_PATH);
+    EXPECT_TRUE(ok, "Should resolve the per-user INI alone");
+    EXPECT_WSTR_EQ(resolved, user_ini, "Resolved path is the per-user INI");
+
+    /* Case E: %APPDATA% not set -> only the plugin directory is consulted */
+    write_text_file(plugin_ini, "[Settings]\r\nResticPath=restic.exe\r\n");
+    SetEnvironmentVariableW(L"APPDATA", NULL);
+    ok = config_resolve_ini_path(resolved, MAX_PATH);
+    EXPECT_TRUE(ok, "Should resolve the plugin-directory INI without %APPDATA%");
+    EXPECT_WSTR_EQ(resolved, plugin_ini, "Resolved path is the plugin-directory INI without %APPDATA%");
+
+    SetEnvironmentVariableW(L"APPDATA", saved_appdata);
+    DeleteFileW(plugin_ini);
+    DeleteFileW(user_ini);
+    RemoveDirectoryW(user_dir);
+    RemoveDirectoryW(appdata_dir);
     RemoveDirectoryW(plugin_dir);
-    RemoveDirectoryW(fallback_dir);
 }
 
 /* Test 3: Restic executable resolution priority */
@@ -155,7 +187,6 @@ static void test_restic_binary_resolution(void) {
     write_text_file(custom_restic, "MZ_DUMMY_CUSTOM");
 
     config_set_plugin_dir(plugin_dir);
-    config_set_fallback_dir(L"");
 
     /* Priority 1: Explicit custom path in [Settings] ResticPath */
     char ini_content[2048];
@@ -211,7 +242,6 @@ static void test_repositories_parsing_and_wfx_root(void) {
 
     write_text_file(ini_path, sample_ini);
     config_set_plugin_dir(plugin_dir);
-    config_set_fallback_dir(L"");
 
     ResticConfig cfg;
     BOOL ok = config_load(&cfg);
@@ -295,7 +325,6 @@ static void test_restic_lookup_ignores_current_directory(void) {
     write_text_file(expected_custom, "MZ_CUSTOM");
     write_text_file(cwd_restic, "MZ_PLANTED");
     config_set_plugin_dir(plugin_dir); /* No restic.exe here: forces the PATH fallback */
-    config_set_fallback_dir(L"");
 
     WCHAR* old_path = dup_env(L"PATH");
     WCHAR old_cwd[MAX_PATH] = {0};
@@ -359,7 +388,6 @@ static void test_large_repository_list(void) {
     free(content);
     EXPECT_TRUE(written, "Write large INI");
     config_set_plugin_dir(plugin_dir);
-    config_set_fallback_dir(L"");
 
     ResticConfig cfg;
     EXPECT_TRUE(config_load(&cfg), "Load large configuration");
@@ -431,17 +459,19 @@ static BOOL __stdcall mock_request_proc(
 
 /* Test 8: with no restic_plugin.ini anywhere the plugin stays inert and never writes to disk */
 static void test_missing_ini_is_harmless(void) {
-    WCHAR plugin_dir[MAX_PATH] = {0}, fallback_dir[MAX_PATH] = {0}, local[MAX_PATH] = {0};
+    WCHAR plugin_dir[MAX_PATH] = {0}, appdata_dir[MAX_PATH] = {0}, user_dir[MAX_PATH] = {0};
+    WCHAR local[MAX_PATH] = {0}, saved_appdata[MAX_PATH] = {0};
+    GetEnvironmentVariableW(L"APPDATA", saved_appdata, MAX_PATH);
     make_temp_dir(L"restic_noini_plug", plugin_dir, MAX_PATH);
-    make_temp_dir(L"restic_noini_fb", fallback_dir, MAX_PATH);
+    make_temp_dir(L"restic_noini_appdata", appdata_dir, MAX_PATH);
+    use_temp_appdata(appdata_dir, user_dir, MAX_PATH);
     swprintf_s(local, MAX_PATH, L"%ls\\extracted.txt", plugin_dir);
     config_set_plugin_dir(plugin_dir);
-    config_set_fallback_dir(fallback_dir);
 
     FsDefaultParamStruct dps;
     memset(&dps, 0, sizeof(dps));
     dps.size = (int)sizeof(dps);
-    WideCharToMultiByte(CP_ACP, 0, fallback_dir, -1, dps.DefaultIniName, (int)sizeof(dps.DefaultIniName), NULL, NULL);
+    WideCharToMultiByte(CP_ACP, 0, user_dir, -1, dps.DefaultIniName, (int)sizeof(dps.DefaultIniName), NULL, NULL);
     strcat_s(dps.DefaultIniName, sizeof(dps.DefaultIniName), "\\wincmd.ini");
 
     g_mock_pwd_calls = g_mock_msgok_calls = g_mock_log_calls = 0;
@@ -470,7 +500,9 @@ static void test_missing_ini_is_harmless(void) {
 
     /* RemoveDirectoryW only succeeds on empty directories: nothing was written anywhere */
     EXPECT_TRUE(RemoveDirectoryW(plugin_dir), "Plugin directory is still empty (no INI auto-created)");
-    EXPECT_TRUE(RemoveDirectoryW(fallback_dir), "Fallback directory is still empty (no INI auto-created)");
+    EXPECT_TRUE(RemoveDirectoryW(user_dir), "Per-user settings directory is still empty (no INI auto-created)");
+    RemoveDirectoryW(appdata_dir);
+    SetEnvironmentVariableW(L"APPDATA", saved_appdata);
 
     /* Verify that the sample restic_plugin.ini the build stages next to this test is valid and all-commented */
     WCHAR sample_ini[MAX_PATH];
@@ -498,7 +530,6 @@ static void test_wfx_routing_and_callbacks(void) {
 
     write_text_file(ini_path, "[Repositories]\r\nMyRepo=D:\\SomeRepo\r\n");
     config_set_plugin_dir(plugin_dir);
-    config_set_fallback_dir(L"");
 
     DWORD need = GetEnvironmentVariableW(L"PATH", NULL, 0);
     WCHAR* saved_path = (WCHAR*)calloc((size_t)need + 1, sizeof(WCHAR));
@@ -571,7 +602,12 @@ int main(void) {
 #endif
     printf("Running Restic WFX Configuration Unit Tests...\n");
 
-    test_plugin_and_fallback_dirs();
+    /* Never pick up the developer's own %APPDATA%\GHISLER\restic_plugin.ini */
+    WCHAR appdata_dir[MAX_PATH] = {0}, user_dir[MAX_PATH] = {0};
+    make_temp_dir(L"restic_test_noappdata", appdata_dir, MAX_PATH);
+    use_temp_appdata(appdata_dir, user_dir, MAX_PATH);
+
+    test_plugin_dir_and_default_params();
     test_ini_path_resolution_priority();
     test_restic_binary_resolution();
     test_repositories_parsing_and_wfx_root();
@@ -579,6 +615,9 @@ int main(void) {
     test_large_repository_list();
     test_wfx_routing_and_callbacks();
     test_missing_ini_is_harmless();
+
+    RemoveDirectoryW(user_dir);
+    RemoveDirectoryW(appdata_dir);
 
 #if defined(_DEBUG) && !defined(__SANITIZE_ADDRESS__)
     EXPECT_TRUE(_CrtCheckMemory(), "CRT heap integrity check must pass");
