@@ -47,6 +47,14 @@ upstream 1.x line.
   is not valid UTF-8 is still read in the ANSI code page, as before.
   Entries too long for the plugin's buffers are now skipped instead of
   being silently truncated.
+- **New plugin icon.** The goals were a vector source, a design simple
+  enough to stay legible at the small sizes Total Commander shows it in, and
+  content that refers to both Total Commander and versioned backups. It is a
+  floppy disk, Total Commander's symbol, whose label carries a "history"
+  arrow around a clock, the time-machine sign for going back to earlier
+  versions. The sources are SVG files in `logo\`, including a separate
+  version fitted to the 16 px pixel grid; the detailed raster illustration
+  they replace was illegible at 16 px and had no editable source.
 - **Release ZIP** is named `TCResticBrowser.vX.Y.Z.zip` and ships the
   license as `LICENSE.txt`.
 - **Documentation** restructured (README, CONTRIBUTING, this changelog), and

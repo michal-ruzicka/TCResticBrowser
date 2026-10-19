@@ -38,7 +38,7 @@ linked against the static MSVC runtime, and contains no third-party code.
 | `.github/` | GitHub Actions CI workflow (`workflows/build.yml`) and Dependabot configuration |
 | `build\` | CMake out-of-source build trees and the ZIP staging folder (gitignored) |
 | `dist\` | Released ZIP bundles (gitignored) |
-| `logo\` | Logo sources the plugin icon `src\restic_wfx.ico` was assembled from |
+| `logo\` | SVG sources of the plugin icon `src\restic_wfx.ico` (see [Plugin Icon](#plugin-icon)) |
 | `src\` | C sources and headers, `CMakeLists.txt`, `.def`/`.rc`/`.ico`, `pluginst.inf`, the sample `restic_plugin.ini` |
 | `src\tests\` | Test programs and the JSON fuzz target |
 | `tmp\` | Optional live-test input `restic.exe` and the generated test repository (gitignored) |
@@ -269,6 +269,35 @@ next run:
 rmdir /S /Q build
 build.cmd
 ```
+
+### Plugin Icon
+
+The icon is a floppy disk, Total Commander's symbol, whose label carries a
+"history" arrow around a clock: backups you can go back in time through.
+Two hand-written SVG files in `logo\` are its source:
+
+| File | Frames |
+| --- | --- |
+| `logo\restic-wfx.svg` | 24, 32, 48 and 256 px (32-unit grid) |
+| `logo\restic-wfx-16.svg` | 16 px, the same design fitted to whole pixels so it stays sharp |
+
+`src\restic_wfx.ico` is a committed binary generated from them; the build
+only embeds it, so it does not affect reproducibility. After editing an SVG,
+regenerate it with `rsvg-convert` (librsvg) and `icotool` (icoutils), for
+example in WSL or a Debian container. The 16–48 px frames are stored as
+32-bit bitmaps and the 256 px frame as PNG (`-r`), which is what
+`test_plugin_dll` expects:
+
+```sh
+rsvg-convert -w 16 -h 16 logo/restic-wfx-16.svg -o 16.png
+for z in 24 32 48 256; do rsvg-convert -w $z -h $z logo/restic-wfx.svg -o $z.png; done
+icotool -c -o src/restic_wfx.ico 16.png 24.png 32.png 48.png -r 256.png
+```
+
+The committed icon was made with librsvg 2.60.0 and icoutils 0.32.3 (Debian
+13); with those versions the commands reproduce it byte for byte. Check
+every size at 100 % zoom: the small frames matter most, because the icon
+appears at 16 px in Network Neighborhood.
 
 ## Architecture
 

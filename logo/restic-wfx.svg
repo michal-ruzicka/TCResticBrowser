@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="256" height="256">
+  <title>TC Restic Browser</title>
+  <!-- Source of the 24, 32, 48 and 256 px icon frames; 16 px uses restic-wfx-16.svg.
+       A floppy disk (Total Commander) whose label carries a "history" arrow around a clock:
+       backups you can go back in time through. -->
+  <path d="M4 1 H25 L31 7 V28 A3 3 0 0 1 28 31 H4 A3 3 0 0 1 1 28 V4 A3 3 0 0 1 4 1 Z" fill="#1d3557"/>
+  <rect x="8" y="1" width="15" height="9" rx="1" fill="#c9d3df"/>
+  <rect x="18" y="3" width="3" height="5" rx="0.5" fill="#1d3557"/>
+  <rect x="4.5" y="13" width="23" height="18" rx="2" fill="#f4c430"/>
+  <path d="M11 22 A5.5 5.5 0 1 1 12.6 25.9" fill="none" stroke="#1d3557" stroke-width="2.2" stroke-linecap="round"/>
+  <path d="M8.2 20.8 H13.8 L11 24.4 Z" fill="#1d3557" stroke="#1d3557" stroke-width="0.8" stroke-linejoin="round"/>
+  <path d="M16.5 18.3 V22 L19 23.4" fill="none" stroke="#1d3557" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -129,7 +129,7 @@ All exported functions use the `__stdcall` calling convention. Both Unicode (`W`
 
 - **Network Neighborhood Root Icon (implemented):** Total Commander automatically displays the **first `ICON` resource (by index)** embedded inside the plugin DLL (`restic.wfx` / `restic.wfx64`) to the left of `"Restic Backups"` in Network Neighborhood (no extra exported function is required). Per the official WFX specification:
   - Format: `src\restic_wfx.ico` linked into the DLL via `src\restic_wfx.rc`.
-  - Included frames inside `src\restic_wfx.ico` (5 resolutions): **16×16, 24×24, 32×32, 48×48** (32-bit BGRA uncompressed BMP/DIB frames) plus **256×256** (32-bit RGBA PNG-compressed), built from `logo\logo_16x16.ico`, `logo\logo_24x24.ico`, `logo\logo_32x32.ico`, `logo\logo_48x48.ico`, and `logo\logo_256x256.png`.
+  - Included frames inside `src\restic_wfx.ico` (5 resolutions): **16×16, 24×24, 32×32, 48×48** (32-bit BGRA uncompressed BMP/DIB frames) plus **256×256** (32-bit RGBA PNG-compressed), rendered from the SVG sources `logo\restic-wfx-16.svg` (16 px) and `logo\restic-wfx.svg` (all other sizes); the regeneration commands are in CONTRIBUTING.md, *Plugin Icon*. Keep the icon simple enough to read at 16 px.
 - **Per-Item Custom Icons (`FsExtractCustomIconW`, optional):** only needed if custom icons are desired for individual repositories or snapshots inside the file list (`FS_ICONFLAG_SMALL` requests 16×16, otherwise 32×32). When omitted, Total Commander uses standard folder icons and normal Windows file-extension associations.
 - **DLL Version Resource (`VS_VERSION_INFO`, implemented):** `version=` in `src\pluginst.inf` is the single source of truth for the plugin version. CMake turns it into `version.h` in the build directory (`src\version.h.in`: `MAJOR,MINOR,PATCH,0` / `"MAJOR.MINOR.PATCH"`, plus the per-bitness file name), which `src\restic_wfx.rc` embeds so Windows Explorer and Total Commander display the version and metadata in file properties ("Details" tab).
 
@@ -144,7 +144,7 @@ TCResticBrowser/
 ├── .vsconfig                   # Pinned Visual Studio Build Tools components (toolset 14.51, SDK 26100, CMake, ASan)
 ├── .github/workflows/build.yml # CI on windows-latest: build.cmd, build.cmd check, live tests (pinned restic)
 ├── .clang-format               # Code formatting rules (C11, 4 spaces, 100 cols)
-├── logo/                       # Logo sources (.ico 16/24/32/48 + PNG 256/512) used to assemble src/restic_wfx.ico
+├── logo/                       # SVG sources of src/restic_wfx.ico (restic-wfx.svg, restic-wfx-16.svg for 16 px)
 ├── src/                        # Every build input, and nothing else
 │   ├── CMakeLists.txt          # Targets, compiler hardening, reproducibility flags, version.h generation
 │   ├── pluginst.inf            # Total Commander auto-install manifest; version= and release-date= are canonical
