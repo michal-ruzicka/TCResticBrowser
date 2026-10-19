@@ -41,7 +41,7 @@ configure_file(version.h.in version.h @ONLY)
 # The tests expect the staged sample configuration and installer manifest
 # next to the plugin, exactly as the release ZIP ships them.
 configure_file(pluginst.inf pluginst.inf COPYONLY)
-configure_file(restic_plugin.ini restic_plugin.ini COPYONLY)
+configure_file(TCResticBrowser.ini TCResticBrowser.ini COPYONLY)
 
 # ---------------------------------------------------------------------------
 # Compiler and linker settings

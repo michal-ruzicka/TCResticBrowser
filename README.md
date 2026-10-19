@@ -34,14 +34,14 @@ that lets you browse [Restic](https://restic.net) backup repositories and
 copy files out of their snapshots, right in Total Commander's panels.**
 
 The plugin adds `\\\Restic Backups` to Network Neighborhood. Its top level
-lists the repositories configured in `restic_plugin.ini`; inside each one you
+lists the repositories configured in `TCResticBrowser.ini`; inside each one you
 find its snapshots, and inside a snapshot the backed-up directory tree.
 Everything is strictly read-only: the plugin runs the official `restic.exe`
 to list and extract data and never modifies a repository.
 
 ```text
 \\\Restic Backups\
-├── MyLocalBackup\                              <-- Level 0: Repository aliases (from restic_plugin.ini)
+├── MyLocalBackup\                              <-- Level 0: Repository aliases (from TCResticBrowser.ini)
 │   ├── 2026-10-18_09-30-00_[a1b2c3d4]\         <-- Level 1: Snapshots (YYYY-MM-DD_HH-MM-SS_[short_id])
 │   │   └── C\
 │   │       └── Users\
@@ -94,8 +94,8 @@ auto-installer:**
 2. In Total Commander, **navigate to the ZIP** file and press **Enter**.
 3. TC detects the bundled `pluginst.inf` and asks whether to install the
    plugin — **confirm** (default folder: `plugins\wfx\TCResticBrowser`).
-4. Copy `restic_plugin.ini` from the plugin folder to
-   `%APPDATA%\GHISLER\restic_plugin.ini` and add your repositories to the
+4. Copy `TCResticBrowser.ini` from the plugin folder to
+   `%APPDATA%\GHISLER\TCResticBrowser.ini` and add your repositories to the
    copy (see [Configuration](#configuration)).
 5. Open **Network Neighborhood** (`\\\` in the command line, or the `\`
    drive button → Network) and enter **Restic Backups**.
@@ -106,7 +106,7 @@ folder (for example `C:\Tools\TCResticBrowser\`) and add `TCResticBrowser.wfx`
 Options → Plugins → File system plugins → Configure → Add**.
 
 > Upgrading replaces the files in the plugin folder, including the sample
-> `restic_plugin.ini` there; your own copy in `%APPDATA%\GHISLER` is not
+> `TCResticBrowser.ini` there; your own copy in `%APPDATA%\GHISLER` is not
 > touched.
 
 ### Getting Restic
@@ -159,7 +159,7 @@ documentation.
 
 | Action | How It Works |
 | --- | --- |
-| **List Repositories** | Open **Network Neighborhood** (`\`) -> **`Restic Backups`**. Changes to `restic_plugin.ini` take effect immediately on panel refresh (`Ctrl+R` / `F2`). |
+| **List Repositories** | Open **Network Neighborhood** (`\`) -> **`Restic Backups`**. Changes to `TCResticBrowser.ini` take effect immediately on panel refresh (`Ctrl+R` / `F2`). |
 | **Browse Snapshots** | Enter a repository folder (`\<Alias>`). Prompted once for the repository password; kept in RAM for that alias across both panels until Total Commander unloads the plugin (or a wrong password is entered). Up to 3 password attempts are allowed. |
 | **Explore Files** | Enter any snapshot folder (`YYYY-MM-DD_HH-MM-SS_[short_id]`) and navigate the backed-up directory tree. |
 | **View File (`F3` / `Ctrl+Q`)** | Press **`F3`** (Lister) or **`Ctrl+Q`** (Quick View) on any file to stream it to a temporary location and view its contents. |
@@ -169,21 +169,21 @@ documentation.
 ### Configuration
 
 A fully commented sample configuration file
-([`src/restic_plugin.ini`](src/restic_plugin.ini)) ships in the release ZIP.
+([`src/TCResticBrowser.ini`](src/TCResticBrowser.ini)) ships in the release ZIP.
 
-#### Where to Place `restic_plugin.ini`
+#### Where to Place `TCResticBrowser.ini`
 
-Settings live in `restic_plugin.ini`. The plugin reads it from two locations
+Settings live in `TCResticBrowser.ini`. The plugin reads it from two locations
 and uses the **first one that exists** — values are not merged across
 files:
 
-1. `%APPDATA%\GHISLER\restic_plugin.ini` — per-user override
-2. `<plugin install dir>\restic_plugin.ini` — system-wide default, shipped
+1. `%APPDATA%\GHISLER\TCResticBrowser.ini` — per-user override
+2. `<plugin install dir>\TCResticBrowser.ini` — system-wide default, shipped
    with the plugin
 
 The shipped INI has every option commented out, so no repositories are
 listed until you add some. To configure the plugin for your user account,
-copy that file to `%APPDATA%\GHISLER\restic_plugin.ini` and edit the copy;
+copy that file to `%APPDATA%\GHISLER\TCResticBrowser.ini` and edit the copy;
 the system-wide file is then ignored entirely. The chosen file is re-read on
 every root listing and repository operation — edits take effect on the next
 refresh (**Ctrl+R**). The plugin never creates or modifies either file.
@@ -195,9 +195,9 @@ that is not valid UTF-8 is read in the Windows ANSI code page, so an INI
 saved for version 1.x keeps working.
 
 **Portable Total Commander:** keep your configuration in the
-`restic_plugin.ini` in the plugin folder, which travels with Total
+`TCResticBrowser.ini` in the plugin folder, which travels with Total
 Commander. Back it up before installing a new version of the plugin, as the
-installation replaces it with the sample. A `%APPDATA%\GHISLER\restic_plugin.ini`
+installation replaces it with the sample. A `%APPDATA%\GHISLER\TCResticBrowser.ini`
 on the computer you run it on would take precedence.
 
 #### How `restic.exe` Is Located
@@ -207,7 +207,7 @@ When executing a command, the plugin searches for `restic.exe` in this order:
 2. `<plugin_dir>\restic.exe` (next to the plugin DLL).
 3. The system `PATH` environment variable *(for security against working-directory hijacking, the process current directory is never searched)*.
 
-#### Example `restic_plugin.ini`
+#### Example `TCResticBrowser.ini`
 
 ```ini
 ; ==============================================================================

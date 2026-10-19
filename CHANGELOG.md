@@ -13,8 +13,8 @@ upstream 1.x line.
 ### Added
 
 - **32-bit plugin.** The release ZIP now contains `TCResticBrowser.wfx` for
-  32-bit Total Commander next to `TCResticBrowser.wfx64`; the auto-installer picks the right
-  one.
+  32-bit Total Commander next to `TCResticBrowser.wfx64`; the auto-installer
+  picks the right one.
 - **Reproducible builds.** The same sources and pinned toolchain produce a
   byte-identical ZIP (`/Brepro`, `/BREPRO`, `/pathmap`, pinned MSVC toolset
   and Windows SDK, ZIP timestamps from `release-date=` in `pluginst.inf`).
@@ -34,14 +34,15 @@ upstream 1.x line.
   strict, read-only reader of about 370 lines (`src\json.c`), so the plugin
   contains no third-party code. File sizes are now read as exact 64-bit
   integers. See *Why the Plugin Has Its Own JSON Reader* in the README.
-- **`restic_plugin.ini` lookup order** now matches the author's other
-  Total Commander plugins: `%APPDATA%\GHISLER\restic_plugin.ini` (per-user
-  override) wins over the file next to the plugin, which is only the shipped
-  sample. Previously the plugin-folder file won and the folder of Total
-  Commander's `wincmd.ini` was the fallback. **Upgrading from 1.x:** move a
-  `restic_plugin.ini` you edited in the plugin folder to
-  `%APPDATA%\GHISLER\`, otherwise installing the new version overwrites it.
-- **`restic_plugin.ini` is read as UTF-8**, like in the author's other
+- **Configuration file renamed and looked up like in the author's other
+  Total Commander plugins.** `restic_plugin.ini` became `TCResticBrowser.ini`,
+  and `%APPDATA%\GHISLER\TCResticBrowser.ini` (per-user override) wins over
+  the file next to the plugin, which is only the shipped sample. Previously
+  the plugin-folder file won and the folder of Total Commander's
+  `wincmd.ini` was the fallback. **Upgrading from 1.x:** move the
+  `restic_plugin.ini` you edited to `%APPDATA%\GHISLER\TCResticBrowser.ini`;
+  the new version does not read the old name.
+- **`TCResticBrowser.ini` is read as UTF-8**, like in the author's other
   Total Commander plugins, so repository aliases and paths may contain any
   characters. A UTF-8 or UTF-16 byte-order mark is honoured, and a file that
   is not valid UTF-8 is still read in the ANSI code page, as before.
@@ -60,9 +61,9 @@ upstream 1.x line.
   `TCResticBrowser.wfx`/`TCResticBrowser.wfx64`, and the auto-installer's
   default folder is `plugins\wfx\TCResticBrowser` instead of
   `plugins\wfx\restic`. **Upgrading from 1.x** therefore installs the plugin
-  next to the old one: remove the old `restic` entry under *Configuration →
-  Options → Plugins → File system plugins* and delete its folder, after
-  moving an edited `restic_plugin.ini` from there to `%APPDATA%\GHISLER\`.
+  next to the old one: after moving your configuration (see above), remove
+  the old `restic` entry under *Configuration → Options → Plugins → File
+  system plugins* and delete its folder.
 - **Release ZIP** is named `TCResticBrowser.vX.Y.Z.zip` and ships the
   license as `LICENSE.txt`.
 - **Documentation** restructured (README, CONTRIBUTING, this changelog), and
@@ -78,7 +79,8 @@ upstream 1.x line.
   directory. Names containing `\` or `/`, or consisting only of dots and
   spaces, are now skipped.
 - **Documentation of a relative `ResticPath`.** It is resolved against the
-  plugin folder, not the folder of `restic_plugin.ini` as documented before.
+  plugin folder, not the folder of the configuration file as documented
+  before.
 
 ## [v1.0.0] – 2026-10-18
 

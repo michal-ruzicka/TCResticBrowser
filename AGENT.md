@@ -35,23 +35,23 @@ The primary goal of Phase 1 (MVP) is to provide interactive, read-only browsing 
    - Every directory navigation queries the CLI directly to keep the codebase minimal, deterministic, and free from cache invalidation complexity.
 
 5. **Credential Lifecycle**
-   - No passwords are stored on disk (neither in `restic_plugin.ini` nor in external files).
+   - No passwords are stored on disk (neither in `TCResticBrowser.ini` nor in external files).
    - Credentials are requested at runtime when entering a repository via Total Commander's `RequestProcW` (`RT_Password`) callback.
    - Credentials remain in RAM only, in a small per-repository session table (8 slots, so two panels can browse two repositories without being re-prompted). Entries are wiped on wrong password, on `FsInitW` and on DLL unload; the oldest slot is recycled when the table is full.
 
 ---
 
-## 3. Configuration: `restic_plugin.ini`
+## 3. Configuration: `TCResticBrowser.ini`
 
 ### 3.1 INI File Path Resolution
 
 The first existing file is used in full - keys are never merged across files. This order is shared with the author's other Total Commander plugins (TCOfficeView, TCNewPlus); keep it identical.
 
-1. **Per-user override:** `%APPDATA%\GHISLER\restic_plugin.ini` (`config_get_user_ini_path()`, built from the `APPDATA` environment variable on every lookup).
-2. **System-wide default:** `<plugin_dir>\restic_plugin.ini`, next to the plugin DLL, resolved at load time in `DllMain` via `GetModuleFileNameW`. This is where the commented sample ships, so a plugin upgrade overwrites it; user settings belong in the per-user file.
+1. **Per-user override:** `%APPDATA%\GHISLER\TCResticBrowser.ini` (`config_get_user_ini_path()`, built from the `APPDATA` environment variable on every lookup).
+2. **System-wide default:** `<plugin_dir>\TCResticBrowser.ini`, next to the plugin DLL, resolved at load time in `DllMain` via `GetModuleFileNameW`. This is where the commented sample ships, so a plugin upgrade overwrites it; user settings belong in the per-user file.
 3. **`DefaultIniName` is ignored:** `FsSetDefaultParams` does nothing. Total Commander's own settings folder is usually `%APPDATA%\GHISLER` anyway; a deviating one (portable install, redirected `wincmd.ini`) is deliberately not consulted, for the same lookup as the sibling plugins.
 4. **Tests must isolate `%APPDATA%`:** `test_config` and `test_plugin_dll` point `APPDATA` at an empty temporary directory first, otherwise a developer's real per-user INI would change the results.
-5. **No Auto-Creation at Runtime (Sample Template in Repo):** the plugin DLL never creates or modifies `restic_plugin.ini` on disk. If neither file exists: the root listing (`\`) returns `ERROR_NO_MORE_FILES` (empty folder), `\<Alias>[...]` listings return `ERROR_PATH_NOT_FOUND`, and `FsGetFileW` returns `FS_FILE_NOTFOUND`; no password prompt and no popup are shown. A fully commented sample `src\restic_plugin.ini` is tracked in the repository, staged next to the built DLL by CMake, and shipped in the release ZIP.
+5. **No Auto-Creation at Runtime (Sample Template in Repo):** the plugin DLL never creates or modifies `TCResticBrowser.ini` on disk. If neither file exists: the root listing (`\`) returns `ERROR_NO_MORE_FILES` (empty folder), `\<Alias>[...]` listings return `ERROR_PATH_NOT_FOUND`, and `FsGetFileW` returns `FS_FILE_NOTFOUND`; no password prompt and no popup are shown. A fully commented sample `src\TCResticBrowser.ini` is tracked in the repository, staged next to the built DLL by CMake, and shipped in the release ZIP.
 
 ### 3.2 INI File Structure
 
@@ -93,7 +93,7 @@ Total Commander passes backslash-delimited paths rooted at `\`. The plugin maps 
 
 | Level | WFX Path | Data Source | Action / Presentation |
 | --- | --- | --- | --- |
-| **0. Root** | `\` | `[Repositories]` section of `restic_plugin.ini` | Returns each configured alias (e.g., `BackupLocale`, `ServerLinux`) as a virtual directory (`FILE_ATTRIBUTE_DIRECTORY`). |
+| **0. Root** | `\` | `[Repositories]` section of `TCResticBrowser.ini` | Returns each configured alias (e.g., `BackupLocale`, `ServerLinux`) as a virtual directory (`FILE_ATTRIBUTE_DIRECTORY`). |
 | **1. Repository** | `\<RepoAlias>\` | `restic snapshots --json --no-lock` | Executes Restic with `RESTIC_REPOSITORY` and `RESTIC_PASSWORD`. Returns each snapshot as a directory (`YYYY-MM-DD_HH-MM-SS_[short_id]`). |
 | **2. Snapshot/Subdir** | `\<RepoAlias>\<SnapshotDir>\<SubPath>` | `restic ls --json --no-lock <snapshot_id> <filter_path>` | Lists direct child files and folders at the requested directory depth without recursive traversal, populating `WIN32_FIND_DATAW` (64-bit file sizes, UTC `FILETIME` timestamps, attributes). |
 
@@ -148,14 +148,14 @@ TCResticBrowser/
 ├── src/                        # Every build input, and nothing else
 │   ├── CMakeLists.txt          # Targets, compiler hardening, reproducibility flags, version.h generation
 │   ├── pluginst.inf            # Total Commander auto-install manifest; version= and release-date= are canonical
-│   ├── restic_plugin.ini       # Commented sample configuration (staged next to the DLL and into the ZIP)
+│   ├── TCResticBrowser.ini       # Commented sample configuration (staged next to the DLL and into the ZIP)
 │   ├── restic_wfx.def          # Explicit DLL exports (undecorated names, also for x86 __stdcall)
 │   ├── restic_wfx.rc           # Windows resource script (ICON #1 + VS_VERSION_INFO metadata)
 │   ├── restic_wfx.ico          # Multi-resolution plugin icon
 │   ├── version.h.in            # Template for the generated version.h
 │   ├── fsplugin.h              # Total Commander WFX API declarations (+ FS_SET_TIME_UNKNOWN macro)
 │   ├── main.c                  # DllMain, WFX entry points, virtual path routing
-│   ├── config.c / config.h     # restic_plugin.ini resolution & parsing, binary resolution
+│   ├── config.c / config.h     # TCResticBrowser.ini resolution & parsing, binary resolution
 │   ├── restic_cli.c / .h       # Child process execution, Win32 pipes, snapshot/NDJSON parsing
 │   ├── json.c / json.h         # Minimal strict read-only JSON reader (portable C11, no Win32)
 │   └── tests/
@@ -264,11 +264,11 @@ build.cmd          :: x64 + x86 Release builds, all four test programs for both,
 build.cmd check    :: x64 only, no ZIP: Debug build + tests (CRT heap & leak checks), /analyze build, ASan test run
 ```
 
-Every variant has its own build directory (`build\x64`, `build\x86`, `build\check-debug`, `build\check-analyze`, `build\check-asan`), so nothing needs cleaning between them. The test programs are built next to the plugin, where CMake also stages `pluginst.inf` and `restic_plugin.ini`; they locate those files through their own executable path and run with the repository root as the current directory (for `tmp\restic.exe`). Under ASan the plugin DLL is not built and `test_plugin_dll` reports `[SKIP]`.
+Every variant has its own build directory (`build\x64`, `build\x86`, `build\check-debug`, `build\check-analyze`, `build\check-asan`), so nothing needs cleaning between them. The test programs are built next to the plugin, where CMake also stages `pluginst.inf` and `TCResticBrowser.ini`; they locate those files through their own executable path and run with the repository root as the current directory (for `tmp\restic.exe`). Under ASan the plugin DLL is not built and `test_plugin_dll` reports `[SKIP]`.
 
 **Reproducible builds:** `/Brepro /experimental:deterministic` (compiler), `/BREPRO` (linker), `/pathmap:<src>=./`, no PDB in Release, pinned toolset (`EXPECTED_CL`, `CMAKE_T`, `CMAKE_SDK` in `build.cmd`, mirrored in `.vsconfig`). The ZIP is made deterministic by normalizing staged text files to CRLF, writing `sha256sums.sha256`, and setting every staged timestamp to `release-date=` from `src\pluginst.inf`. Bump `version=` and `release-date=` together.
 
-**Release package:** contents (all in the ZIP root, otherwise Total Commander does not detect `pluginst.inf`): `pluginst.inf`, `TCResticBrowser.wfx`, `TCResticBrowser.wfx64`, `restic_plugin.ini`, `README.md`, `CHANGELOG.md`, `LICENSE.txt`, `sha256sums.sha256`. `pluginst.inf` names the 32-bit file (`file=TCResticBrowser.wfx`); 64-bit Total Commander appends `64` itself. `type=wfx`, `defaultdir=TCResticBrowser`. The DLL is named after the project like the sibling plugins (`TCNewPlus.wfx`, `TCOfficeView.wlx`); the CMake target stays `restic` with `OUTPUT_NAME`.
+**Release package:** contents (all in the ZIP root, otherwise Total Commander does not detect `pluginst.inf`): `pluginst.inf`, `TCResticBrowser.wfx`, `TCResticBrowser.wfx64`, `TCResticBrowser.ini`, `README.md`, `CHANGELOG.md`, `LICENSE.txt`, `sha256sums.sha256`. `pluginst.inf` names the 32-bit file (`file=TCResticBrowser.wfx`); 64-bit Total Commander appends `64` itself. `type=wfx`, `defaultdir=TCResticBrowser`. The DLL is named after the project like the sibling plugins (`TCNewPlus.wfx`, `TCOfficeView.wlx`); the CMake target stays `restic` with `OUTPUT_NAME`.
 
 If Total Commander still has a freshly built DLL loaded, the link fails; run `cm_UnloadPlugins` in Total Commander (or restart it) before rebuilding.
 
@@ -277,7 +277,7 @@ If Total Commander still has a freshly built DLL loaded, the link fails; run `cm
 | Program | Scope |
 | --- | --- |
 | `test_json.c` | The JSON reader on its own (no Win32, builds with any C compiler): rejection of malformed input (trailing commas, leading zeros, bad escapes, unescaped control characters, `\u0000`, trailing garbage, comments), scalars and number lexemes, exact 64-bit integers (`2^53 + 1`, `UINT64_MAX`, overflow refused), escape and surrogate decoding (pairs combined, lone ones -> U+FFFD), member lookup (case-sensitive, first duplicate wins), the nesting limit at exactly `JSON_MAX_DEPTH`, a 20 000-element document spanning several arena blocks, real `snapshots`/`ls` payload shapes, and pinned JSONTestSuite cases (n_/y_ edge cases not covered otherwise, 100 000 opening brackets) (154 assertions). |
-| `test_config.c` | Directory normalization, INI lookup order (`%APPDATA%\GHISLER` over the plugin directory, missing `%APPDATA%`, `DefaultIniName` ignored, no INI file auto-created when missing), INI encodings (UTF-8 with and without BOM, UTF-16 LE/BE, ANSI fallback, non-ASCII and CJK aliases, targets and `ResticPath`), INI syntax (CR/LF/CRLF, case-insensitive sections, foreign sections ignored, over-long entries skipped, oversized file refused), `restic.exe` resolution order, **PATH-only lookup (a planted `restic.exe` in the cwd must be ignored)**, `[Repositories]` parsing edge cases, 301-alias scaling (array and INI-section buffer growth), root enumeration through `FsFindFirstW/Next/Close`, WFX path validation, missing-`restic.exe` diagnostic, password prompt cancellation, the **missing-INI scenario** (`FsInitW`/`FsSetDefaultParams`/`FsFindFirstW`/`FsGetFileW` stay inert, no password prompt or popup, and the plugin and per-user directories remain empty), and verification that the sample `restic_plugin.ini` staged next to the test is valid and has 0 active repositories (136 assertions). |
+| `test_config.c` | Directory normalization, INI lookup order (`%APPDATA%\GHISLER` over the plugin directory, missing `%APPDATA%`, `DefaultIniName` ignored, no INI file auto-created when missing), INI encodings (UTF-8 with and without BOM, UTF-16 LE/BE, ANSI fallback, non-ASCII and CJK aliases, targets and `ResticPath`), INI syntax (CR/LF/CRLF, case-insensitive sections, foreign sections ignored, over-long entries skipped, oversized file refused), `restic.exe` resolution order, **PATH-only lookup (a planted `restic.exe` in the cwd must be ignored)**, `[Repositories]` parsing edge cases, 301-alias scaling (array and INI-section buffer growth), root enumeration through `FsFindFirstW/Next/Close`, WFX path validation, missing-`restic.exe` diagnostic, password prompt cancellation, the **missing-INI scenario** (`FsInitW`/`FsSetDefaultParams`/`FsFindFirstW`/`FsGetFileW` stay inert, no password prompt or popup, and the plugin and per-user directories remain empty), and verification that the sample `TCResticBrowser.ini` staged next to the test is valid and has 0 active repositories (136 assertions). |
 | `test_restic_cli.c` | ISO-8601 edge cases (exact epoch value, offsets, fractions, invalid calendar dates), snapshot naming, path normalization (1023-char CJK path), `restic_quote_arg` round-trip, snapshot/NDJSON parsers (prefix-sharing siblings, missing/empty/file targets, symlinks, 64-bit sizes, corrupt lines), process execution with `cmd.exe` as a deterministic stand-in (stdout/stderr separation, exit codes, environment injection/stripping/inheritance, timeout, cancellation, >100 KB output, >6000-char command line, spawn failures), and a **self-contained live test** against `tmp\restic.exe` including `restic_dump_file` streaming extraction, mtime preservation, 0-byte and 100 KB files, overwrite protection, binary fidelity (`00/0A/0D/1A` bytes), existing target preserved on every failure or abort, no leftover `~rp*.tmp`, local-side failures, argument validation, plus `test_dump_with_fake_restic` (a fake `restic` batch file that deterministically covers exit codes 10/11/12/other, stderr classification, partial output then failure, empty stderr, environment injection and the inactivity timeout: a silent child is killed, a slow but steady one survives) (273 assertions). |
 | `test_plugin_dll.c` | Loads the built plugin (`TCResticBrowser.wfx64` or `TCResticBrowser.wfx`, matching its own bitness) like Total Commander: exact 11-function export surface (`FsGetFile`/`FsGetFileW` included; write/delete/move functions forbidden), embedded `RT_GROUP_ICON` #1 + 5 `RT_ICON` frames (`16x16`..`256x256`), embedded `RT_VERSION` (`VS_VERSION_INFO` / `VS_FIXEDFILEINFO` matching the generated `version.h`), root name, INI next to the DLL, per-user `%APPDATA%\GHISLER` INI taking over in full without a reload while `DefaultIniName` is ignored (no file auto-created when missing), two concurrent find handles, ANSI stub behavior, and **end-to-end live navigation & extraction** across Level 0 -> Level 1 -> Level 2+, `FsGetFileW` single-file and recursive folder copy (`F5`), overwrite prompt protocol (`FS_FILE_EXISTS` -> `FS_COPYFLAGS_OVERWRITE`), `FS_COPYFLAGS_MOVE` rejection, binary fidelity and mtime, failed overwrite keeps the old file, local-side `FS_FILE_WRITEERROR`, invalid remote names, NULL arguments, `ESC` at start and mid-transfer, password flows inside `FsGetFileW` (cancel, 3 wrong, retry, cache reuse), password retry, per-repository sessions (8-slot eviction), empty/cancelled password, 3-strike failure, missing repository, 250-character alias error message, `ProgressProc` (`ESC`) cancellation and 6 concurrent worker threads (164 assertions). |
 

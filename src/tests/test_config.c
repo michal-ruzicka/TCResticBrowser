@@ -89,7 +89,7 @@ static void test_plugin_dir_and_default_params(void) {
     SetEnvironmentVariableW(L"APPDATA", L"C:\\Users\\TestUser\\AppData\\Roaming\\");
     WCHAR user_ini[MAX_PATH] = {0};
     EXPECT_TRUE(config_get_user_ini_path(user_ini, MAX_PATH), "Per-user INI path is built from %APPDATA%");
-    EXPECT_WSTR_EQ(user_ini, L"C:\\Users\\TestUser\\AppData\\Roaming\\GHISLER\\restic_plugin.ini",
+    EXPECT_WSTR_EQ(user_ini, L"C:\\Users\\TestUser\\AppData\\Roaming\\GHISLER\\TCResticBrowser.ini",
                    "Per-user INI lives in Total Commander's settings folder");
 
     FsDefaultParamStruct dps;
@@ -98,7 +98,7 @@ static void test_plugin_dir_and_default_params(void) {
     strncpy_s(dps.DefaultIniName, sizeof(dps.DefaultIniName), "D:\\Elsewhere\\fsplugin.ini", _TRUNCATE);
     FsSetDefaultParams(&dps);
     EXPECT_TRUE(config_get_user_ini_path(user_ini, MAX_PATH), "Per-user INI path still available");
-    EXPECT_WSTR_EQ(user_ini, L"C:\\Users\\TestUser\\AppData\\Roaming\\GHISLER\\restic_plugin.ini",
+    EXPECT_WSTR_EQ(user_ini, L"C:\\Users\\TestUser\\AppData\\Roaming\\GHISLER\\TCResticBrowser.ini",
                    "DefaultIniName does not move the per-user INI");
 
     SetEnvironmentVariableW(L"APPDATA", NULL);
@@ -130,7 +130,7 @@ static void test_ini_path_resolution_priority(void) {
     WCHAR resolved[MAX_PATH] = {0};
     BOOL ok = config_resolve_ini_path(resolved, MAX_PATH);
     EXPECT_TRUE(!ok, "Should return FALSE when no INI file exists");
-    EXPECT_WSTR_EQ(resolved, plugin_ini, "Candidate path points to <plugin_dir>\\restic_plugin.ini");
+    EXPECT_WSTR_EQ(resolved, plugin_ini, "Candidate path points to <plugin_dir>\\TCResticBrowser.ini");
     EXPECT_TRUE(GetFileAttributesW(plugin_ini) == INVALID_FILE_ATTRIBUTES &&
                 GetFileAttributesW(user_ini) == INVALID_FILE_ATTRIBUTES,
                 "No INI file is auto-created when missing");
@@ -574,7 +574,7 @@ static BOOL __stdcall mock_request_proc(
     return FALSE;
 }
 
-/* Test 8: with no restic_plugin.ini anywhere the plugin stays inert and never writes to disk */
+/* Test 8: with no TCResticBrowser.ini anywhere the plugin stays inert and never writes to disk */
 static void test_missing_ini_is_harmless(void) {
     WCHAR plugin_dir[MAX_PATH] = {0}, appdata_dir[MAX_PATH] = {0}, user_dir[MAX_PATH] = {0};
     WCHAR local[MAX_PATH] = {0}, saved_appdata[MAX_PATH] = {0};
@@ -621,16 +621,16 @@ static void test_missing_ini_is_harmless(void) {
     RemoveDirectoryW(appdata_dir);
     SetEnvironmentVariableW(L"APPDATA", saved_appdata);
 
-    /* Verify that the sample restic_plugin.ini the build stages next to this test is valid and all-commented */
+    /* Verify that the sample TCResticBrowser.ini the build stages next to this test is valid and all-commented */
     WCHAR sample_ini[MAX_PATH];
     DWORD n = GetModuleFileNameW(NULL, sample_ini, MAX_PATH);
     WCHAR* slash = (n > 0 && n < MAX_PATH) ? wcsrchr(sample_ini, L'\\') : NULL;
     EXPECT_TRUE(slash != NULL, "Directory of the test executable is known");
     *slash = L'\0';
-    wcscat_s(sample_ini, MAX_PATH, L"\\restic_plugin.ini");
+    wcscat_s(sample_ini, MAX_PATH, L"\\TCResticBrowser.ini");
     ResticConfig sample_cfg;
     EXPECT_TRUE(config_load_from_file(sample_ini, &sample_cfg) && sample_cfg.repo_count == 0,
-                "Staged restic_plugin.ini template exists and has all repositories commented out");
+                "Staged TCResticBrowser.ini template exists and has all repositories commented out");
     config_free(&sample_cfg);
 
     FsInitW(0, NULL, NULL, NULL);
@@ -719,7 +719,7 @@ int main(void) {
 #endif
     printf("Running Restic WFX Configuration Unit Tests...\n");
 
-    /* Never pick up the developer's own %APPDATA%\GHISLER\restic_plugin.ini */
+    /* Never pick up the developer's own %APPDATA%\GHISLER\TCResticBrowser.ini */
     WCHAR appdata_dir[MAX_PATH] = {0}, user_dir[MAX_PATH] = {0};
     make_temp_dir(L"restic_test_noappdata", appdata_dir, MAX_PATH);
     use_temp_appdata(appdata_dir, user_dir, MAX_PATH);

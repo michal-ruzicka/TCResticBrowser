@@ -214,11 +214,11 @@ static void test_export_surface(void) {
     FreeLibrary(m);
 }
 
-/* Scenario A: restic_plugin.ini sits next to the DLL (no per-user INI) */
+/* Scenario A: TCResticBrowser.ini sits next to the DLL (no per-user INI) */
 static void test_primary_ini_next_to_dll(void) {
     WCHAR dir[MAX_PATH], ini[MAX_PATH];
     EXPECT_TRUE(make_unique_dir(L"restic_dll_primary", dir, MAX_PATH), "Create plugin directory");
-    swprintf_s(ini, MAX_PATH, L"%ls\\restic_plugin.ini", dir);
+    swprintf_s(ini, MAX_PATH, L"%ls\\TCResticBrowser.ini", dir);
     EXPECT_TRUE(write_file(ini, "[Repositories]\r\nAlpha=D:\\r1\r\nBeta=D:\\r2\r\n"), "Write INI");
 
     Plugin p;
@@ -275,16 +275,16 @@ static void test_primary_ini_next_to_dll(void) {
 static WCHAR g_user_dir[MAX_PATH];
 
 /*
- * Scenario B: the per-user %APPDATA%\GHISLER\restic_plugin.ini wins over the INI next to the DLL;
+ * Scenario B: the per-user %APPDATA%\GHISLER\TCResticBrowser.ini wins over the INI next to the DLL;
  * DefaultIniName from FsSetDefaultParams is ignored and no INI is ever auto-created.
  */
 static void test_user_ini_overrides_plugin_ini(void) {
     WCHAR dir[MAX_PATH], plug_ini[MAX_PATH], user_ini[MAX_PATH], tc_dir[MAX_PATH], tc_ini[MAX_PATH];
     EXPECT_TRUE(make_unique_dir(L"restic_dll_userini", dir, MAX_PATH) &&
                 make_unique_dir(L"restic_dll_tcconfig", tc_dir, MAX_PATH), "Create directories");
-    swprintf_s(plug_ini, MAX_PATH, L"%ls\\restic_plugin.ini", dir);
-    swprintf_s(user_ini, MAX_PATH, L"%ls\\restic_plugin.ini", g_user_dir);
-    swprintf_s(tc_ini, MAX_PATH, L"%ls\\restic_plugin.ini", tc_dir);
+    swprintf_s(plug_ini, MAX_PATH, L"%ls\\TCResticBrowser.ini", dir);
+    swprintf_s(user_ini, MAX_PATH, L"%ls\\TCResticBrowser.ini", g_user_dir);
+    swprintf_s(tc_ini, MAX_PATH, L"%ls\\TCResticBrowser.ini", tc_dir);
     DeleteFileW(plug_ini);
     DeleteFileW(user_ini);
 
@@ -795,7 +795,7 @@ static void test_live_end_to_end_navigation(void) {
 
     WCHAR dir[MAX_PATH], ini[MAX_PATH];
     EXPECT_TRUE(make_unique_dir(L"restic_dll_e2e", dir, MAX_PATH), "Create E2E plugin directory");
-    swprintf_s(ini, MAX_PATH, L"%ls\\restic_plugin.ini", dir);
+    swprintf_s(ini, MAX_PATH, L"%ls\\TCResticBrowser.ini", dir);
 
     char restic_a[MAX_PATH] = {0}, repo_a[MAX_PATH] = {0}, ini_text[6144] = {0};
     WideCharToMultiByte(CP_ACP, 0, restic_abs, -1, restic_a, sizeof(restic_a), NULL, NULL);
@@ -1041,7 +1041,7 @@ int main(void) {
         return 0;
     }
 
-    /* Never pick up the developer's own %APPDATA%\GHISLER\restic_plugin.ini */
+    /* Never pick up the developer's own %APPDATA%\GHISLER\TCResticBrowser.ini */
     WCHAR appdata_dir[MAX_PATH];
     if (!make_unique_dir(L"restic_dll_appdata", appdata_dir, MAX_PATH) ||
         swprintf_s(g_user_dir, MAX_PATH, L"%ls\\GHISLER", appdata_dir) <= 0 ||

@@ -389,7 +389,7 @@ static HANDLE execute_repo_query(
     if (wcschr(restic_exe, L'\\') == NULL && wcschr(restic_exe, L'/') == NULL) {
         report_plugin_error(
             repo->alias,
-            L"restic.exe not found. Set ResticPath in restic_plugin.ini or place restic.exe in the plugin directory / PATH."
+            L"restic.exe not found. Set ResticPath in TCResticBrowser.ini or place restic.exe in the plugin directory / PATH."
         );
         SetLastError(ERROR_FILE_NOT_FOUND);
         return INVALID_HANDLE_VALUE;
@@ -690,7 +690,7 @@ int __stdcall FsGetFileW(WCHAR* RemoteName, WCHAR* LocalName, int CopyFlags, Rem
     if (wcschr(cfg.restic_path, L'\\') == NULL && wcschr(cfg.restic_path, L'/') == NULL) {
         report_plugin_error(
             repo->alias,
-            L"restic.exe not found. Set ResticPath in restic_plugin.ini or place restic.exe in the plugin directory / PATH."
+            L"restic.exe not found. Set ResticPath in TCResticBrowser.ini or place restic.exe in the plugin directory / PATH."
         );
         config_free(&cfg);
         return FS_FILE_READERROR;

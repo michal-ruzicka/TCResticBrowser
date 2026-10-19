@@ -3,14 +3,14 @@
 #include <stddef.h>
 
 /* Configuration file name and default binary name */
-#define CONFIG_INI_FILENAME       L"restic_plugin.ini"
+#define CONFIG_INI_FILENAME       L"TCResticBrowser.ini"
 #define CONFIG_USER_SUBDIR        L"GHISLER"   /* Total Commander's settings folder under %APPDATA% */
 #define CONFIG_DEFAULT_RESTIC_EXE L"restic.exe"
 #define CONFIG_MAX_PATH           1024
-#define CONFIG_MAX_INI_BYTES      (4 * 1024 * 1024)  /* A larger restic_plugin.ini is not read */
+#define CONFIG_MAX_INI_BYTES      (4 * 1024 * 1024)  /* A larger TCResticBrowser.ini is not read */
 
 /**
- * Single repository mapping under [Repositories] in restic_plugin.ini.
+ * Single repository mapping under [Repositories] in TCResticBrowser.ini.
  */
 typedef struct {
     WCHAR alias[MAX_PATH];          /* Virtual folder name displayed at plugin root "\" */
@@ -21,7 +21,7 @@ typedef struct {
  * Complete parsed plugin configuration.
  */
 typedef struct {
-    WCHAR ini_path[CONFIG_MAX_PATH];     /* Full path to the active restic_plugin.ini */
+    WCHAR ini_path[CONFIG_MAX_PATH];     /* Full path to the active TCResticBrowser.ini */
     WCHAR restic_path[CONFIG_MAX_PATH];  /* Resolved path or command for restic.exe */
     ResticRepoEntry* repos;              /* Heap-allocated array of repository entries */
     size_t repo_count;                   /* Number of repositories in repos */
@@ -43,15 +43,15 @@ void config_set_plugin_dir_from_module(HMODULE hModule);
 const WCHAR* config_get_plugin_dir(void);
 
 /**
- * Builds the per-user INI path %APPDATA%\GHISLER\restic_plugin.ini (whether or not it exists).
+ * Builds the per-user INI path %APPDATA%\GHISLER\TCResticBrowser.ini (whether or not it exists).
  * Returns FALSE when %APPDATA% is not set.
  */
 BOOL config_get_user_ini_path(WCHAR* out_path, size_t out_capacity);
 
 /**
- * Resolves the active restic_plugin.ini. The first existing file is used in full (no merging):
- * 1. %APPDATA%\GHISLER\restic_plugin.ini - per-user override.
- * 2. <plugin_dir>\restic_plugin.ini - system-wide file shipped with the plugin.
+ * Resolves the active TCResticBrowser.ini. The first existing file is used in full (no merging):
+ * 1. %APPDATA%\GHISLER\TCResticBrowser.ini - per-user override.
+ * 2. <plugin_dir>\TCResticBrowser.ini - system-wide file shipped with the plugin.
  *
  * Returns TRUE if an existing INI file was found at out_path, or FALSE when neither file exists
  * (in which case out_path receives the plugin-directory path, if known).

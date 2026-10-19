@@ -39,7 +39,7 @@ linked against the static MSVC runtime, and contains no third-party code.
 | `build\` | CMake out-of-source build trees and the ZIP staging folder (gitignored) |
 | `dist\` | Released ZIP bundles (gitignored) |
 | `logo\` | SVG sources of the plugin icon `src\restic_wfx.ico` (see [Plugin Icon](#plugin-icon)) |
-| `src\` | C sources and headers, `CMakeLists.txt`, `.def`/`.rc`/`.ico`, `pluginst.inf`, the sample `restic_plugin.ini` |
+| `src\` | C sources and headers, `CMakeLists.txt`, `.def`/`.rc`/`.ico`, `pluginst.inf`, the sample `TCResticBrowser.ini` |
 | `src\tests\` | Test programs and the JSON fuzz target |
 | `tmp\` | Optional live-test input `restic.exe` and the generated test repository (gitignored) |
 | `.gitattributes` | Line-ending normalization rules |
@@ -109,7 +109,7 @@ are not shipped in the ZIP) and run from the repository root:
 | Program | Scope |
 |---|---|
 | `test_json` | The JSON reader on its own: malformed input, escapes, surrogates, exact 64-bit integers, the nesting limit, real Restic output, pinned JSONTestSuite edge cases |
-| `test_config` | `restic_plugin.ini` lookup and parsing, `restic.exe` resolution (never from the current directory), root listing, the inert plugin without an INI |
+| `test_config` | `TCResticBrowser.ini` lookup and parsing, `restic.exe` resolution (never from the current directory), root listing, the inert plugin without an INI |
 | `test_restic_cli` | Snapshot and `ls` parsers, argument quoting, child-process handling with `cmd.exe` and a fake `restic` stand-in, and live tests against `tmp\restic.exe` |
 | `test_plugin_dll` | Loads the built DLL like Total Commander does: exact export surface, icon and version resources, INI lookup, and live navigation and extraction through the WFX API |
 
@@ -309,7 +309,7 @@ child process and parses its JSON output.
 ```
 Total Commander process
 └── TCResticBrowser.wfx[64]
-    ├── FsFindFirstW / FsFindNextW   \                     -> aliases from restic_plugin.ini
+    ├── FsFindFirstW / FsFindNextW   \                     -> aliases from TCResticBrowser.ini
     │                                \<alias>              -> restic snapshots --json
     │                                \<alias>\<snapshot>\… -> restic ls --json (one level)
     ├── FsGetFileW                   restic dump -> temporary file -> atomic
@@ -321,7 +321,7 @@ Total Commander process
 | Source | Responsibility |
 |---|---|
 | `main.c` | `DllMain`, the exported WFX entry points, virtual path routing, password sessions |
-| `config.c` | `restic_plugin.ini` lookup and parsing, `restic.exe` resolution |
+| `config.c` | `TCResticBrowser.ini` lookup and parsing, `restic.exe` resolution |
 | `restic_cli.c` | `CreateProcessW` with an explicit handle list and environment block, pipes, timeouts and cancellation, snapshot and `ls` parsing |
 | `json.c` | Strict read-only JSON reader (portable C11, no Win32) |
 

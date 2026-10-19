@@ -202,14 +202,14 @@ BOOL config_resolve_ini_path(WCHAR* out_path, size_t out_capacity) {
     if (!out_path || out_capacity == 0) return FALSE;
     out_path[0] = L'\0';
 
-    /* 1. Per-user override: %APPDATA%\GHISLER\restic_plugin.ini */
+    /* 1. Per-user override: %APPDATA%\GHISLER\TCResticBrowser.ini */
     WCHAR user_candidate[CONFIG_MAX_PATH] = {0};
     if (config_get_user_ini_path(user_candidate, CONFIG_MAX_PATH) && file_exists(user_candidate)) {
         wcsncpy_s(out_path, out_capacity, user_candidate, _TRUNCATE);
         return TRUE;
     }
 
-    /* 2. System-wide file shipped with the plugin: <plugin_dir>\restic_plugin.ini */
+    /* 2. System-wide file shipped with the plugin: <plugin_dir>\TCResticBrowser.ini */
     if (g_plugin_dir[0] != L'\0') {
         join_path(g_plugin_dir, CONFIG_INI_FILENAME, out_path, out_capacity);
         return file_exists(out_path);
