@@ -148,6 +148,7 @@ copy /Y "%BUILD%\x86\restic.wfx"     "%STAGE%\"             >nul
 copy /Y "%SRC%\pluginst.inf"         "%STAGE%\"             >nul
 copy /Y "%SRC%\restic_plugin.ini"    "%STAGE%\"             >nul
 copy /Y "%ROOT%\README.md"           "%STAGE%\"             >nul
+copy /Y "%ROOT%\CHANGELOG.md"        "%STAGE%\"             >nul
 copy /Y "%ROOT%\LICENSE"             "%STAGE%\LICENSE.txt"  >nul
 
 echo.

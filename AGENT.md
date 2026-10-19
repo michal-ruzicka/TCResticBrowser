@@ -264,7 +264,7 @@ Every variant has its own build directory (`build\x64`, `build\x86`, `build\chec
 
 **Reproducible builds:** `/Brepro /experimental:deterministic` (compiler), `/BREPRO` (linker), `/pathmap:<src>=./`, no PDB in Release, pinned toolset (`EXPECTED_CL`, `CMAKE_T`, `CMAKE_SDK` in `build.cmd`, mirrored in `.vsconfig`). The ZIP is made deterministic by normalizing staged text files to CRLF, writing `sha256sums.sha256`, and setting every staged timestamp to `release-date=` from `src\pluginst.inf`. Bump `version=` and `release-date=` together.
 
-**Release package:** contents (all in the ZIP root, otherwise Total Commander does not detect `pluginst.inf`): `pluginst.inf`, `restic.wfx`, `restic.wfx64`, `restic_plugin.ini`, `README.md`, `LICENSE.txt`, `sha256sums.sha256`. `pluginst.inf` names the 32-bit file (`file=restic.wfx`); 64-bit Total Commander appends `64` itself. `type=wfx`, `defaultdir=restic`.
+**Release package:** contents (all in the ZIP root, otherwise Total Commander does not detect `pluginst.inf`): `pluginst.inf`, `restic.wfx`, `restic.wfx64`, `restic_plugin.ini`, `README.md`, `CHANGELOG.md`, `LICENSE.txt`, `sha256sums.sha256`. `pluginst.inf` names the 32-bit file (`file=restic.wfx`); 64-bit Total Commander appends `64` itself. `type=wfx`, `defaultdir=restic`.
 
 If Total Commander still has a freshly built DLL loaded, the link fails; run `cm_UnloadPlugins` in Total Commander (or restart it) before rebuilding.
 

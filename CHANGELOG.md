@@ -1,0 +1,68 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+First release of the fork. Version 2.0.0 keeps its releases apart from the
+upstream 1.x line.
+
+### Added
+
+- **32-bit plugin.** The release ZIP now contains `restic.wfx` for 32-bit
+  Total Commander next to `restic.wfx64`; the auto-installer picks the right
+  one.
+- **Reproducible builds.** The same sources and pinned toolchain produce a
+  byte-identical ZIP (`/Brepro`, `/BREPRO`, `/pathmap`, pinned MSVC toolset
+  and Windows SDK, ZIP timestamps from `release-date=` in `pluginst.inf`).
+  The ZIP carries `sha256sums.sha256` for its files.
+- **Continuous integration.** Every push is built and tested on GitHub
+  Actions for both bitnesses, including the Debug/CRT leak checks, MSVC
+  static analysis, AddressSanitizer and the live tests against a real
+  `restic.exe` (pinned by SHA-256).
+
+### Changed
+
+- **Windows-native build.** `build.cmd` drives CMake and MSVC; the Bash
+  wrapper, NMake Makefile and Python packaging step are gone. All build
+  inputs live under `src\`, and `version=` in `src\pluginst.inf` is the only
+  place the version is written.
+- **Own JSON reader instead of cJSON.** The cJSON submodule is replaced by a
+  strict, read-only reader of about 370 lines (`src\json.c`), so the plugin
+  contains no third-party code. File sizes are now read as exact 64-bit
+  integers. See *Why the Plugin Has Its Own JSON Reader* in the README.
+- **Release ZIP** is named `TCResticBrowser.vX.Y.Z.zip` and ships the
+  license as `LICENSE.txt`.
+- **Documentation** restructured (README, CONTRIBUTING, this changelog), and
+  the Python project template and the Pi coding-agent tooling (scripts and
+  instructions in Italian) were removed.
+
+### Fixed
+
+- **Snapshot entries whose name is not a single path component are no
+  longer listed.** Restic stores names from non-Windows systems verbatim, so
+  a snapshot could contain a file named, for example, `..\..\evil.exe`;
+  copying its folder with `F5` could then write outside the chosen target
+  directory. Names containing `\` or `/`, or consisting only of dots and
+  spaces, are now skipped.
+- **Documentation of a relative `ResticPath`.** It is resolved against the
+  plugin folder, not the folder of `restic_plugin.ini` as documented before.
+
+## [v1.0.0] – 2026-10-18
+
+Upstream release of [Restic WFX Plugin](https://github.com/goldfix/Restic_WFX_Plugin)
+by Pietro Partescano, the base of this fork.
+
+### Added
+
+- **Read-only browsing of Restic repositories** in Total Commander's
+  Network Neighborhood: repositories from `restic_plugin.ini`, their
+  snapshots, and the snapshot directory trees, loaded one level at a time.
+- **Extraction** of files and folders with `F5`, `F3` and `Ctrl+Q`, streamed
+  through `restic dump` with atomic replacement of the target file.
+- **Passwords kept in memory only**, asked for through Total Commander's
+  password dialog and passed to `restic.exe` in an isolated environment
+  block.

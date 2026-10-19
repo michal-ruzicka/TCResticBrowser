@@ -1,28 +1,43 @@
-<p align="center">
-  <img src="logo/logo_256x256.png" alt="Restic WFX Plugin Logo" width="180" />
-</p>
+# TCResticBrowser: Restic Backup Browser for Total Commander
 
-<h1 align="center">Restic WFX Plugin for Total Commander</h1>
+[![Build](https://github.com/michal-ruzicka/TCResticBrowser/actions/workflows/build.yml/badge.svg)](https://github.com/michal-ruzicka/TCResticBrowser/actions/workflows/build.yml)
+[![GitHub Sponsors](https://img.shields.io/badge/Sponsor-GitHub%20Sponsors-ea4aaa?style=flat&logo=githubsponsors&logoColor=white)](https://github.com/sponsors/michal-ruzicka)
+[![Ko-fi](https://img.shields.io/badge/Tip-Ko--fi-FF5E5B?style=flat&logo=kofi&logoColor=white)](https://ko-fi.com/michal_ruzicka)
+[![Revolut](https://img.shields.io/badge/Pay-Revolut-191C1F?style=flat&logo=revolut&logoColor=white)](https://revolut.me/ruzicka_michal)
 
-<p align="center">
-  <b>Browse and extract files from <a href="https://restic.net">Restic</a> backup repositories directly inside Total Commander's dual-pane interface.</b>
-</p>
+> **A fork of [Restic WFX Plugin](https://github.com/goldfix/Restic_WFX_Plugin)
+> by Pietro Partescano ([@goldfix](https://github.com/goldfix)).** All the
+> functionality — browsing Restic repositories, snapshots and their file
+> trees, extraction with `F5`, the read-only and password-handling design —
+> is his work, and many thanks to him for it. This fork exists for three
+> reasons:
+>
+> 1. **Reproducible builds.** The same source and the pinned toolchain give
+>    a byte-identical release ZIP, so anyone can check that a published
+>    binary was built from the published source — see
+>    [Reproducible Builds](#reproducible-builds).
+> 2. **Minimal external dependencies.** The only third-party code the plugin
+>    carried, the cJSON library (a Git submodule), is replaced by a small
+>    JSON reader of its own; nothing is left but Windows itself, `restic.exe`
+>    and Total Commander — see [External Dependencies](#external-dependencies).
+> 3. **The same build system and CI as my other Total Commander plugins,**
+>    [TCOfficeView](https://github.com/michal-ruzicka/TCOfficeView) and
+>    [TCNewPlus](https://github.com/michal-ruzicka/TCNewPlus): a
+>    Windows-native `build.cmd` driving CMake and MSVC for both 32-bit and
+>    64-bit Total Commander, tests in every build, and the same build on
+>    GitHub Actions for every push.
+>
+> Changes useful upstream are offered back to the original project.
 
-<p align="center">
-  <a href="https://github.com/goldfix/Restic_WFX_Plugin/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" /></a>
-  <img src="https://img.shields.io/badge/Language-C11-00599C.svg" alt="Language: Pure C11" />
-  <img src="https://img.shields.io/badge/Platform-Windows%20x86%20%7C%20x64-0078D6.svg" alt="Platform: Windows x86 | x64" />
-  <img src="https://img.shields.io/badge/Total%20Commander-WFX%20%7C%20WFX64-orange.svg" alt="Total Commander WFX | WFX64" />
-  <img src="https://img.shields.io/badge/Version-1.0.0-success.svg" alt="Version: 1.0.0" />
-</p>
+**A [Total Commander](https://www.ghisler.com/) File System plugin (WFX)
+that lets you browse [Restic](https://restic.net) backup repositories and
+copy files out of their snapshots, right in Total Commander's panels.**
 
----
-
-## Overview & Purpose
-
-**Restic WFX** (`restic.wfx64` / `restic.wfx`) is a native 64-bit and 32-bit **File System Plugin (WFX)** for [Total Commander](https://www.ghisler.com/) written in pure **C11** (Win32 API, zero external DLL dependencies beyond `KERNEL32.dll`).
-
-It turns Total Commander's **Network Neighborhood** (`\\\Restic Backups\`) into a fast, strictly **read-only** browser and extractor for your [Restic](https://restic.net) backup repositories:
+The plugin adds `\\\Restic Backups` to Network Neighborhood. Its top level
+lists the repositories configured in `restic_plugin.ini`; inside each one you
+find its snapshots, and inside a snapshot the backed-up directory tree.
+Everything is strictly read-only: the plugin runs the official `restic.exe`
+to list and extract data and never modifies a repository.
 
 ```text
 \\\Restic Backups\
@@ -39,7 +54,7 @@ It turns Total Commander's **Network Neighborhood** (`\\\Restic Backups\`) into 
 
 ### Key Features
 
-- **Lazy On-Demand Directory Loading (WFX Architecture):** Unlike packer plugins (`.wcx`), which must enumerate every file in an archive upon opening, Restic WFX queries **only the single directory level you are currently viewing** (`restic ls --json --no-lock <snapshot> <path>`). Even repositories containing millions of files open responsively.
+- **Lazy On-Demand Directory Loading (WFX Architecture):** Unlike packer plugins (`.wcx`), which must enumerate every file in an archive upon opening, the plugin queries **only the single directory level you are currently viewing** (`restic ls --json --no-lock <snapshot> <path>`). Even repositories containing millions of files open responsively.
 - **Native File & Folder Extraction (`F5`, `F3`, `Ctrl+Q`):**
   - Copy individual files or entire directory trees out of any snapshot using **`F5`** (preserving original modification timestamps and 64-bit file sizes).
   - Inspect files directly with Total Commander's **Lister (`F3`)** or **Quick View (`Ctrl+Q`)**.
@@ -48,9 +63,51 @@ It turns Total Commander's **Network Neighborhood** (`\\\Restic Backups\`) into 
 - **Zero Passwords on Disk:** Repository passwords are requested interactively via Total Commander's native password dialog (`RequestProcW`), kept only in volatile RAM per repository alias for the active session, passed to `restic.exe` via an isolated environment block (`RESTIC_PASSWORD`), and wiped with `SecureZeroMemory`.
 - **Responsive Cancellation (`ESC`):** Long operations on remote backends can be aborted with `ESC` and use a 30-minute **inactivity** timeout (so slow multi-gigabyte transfers are never cut off as long as bytes keep flowing).
 
+**Project page:** <https://github.com/michal-ruzicka/TCResticBrowser> — source
+code, releases and issue tracker.
+
+**Binary releases:** <https://github.com/michal-ruzicka/TCResticBrowser/releases>
+
+**Support:** If you find this plugin useful, consider supporting its development.
+
+- <https://github.com/sponsors/michal-ruzicka> — GitHub Sponsors (GitHub account needed).
+
+  [![GitHub Sponsors](https://img.shields.io/github/sponsors/michal-ruzicka)](https://github.com/sponsors/michal-ruzicka)
+
+- <https://ko-fi.com/michal_ruzicka> — Buy me a Coffee with no specific account needed, card payment is possible.
+
+  [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/michal_ruzicka)
+
+- <https://revolut.me/ruzicka_michal> — Donate me via Revolut, debet/credit card or Apple Pay.
+
+  [![Revolut.Me](Revolut.Me.png)](https://revolut.me/ruzicka_michal)
+
 ---
 
-## About Restic & Where to Get It
+## Installation
+
+The plugin needs `restic.exe` (see [Getting Restic](#getting-restic) below).
+The recommended way to install the plugin itself is the **Total Commander
+auto-installer:**
+
+1. **Download** `TCResticBrowser.vX.Y.Z.zip` from the [**latest release**](https://github.com/michal-ruzicka/TCResticBrowser/releases).
+2. In Total Commander, **navigate to the ZIP** file and press **Enter**.
+3. TC detects the bundled `pluginst.inf` and asks whether to install the
+   plugin — **confirm** (default folder: `plugins\wfx\restic`).
+4. Edit `restic_plugin.ini` next to the installed plugin and add your
+   repositories (see [Configuration](#configuration)).
+5. Open **Network Neighborhood** (`\\\` in the command line, or the `\`
+   drive button → Network) and enter **Restic Backups**.
+
+If you prefer to install manually, unzip the archive into a persistent
+folder (for example `C:\Tools\TCResticBrowser\`) and add `restic.wfx`
+(32-bit TC) or `restic.wfx64` (64-bit TC) under **Configuration →
+Options → Plugins → File system plugins → Configure → Add**.
+
+> When upgrading, keep your own `restic_plugin.ini`: Total Commander may ask
+> before overwriting files in the plugin folder.
+
+### Getting Restic
 
 This plugin uses the official **Restic** command-line binary (`restic.exe`) under the hood to communicate with local, network, and cloud repositories.
 
@@ -59,7 +116,7 @@ This plugin uses the official **Restic** command-line binary (`restic.exe`) unde
 - **Official Website:** [https://restic.net](https://restic.net)
 - **Official Documentation:** [https://restic.readthedocs.io/en/latest/](https://restic.readthedocs.io/en/latest/)
 - **Download `restic.exe` for Windows (GitHub Releases):** [https://github.com/restic/restic/releases](https://github.com/restic/restic/releases)  
-  *(Download `restic_<version>_windows_amd64.zip`, extract the binary, and rename it to **`restic.exe`**)*
+  *(Download `restic_<version>_windows_amd64.zip` — or `windows_386` on 32-bit Windows — extract the binary, and rename it to **`restic.exe`**)*
 - **Install via WinGet / Scoop / Chocolatey:**
   ```powershell
   winget install restic.restic
@@ -67,40 +124,52 @@ This plugin uses the official **Restic** command-line binary (`restic.exe`) unde
   # or: choco install restic
   ```
 
----
+### Verifying Releases
 
-## Installation in Total Commander
+Each release ZIP is accompanied by a detached GPG signature file
+(`TCResticBrowser.vX.Y.Z.zip.asc`). Before installing, verify that the
+archive has not been tampered with:
 
-### Option A: Automatic Installation (Recommended)
+```
+gpg --keyserver keys.openpgp.org --recv-keys 489C5EC80FD62BE89E59B4F719C13E8CE0F5DB61
+gpg --verify TCResticBrowser.vX.Y.Z.zip.asc TCResticBrowser.vX.Y.Z.zip
+```
 
-1. Download `TCResticBrowser.v<version>.zip` from the [GitHub Releases](https://github.com/michal-ruzicka/TCResticBrowser/releases) page.
-2. In Total Commander, navigate to the ZIP file and **double-click it** (or press `Enter`).
-3. Total Commander reads the bundled `pluginst.inf`, asks where to install the plugin (default: `plugins\wfx\restic`) and registers it automatically as **`Restic Backups`** in Network Neighborhood.
-4. Edit `restic_plugin.ini` (extracted next to the plugin DLL) and add your repositories (see below).
-5. Open **Network Neighborhood** (`Alt+F1` / `Alt+F2` -> `\`) and enter **`Restic Backups`**.
+GPG should report `Good signature from "Michal Růžička <ruzicka.mich@gmail.com>"`.
+The full fingerprint of the signing key is `489C 5EC8 0FD6 2BE8 9E59  B4F7 19C1 3E8C E0F5 DB61`.
 
-The ZIP contains: `pluginst.inf`, `restic.wfx` (32-bit), `restic.wfx64` (64-bit), `restic_plugin.ini` (commented sample), `README.md`, `LICENSE.txt` and `sha256sums.sha256`.
+#### Reproducible Builds
 
-> If a `restic_plugin.ini` already exists in the target folder (upgrade), make sure to keep your own copy of it: Total Commander may ask before overwriting files.
+Every release is built from a pinned, identical toolchain, so the same
+source code always produces byte-for-byte identical binaries. This means
+you are not just trusting the GPG signature — you can independently confirm
+that the published binary matches the published source code by building it
+yourself and comparing the SHA-256 of the ZIP against the released ZIP archive
+or the [CI build log](https://github.com/michal-ruzicka/TCResticBrowser/actions)
+for the release commit.
 
-### Option B: Manual Installation
+Full details — how the build achieves this, and how to run a verification
+build yourself — are in
+[Reproducible Builds](CONTRIBUTING.md#reproducible-builds) in the developer
+documentation.
 
-1. Extract `restic.wfx64` (64-bit Total Commander) or `restic.wfx` (32-bit) and `restic_plugin.ini` from the ZIP and copy them (optionally together with `restic.exe`) into a dedicated plugin folder, for example:
-   ```text
-   C:\TotalCmd\plugins\wfx\restic\restic.wfx64
-   ```
-2. In Total Commander, open **Configuration** -> **Options...** -> **Plugins** -> **File system plugins (.WFX)** -> click **Configure**.
-3. Click **Add**, select `restic.wfx64` (or `restic.wfx`), and confirm with **OK**.
-4. Edit `restic_plugin.ini` (see below) and add your repositories.
-5. Open **Network Neighborhood** (`Alt+F1` / `Alt+F2` -> `\`) and enter **`Restic Backups`**.
+## Usage
 
----
+| Action | How It Works |
+| --- | --- |
+| **List Repositories** | Open **Network Neighborhood** (`\`) -> **`Restic Backups`**. Changes to `restic_plugin.ini` take effect immediately on panel refresh (`Ctrl+R` / `F2`). |
+| **Browse Snapshots** | Enter a repository folder (`\<Alias>`). Prompted once for the repository password; kept in RAM for that alias across both panels until Total Commander unloads the plugin (or a wrong password is entered). Up to 3 password attempts are allowed. |
+| **Explore Files** | Enter any snapshot folder (`YYYY-MM-DD_HH-MM-SS_[short_id]`) and navigate the backed-up directory tree. |
+| **View File (`F3` / `Ctrl+Q`)** | Press **`F3`** (Lister) or **`Ctrl+Q`** (Quick View) on any file to stream it to a temporary location and view its contents. |
+| **Restore / Extract (`F5`)** | Select one or more files or directories and press **`F5`** to copy them to the target panel, preserving original `LastWriteTime` timestamps. Standard Total Commander overwrite prompts are supported. |
+| **Cancel Operation (`ESC`)** | Press **`ESC`** in Total Commander's progress dialog to terminate the underlying `restic.exe` child process and clean up any temporary file. |
 
-## Configuration (`restic_plugin.ini`)
+### Configuration
 
-A fully commented sample configuration file ([`src/restic_plugin.ini`](src/restic_plugin.ini)) ships in the release ZIP.
+A fully commented sample configuration file
+([`src/restic_plugin.ini`](src/restic_plugin.ini)) ships in the release ZIP.
 
-### Where to Place `restic_plugin.ini`
+#### Where to Place `restic_plugin.ini`
 
 The plugin never auto-creates or modifies `restic_plugin.ini` at runtime. On every root listing or repository operation, it searches for `restic_plugin.ini` in the following order:
 
@@ -117,14 +186,14 @@ The plugin never auto-creates or modifies `restic_plugin.ini` at runtime. On eve
 
 > **Encoding Note:** Save `restic_plugin.ini` as **ANSI** (system code page) or **UTF-16 LE (with BOM)**. Standard Win32 INI APIs (`GetPrivateProfile*W`) do not decode UTF-8 when the file contains non-ASCII characters.
 
-### How `restic.exe` Is Located
+#### How `restic.exe` Is Located
 
 When executing a command, the plugin searches for `restic.exe` in this order:
 1. The path configured in `ResticPath=` under `[Settings]` (absolute path, or relative to the plugin directory).
 2. `<plugin_dir>\restic.exe` (next to the plugin DLL).
 3. The system `PATH` environment variable *(for security against working-directory hijacking, the process current directory is never searched)*.
 
-### Example `restic_plugin.ini`
+#### Example `restic_plugin.ini`
 
 ```ini
 ; ==============================================================================
@@ -164,52 +233,86 @@ LocalMinio=s3:http://192.168.1.60:9000/restic-backups
 GoogleDrive=rclone:gdrive:Backups/restic_repo
 ```
 
----
+## External Dependencies
 
-## Usage in Total Commander
+The plugin depends on nothing but what it cannot do without:
 
-| Action | How It Works |
-| --- | --- |
-| **List Repositories** | Open **Network Neighborhood** (`\`) -> **`Restic Backups`**. Changes to `restic_plugin.ini` take effect immediately on panel refresh (`Ctrl+R` / `F2`). |
-| **Browse Snapshots** | Enter a repository folder (`\<Alias>`). Prompted once for the repository password; kept in RAM for that alias across both panels until Total Commander unloads the plugin (or a wrong password is entered). Up to 3 password attempts are allowed. |
-| **Explore Files** | Enter any snapshot folder (`YYYY-MM-DD_HH-MM-SS_[short_id]`) and navigate the backed-up directory tree. |
-| **View File (`F3` / `Ctrl+Q`)** | Press **`F3`** (Lister) or **`Ctrl+Q`** (Quick View) on any file to stream it to a temporary location and view its contents. |
-| **Restore / Extract (`F5`)** | Select one or more files or directories and press **`F5`** to copy them to the target panel, preserving original `LastWriteTime` timestamps. Standard Total Commander overwrite prompts are supported. |
-| **Cancel Operation (`ESC`)** | Press **`ESC`** in Total Commander's progress dialog to terminate the underlying `restic.exe` child process and clean up any temporary file. |
+- **Windows** — the plugin imports only `KERNEL32.dll` and links the C
+  runtime statically, so no Visual C++ Redistributable is needed.
+- **[Restic](https://restic.net)** ([github.com/restic/restic](https://github.com/restic/restic),
+  BSD 2-Clause License) — run as an external `restic.exe` process, never
+  linked in.
+- **Total Commander** — the plugin implements the
+  [WFX plugin interface](https://www.ghisler.com/plugins.htm) by Christian
+  Ghisler; the interface declarations are in `src/fsplugin.h`.
 
----
+### Why the Plugin Has Its Own JSON Reader
 
-## Building & Testing from Source
+`restic.exe` reports snapshots and directory listings as JSON
+(`restic snapshots --json`, `restic ls --json`), so the plugin has to parse
+JSON. Upstream used the [cJSON](https://github.com/DaveGamble/cJSON) library
+as a Git submodule. This fork replaces it with `src/json.c`, a strict,
+read-only JSON reader of about 370 lines, because no component the plugin
+needs anyway offers JSON parsing that is practical to use:
 
-### Prerequisites
+- **Windows** has a JSON parser only in WinRT (`Windows.Data.Json`), which
+  plain C can reach only through COM-style ABI calls — more code than the
+  whole reader.
+- **Restic** offers machine-readable output only as JSON; its human-readable
+  output is not a stable interface, and file names containing line breaks
+  cannot be separated reliably from it.
+- **Total Commander** has nothing of the kind.
 
-- **Windows 10/11**
-- **Visual Studio 2026 Build Tools** with the components pinned in [`.vsconfig`](.vsconfig) (C++ toolset 14.51, Windows SDK 10.0.26100, CMake, AddressSanitizer). [`setup-build-environment-example.cmd`](setup-build-environment-example.cmd) installs them on a fresh machine and runs the build.
-- *(Optional)* `tmp\restic.exe` to enable the live end-to-end integration tests (otherwise they are reported as `[SKIP]`).
+A library would not be the smaller risk either. The JSON parsed here
+describes repository content — file names chosen by whoever created the
+backed-up files — and is parsed inside Total Commander's own process, so the
+code that parses it should be as small as possible and readable in full.
+cJSON is about eight times larger than what the plugin needs (it also builds,
+modifies and prints JSON), and was pinned to an untagged development commit.
+The reader does only what the plugin uses: it parses one document into an
+immutable tree held in a single memory arena, with no serialisation and no
+mutation. It is deliberately strict — it rejects anything outside RFC 8259,
+nesting deeper than 64 levels, and strings containing `\u0000` (so every
+decoded name is a plain C string that cannot be cut short) — and reads file
+sizes as exact 64-bit integers instead of going through floating point.
 
-### Build Commands
+The reader is generic: it understands any valid JSON, not just a list of
+expected keywords. The plugin looks up the few fields it uses (`id`,
+`short_id`, `time`, `name`, `type`, `size`, `mtime`, `atime`, `ctime`,
+`path`, `message_type`, `message`), so fields and message types that a newer
+Restic adds are simply ignored; a missing field skips the entry or leaves its
+size or time unknown, and a line that is not valid JSON fails the listing
+instead of being guessed at.
 
-From a plain `cmd.exe` prompt (`build.cmd` activates the compiler environment itself):
+How the reader is tested:
 
-```bat
-build.cmd          :: x64 + x86 Release builds, all tests for both, then dist\TCResticBrowser.v<version>.zip
-build.cmd check    :: x64 Debug build + tests (CRT leak checks), MSVC /analyze, AddressSanitizer tests
-```
+- **Unit tests** (`src/tests/test_json.c`, run by every build on both
+  bitnesses and under AddressSanitizer): malformed input, every escape,
+  surrogate pairs, exact 64-bit integers and overflow, the nesting limit,
+  documents spanning several memory blocks, real Restic output, and a pinned
+  selection of edge cases from JSONTestSuite.
+- **[JSONTestSuite](https://github.com/nst/JSONTestSuite)**, the reference
+  conformance corpus for JSON parsers, run in full: all 188 inputs a parser
+  must reject are rejected, and all 95 it must accept are accepted except the
+  two containing `\u0000`, which the reader refuses by design.
+- **Differential testing** against Python's `json` module on 80,000 generated
+  and mutated documents: identical results apart from the documented
+  deliberate differences.
+- **Coverage-guided fuzzing** with libFuzzer, AddressSanitizer and
+  UndefinedBehaviorSanitizer (`src/tests/fuzz_json.c`), seeded with
+  JSONTestSuite and real Restic output: about 90 million inputs without a
+  sanitizer finding or a violated invariant; code coverage stopped growing
+  within the first minute.
 
-The ZIP is installable by double-clicking it in Total Commander. Its version and file timestamps come from `version=` and `release-date=` in `src\pluginst.inf`, and the build is reproducible: the same sources and pinned toolchain give a bit-identical ZIP (see `AGENT.md`, section 8.6).
+## Contributing
 
----
+Build instructions, repo layout and architecture notes for developers live
+in [CONTRIBUTING.md](CONTRIBUTING.md); the detailed technical specification,
+shared with the coding agents used on this project, is in
+[AGENT.md](AGENT.md).
 
-## External Libraries & Acknowledgments
+## License
 
-- **[Total Commander WFX Plugin SDK](https://www.ghisler.com/plugins.htm)** by Christian Ghisler — File System Plugin interface specification (`src/fsplugin.h`).
-- **[Restic](https://restic.net)** ([github.com/restic/restic](https://github.com/restic/restic)) — Invoked as an external CLI process (`restic.exe`, **BSD 2-Clause License**).
-
----
-
-## Project Links & License
-
-- **GitHub Repository:** [https://github.com/goldfix/Restic_WFX_Plugin](https://github.com/goldfix/Restic_WFX_Plugin)
-- **Issue Tracker:** [https://github.com/goldfix/Restic_WFX_Plugin/issues](https://github.com/goldfix/Restic_WFX_Plugin/issues)
-- **Architecture & Developer Specification:** [`AGENT.md`](AGENT.md)
-- **License:** Licensed under the **[MIT License](LICENSE)** — Copyright (c) 2026 Pietro Partescano.
+This project is licensed under the MIT License, like the upstream project it
+is forked from — see [LICENSE](LICENSE) for the full text. Release notes are
+in [CHANGELOG.md](CHANGELOG.md).
