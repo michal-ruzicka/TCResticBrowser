@@ -3,5 +3,5 @@ description=Restic Backup Browser - Read-only WFX plugin for Restic repositories
 type=wfx
 file=restic.wfx
 defaultdir=restic
-version=1.0.0
-release-date=2026-10-18
+version=2.0.0-devel
+release-date=2026-10-19

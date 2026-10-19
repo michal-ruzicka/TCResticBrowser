@@ -17,13 +17,15 @@ option(RESTIC_WFX_ASAN "Compile with AddressSanitizer; the plugin DLL itself is 
 
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS pluginst.inf)
 file(STRINGS pluginst.inf _version_line REGEX "^version=")
-if(NOT _version_line MATCHES "^version=([0-9]+)\\.([0-9]+)\\.([0-9]+)")
-    message(FATAL_ERROR "pluginst.inf: no version=MAJOR.MINOR.PATCH line")
+# A pre-release suffix (1.1.0-devel between releases) is kept in the product
+# version string; the numeric FILEVERSION carries MAJOR.MINOR.PATCH.0 only.
+if(NOT _version_line MATCHES "^version=(([0-9]+)\\.([0-9]+)\\.([0-9]+)(-[0-9A-Za-z.]+)?)[\r]*$")
+    message(FATAL_ERROR "pluginst.inf: no version=MAJOR.MINOR.PATCH[-suffix] line")
 endif()
-set(RESTIC_WFX_VER_MAJOR ${CMAKE_MATCH_1})
-set(RESTIC_WFX_VER_MINOR ${CMAKE_MATCH_2})
-set(RESTIC_WFX_VER_PATCH ${CMAKE_MATCH_3})
-set(RESTIC_WFX_VERSION "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}.${CMAKE_MATCH_3}")
+set(RESTIC_WFX_VERSION "${CMAKE_MATCH_1}")
+set(RESTIC_WFX_VER_MAJOR ${CMAKE_MATCH_2})
+set(RESTIC_WFX_VER_MINOR ${CMAKE_MATCH_3})
+set(RESTIC_WFX_VER_PATCH ${CMAKE_MATCH_4})
 
 # Total Commander loads <name>.wfx in its 32-bit and <name>.wfx64 in its
 # 64-bit edition; pluginst.inf names the 32-bit file for both.
