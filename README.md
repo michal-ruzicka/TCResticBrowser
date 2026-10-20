@@ -7,47 +7,25 @@
 
 > **A fork of [Restic WFX Plugin](https://github.com/goldfix/Restic_WFX_Plugin)
 > by Pietro Partescano ([@goldfix](https://github.com/goldfix)).** All the
-> functionality — browsing Restic repositories, snapshots and their file
+> basic functionality — browsing Restic repositories, snapshots and their file
 > trees, extraction with `F5`, the read-only and password-handling design —
-> is his work, and many thanks to him for it. This fork exists for three
-> reasons:
+> is his work, and many thanks to him for it, above all for the idea of the
+> plugin itself.
 >
-> 1. **Reproducible builds.** The same source and the pinned toolchain give
->    a byte-identical release ZIP, so anyone can check that a published
->    binary was built from the published source — see
->    [Reproducible Builds](#reproducible-builds).
-> 2. **Minimal external dependencies.** The only third-party code the plugin
->    carried, the cJSON library (a Git submodule), is replaced by a small
->    JSON reader of its own; nothing is left but Windows itself, `restic.exe`
->    and Total Commander — see [External Dependencies](#external-dependencies).
-> 3. **The same build system and CI as my other Total Commander plugins,**
->    [TCOfficeView](https://github.com/michal-ruzicka/TCOfficeView) and
->    [TCNewPlus](https://github.com/michal-ruzicka/TCNewPlus): a
->    Windows-native `build.cmd` driving CMake and MSVC for both 32-bit and
->    64-bit Total Commander, tests in every build, and the same build on
->    GitHub Actions for every push.
-> On top of that, version 2.0.0 of the fork improves the plugin itself:
+> This fork started mainly to have **reproducible builds**: the same source
+> and the pinned toolchain give a byte-identical release ZIP, so anyone can
+> check that a published binary was built from the published source — see
+> [Reproducible Builds](#reproducible-builds).
 >
-> - **A 32-bit build** next to the 64-bit one; the auto-installer picks the
->   one that matches your Total Commander.
-> - **Configuration like in my other plugins:** a per-user
->   `%APPDATA%\GHISLER\TCResticBrowser.ini` wins over the sample shipped in
->   the plugin folder, so an update never overwrites your settings, and the
->   file is read as UTF-8 — see [Configuration](#configuration).
-> - **A configurable name** of the plugin's folder in Network Neighborhood —
->   see [Root Folder Name](#root-folder-name).
-> - **A new icon** drawn as SVG and designed to stay legible at 16 px.
-> - **A security fix:** a snapshot entry named like `..\..\evil.exe` (which
->   restic stores verbatim from non-Windows systems) can no longer make `F5`
->   write outside the target folder.
->
-> The full list, including upgrade notes for 1.x users, is in the
-> [changelog](CHANGELOG.md). Changes useful upstream are offered back to the
-> original project.
+> Since then, many more changes and improvements were proposed and implemented.
+> The full list, including upgrade notes for original 1.*x* users, is in the
+> [CHANGELOG.md](CHANGELOG.md).
 
 **A [Total Commander](https://www.ghisler.com/) File System plugin (WFX)
 that lets you browse [Restic](https://restic.net) backup repositories and
 copy files out of their snapshots, right in Total Commander's panels.**
+
+![TCResticBrowser Logo – a floppy disc with time machine symbol](logo/TCResticBrowser.svg)
 
 The plugin adds `\\\TCResticBrowser` to Network Neighborhood (the name is
 [configurable](#root-folder-name)). Its top level

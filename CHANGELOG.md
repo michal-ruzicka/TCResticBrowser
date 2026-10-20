@@ -94,7 +94,7 @@ upstream 1.x line.
 ## [v1.0.0] – 2026-10-18
 
 Upstream release of [Restic WFX Plugin](https://github.com/goldfix/Restic_WFX_Plugin)
-by Pietro Partescano, the base of this fork.
+by Pietro Partescano, the base of this fork was commit [c8481b43c9ab2867eee824719e3a9c6785db6c61](https://github.com/goldfix/Restic_WFX_Plugin/commit/c8481b43c9ab2867eee824719e3a9c6785db6c61).
 
 ### Added
 
