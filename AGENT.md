@@ -79,9 +79,10 @@ NAS_SMB=\\nas\share\restic_repo
 3. Fallback to `restic.exe` found in the directories listed in the `PATH` environment variable.
 
 Rules enforced by `config_resolve_restic_path()`:
-- **The current directory is never searched.** `SearchPathW` and bare-name `CreateProcess` lookups include the process working directory (which follows the Total Commander panel), so a `restic.exe` planted in a browsed folder could hijack the plugin. `PATH` is therefore walked manually (`find_in_path_env`): empty entries are skipped, quoted entries are unquoted, an extension-less name gets `.exe` appended, and the hit is returned as an absolute path.
-- When nothing is found the function returns `FALSE` and the bare name `restic.exe`. `restic_exec_command()` refuses bare names (`RESTIC_ERR_SPAWN_FAILED`), so the caller must report "restic.exe not found" instead of spawning anything.
-- An explicit `ResticPath` that does not exist silently falls through to steps 2-3.
+- **The current directory is never searched.** `SearchPathW` and bare-name `CreateProcess` lookups include the process working directory (which follows the Total Commander panel), so a `restic.exe` planted in a browsed folder could hijack the plugin. `PATH` is therefore walked manually (`find_in_path_env`): empty entries and entries that are not absolute (`.`, `bin`, `C:tools`, an unexpanded `%SystemRoot%\...`) are skipped, quoted entries are unquoted, an extension-less name gets `.exe` appended, and the hit is returned as an absolute path.
+- Only absolute paths (`config_is_absolute_path`: `X:\...` or `\\server\...`) are ever used. A relative `ResticPath` is joined to the plugin folder; a drive-relative (`C:restic.exe`) or root-relative (`\tools\restic.exe`) one is ignored. A relative `%APPDATA%` disables the per-user INI.
+- When nothing is found the function returns `FALSE` and the bare name `restic.exe`. `restic_exec_command()` and `restic_dump_file()` refuse every path that is not absolute (`RESTIC_ERR_SPAWN_FAILED`), so the caller must report "restic.exe not found" instead of spawning anything.
+- An explicit `ResticPath` that does not exist silently falls through to steps 2-3, and so does one too long for the path buffers: paths are never truncated, and `join_path` checks the length before `wcscat_s`, whose overflow handler would terminate Total Commander.
 
 ### 3.4 INI File Encoding
 

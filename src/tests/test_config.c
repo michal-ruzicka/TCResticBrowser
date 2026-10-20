@@ -105,6 +105,8 @@ static void test_plugin_dir_and_default_params(void) {
     SetEnvironmentVariableW(L"APPDATA", NULL);
     EXPECT_TRUE(!config_get_user_ini_path(user_ini, MAX_PATH) && user_ini[0] == L'\0',
                 "No per-user INI path without %APPDATA%");
+    SetEnvironmentVariableW(L"APPDATA", L"Roaming");
+    EXPECT_TRUE(!config_get_user_ini_path(user_ini, MAX_PATH), "A relative %APPDATA% is not used");
     SetEnvironmentVariableW(L"APPDATA", saved_appdata);
 }
 
@@ -537,6 +539,50 @@ static void test_restic_lookup_ignores_current_directory(void) {
     WCHAR resolved_c[MAX_PATH] = {0};
     BOOL ok_c = config_resolve_restic_path(ini_path, resolved_c, MAX_PATH);
 
+    /* Case D: relative PATH entries would resolve against the current directory */
+    WCHAR cwd_sub[MAX_PATH] = {0}, cwd_sub_restic[MAX_PATH] = {0};
+    swprintf_s(cwd_sub, MAX_PATH, L"%ls\\bin", cwd_dir);
+    swprintf_s(cwd_sub_restic, MAX_PATH, L"%ls\\restic.exe", cwd_sub);
+    CreateDirectoryW(cwd_sub, NULL);
+    write_text_file(cwd_sub_restic, "MZ_PLANTED");
+    SetEnvironmentVariableW(L"PATH", L".;bin;%SystemRoot%\\no_such_dir");
+    WCHAR resolved_d[MAX_PATH] = {0};
+    BOOL ok_d = config_resolve_restic_path(NULL, resolved_d, MAX_PATH);
+
+    /* Case E: drive-relative and root-relative ResticPath values point into the current directory */
+    static char ini_e[MAX_PATH * 3];
+    sprintf_s(ini_e, sizeof(ini_e), "[Settings]\r\nResticPath=%c:restic.exe\r\n", (char)cwd_dir[0]);
+    write_text_file(ini_path, ini_e);
+    WCHAR resolved_e1[MAX_PATH] = {0};
+    BOOL ok_e1 = config_resolve_restic_path(ini_path, resolved_e1, MAX_PATH);
+    static char root_rel[MAX_PATH * 3];
+    WideCharToMultiByte(CP_UTF8, 0, cwd_restic + 2, -1, root_rel, (int)sizeof(root_rel), NULL, NULL);
+    sprintf_s(ini_e, sizeof(ini_e), "[Settings]\r\nResticPath=%s\r\n", root_rel);
+    write_text_file(ini_path, ini_e);
+    WCHAR resolved_e2[MAX_PATH] = {0};
+    BOOL ok_e2 = config_resolve_restic_path(ini_path, resolved_e2, MAX_PATH);
+
+    /* Case F: values too long for the path buffers fail cleanly instead of terminating the host */
+    static char ini_f[4096];
+    char long_name[1001];
+    memset(long_name, 'a', 1000);
+    long_name[1000] = '\0';
+    sprintf_s(ini_f, sizeof(ini_f), "[Settings]\r\nResticPath=tools\\%s.exe\r\n", long_name); /* Relative */
+    write_text_file(ini_path, ini_f);
+    WCHAR resolved_f1[MAX_PATH] = {0};
+    BOOL ok_f1 = config_resolve_restic_path(ini_path, resolved_f1, MAX_PATH);
+    long_name[300] = '\0';
+    sprintf_s(ini_f, sizeof(ini_f), "[Settings]\r\nResticPath=%s\r\n", long_name); /* Bare, no extension */
+    write_text_file(ini_path, ini_f);
+    WCHAR resolved_f2[MAX_PATH] = {0};
+    BOOL ok_f2 = config_resolve_restic_path(ini_path, resolved_f2, MAX_PATH);
+    static WCHAR long_path_env[2048];
+    swprintf_s(long_path_env, _countof(long_path_env), L"C:\\%01100d;%ls", 0, path_dir);
+    SetEnvironmentVariableW(L"PATH", long_path_env);
+    DeleteFileW(ini_path);
+    WCHAR resolved_f3[MAX_PATH] = {0};
+    BOOL ok_f3 = config_resolve_restic_path(NULL, resolved_f3, MAX_PATH);
+
     SetCurrentDirectoryW(old_cwd);
     SetEnvironmentVariableW(L"PATH", old_path);
     free(old_path);
@@ -547,10 +593,17 @@ static void test_restic_lookup_ignores_current_directory(void) {
     EXPECT_WSTR_EQ(resolved_b, L"restic.exe", "Bare name returned when nothing is found");
     EXPECT_TRUE(ok_c, "Custom bare name found through PATH");
     EXPECT_WSTR_EQ(resolved_c, expected_custom, ".exe extension appended to extension-less ResticPath");
+    EXPECT_TRUE(!ok_d && wcscmp(resolved_d, L"restic.exe") == 0,
+                "Relative PATH entries ('.', 'bin', unexpanded variables) are skipped");
+    EXPECT_TRUE(!ok_e1 && !ok_e2, "Drive-relative and root-relative ResticPath values are ignored");
+    EXPECT_TRUE(!ok_f1 && !ok_f2, "Over-long ResticPath values are ignored without a crash");
+    EXPECT_TRUE(ok_f3 && wcscmp(resolved_f3, expected) == 0, "An over-long PATH entry is skipped");
 
     DeleteFileW(expected);
     DeleteFileW(expected_custom);
     DeleteFileW(cwd_restic);
+    DeleteFileW(cwd_sub_restic);
+    RemoveDirectoryW(cwd_sub);
     DeleteFileW(ini_path);
     RemoveDirectoryW(plugin_dir);
     RemoveDirectoryW(path_dir);

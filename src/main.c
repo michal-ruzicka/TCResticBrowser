@@ -666,7 +666,7 @@ static HANDLE execute_repo_query(
     WIN32_FIND_DATAW* FindData
 ) {
     /* Verify that restic.exe was resolved to an explicit path before prompting for a password */
-    if (wcschr(restic_exe, L'\\') == NULL && wcschr(restic_exe, L'/') == NULL) {
+    if (!config_is_absolute_path(restic_exe)) {
         report_plugin_error(
             repo->alias,
             L"restic.exe not found. Set ResticPath in TCResticBrowser.ini or place restic.exe in the plugin directory / PATH."
@@ -1085,7 +1085,7 @@ int __stdcall FsGetFileW(WCHAR* RemoteName, WCHAR* LocalName, int CopyFlags, Rem
         config_free(&cfg);
         return FS_FILE_NOTFOUND;
     }
-    if (wcschr(cfg.restic_path, L'\\') == NULL && wcschr(cfg.restic_path, L'/') == NULL) {
+    if (!config_is_absolute_path(cfg.restic_path)) {
         report_plugin_error(
             repo->alias,
             L"restic.exe not found. Set ResticPath in TCResticBrowser.ini or place restic.exe in the plugin directory / PATH."

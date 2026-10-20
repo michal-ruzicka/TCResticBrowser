@@ -106,13 +106,23 @@ static BOOL join_path(const WCHAR* dir, const WCHAR* leaf, WCHAR* out_path, size
     }
 
     size_t dir_len = wcslen(dir);
-    BOOL has_sep = (dir[dir_len - 1] == L'\\' || dir[dir_len - 1] == L'/');
+    BOOL has_sep   = (dir[dir_len - 1] == L'\\' || dir[dir_len - 1] == L'/');
+    /* Checked first: wcscat_s on a too-small buffer would terminate Total Commander */
+    if (dir_len + (has_sep ? 0 : 1) + wcslen(leaf) >= out_capacity) return FALSE;
 
-    if (wcsncpy_s(out_path, out_capacity, dir, _TRUNCATE) != 0) return FALSE;
-    if (!has_sep) {
-        if (wcscat_s(out_path, out_capacity, L"\\") != 0) return FALSE;
+    wcscpy_s(out_path, out_capacity, dir);
+    if (!has_sep) wcscat_s(out_path, out_capacity, L"\\");
+    wcscat_s(out_path, out_capacity, leaf);
+    return TRUE;
+}
+
+BOOL config_is_absolute_path(const WCHAR* p) {
+    if (!p) return FALSE;
+    if (((p[0] >= L'A' && p[0] <= L'Z') || (p[0] >= L'a' && p[0] <= L'z')) && p[1] == L':' &&
+        (p[2] == L'\\' || p[2] == L'/')) {
+        return TRUE;
     }
-    return wcscat_s(out_path, out_capacity, leaf) == 0;
+    return (p[0] == L'\\' || p[0] == L'/') && (p[1] == L'\\' || p[1] == L'/');
 }
 
 /* Checks whether path points to an existing regular file */
@@ -188,7 +198,7 @@ BOOL config_get_user_ini_path(WCHAR* out_path, size_t out_capacity) {
     if (n == 0 || n >= CONFIG_MAX_PATH) return FALSE;
     trim_whitespace(appdata);
     strip_trailing_separators(appdata);
-    if (appdata[0] == L'\0') return FALSE;
+    if (!config_is_absolute_path(appdata)) return FALSE; /* Never relative to the current directory */
 
     WCHAR ghisler_dir[CONFIG_MAX_PATH] = {0};
     if (!join_path(appdata, CONFIG_USER_SUBDIR, ghisler_dir, CONFIG_MAX_PATH) ||
@@ -331,14 +341,16 @@ static BOOL ini_in_section(const IniReader* r, const WCHAR* section) {
 /*
  * Looks for an executable only inside the directories listed in %PATH%. Unlike SearchPathW, the
  * current directory (which follows the Total Commander panel) is never searched, so a planted
- * "restic.exe" in a browsed folder cannot hijack the lookup. Result is an absolute path.
+ * "restic.exe" in a browsed folder cannot hijack the lookup. Entries that are not absolute (".",
+ * "bin", "C:tools", an unexpanded "%SystemRoot%\system32") would resolve against the current
+ * directory and are skipped. Result is an absolute path.
  */
 static BOOL find_in_path_env(const WCHAR* name, WCHAR* out_path, size_t out_capacity) {
     WCHAR file_name[MAX_PATH];
-    wcsncpy_s(file_name, _countof(file_name), name, _TRUNCATE);
-    if (wcschr(file_name, L'.') == NULL) {
-        wcscat_s(file_name, _countof(file_name), L".exe");
-    }
+    BOOL add_ext = wcschr(name, L'.') == NULL;
+    if (wcslen(name) + (add_ext ? 4 : 0) >= _countof(file_name)) return FALSE;
+    wcscpy_s(file_name, _countof(file_name), name);
+    if (add_ext) wcscat_s(file_name, _countof(file_name), L".exe");
 
     DWORD need = GetEnvironmentVariableW(L"PATH", NULL, 0);
     WCHAR* path_env = (need > 0) ? (WCHAR*)malloc(need * sizeof(WCHAR)) : NULL;
@@ -354,7 +366,7 @@ static BOOL find_in_path_env(const WCHAR* name, WCHAR* out_path, size_t out_capa
         WCHAR candidate[CONFIG_MAX_PATH];
         trim_whitespace(dir);
         strip_quotes(dir);
-        if (dir[0] != L'\0' && join_path(dir, file_name, candidate, CONFIG_MAX_PATH) &&
+        if (config_is_absolute_path(dir) && join_path(dir, file_name, candidate, CONFIG_MAX_PATH) &&
             file_exists(candidate)) {
             DWORD len = GetFullPathNameW(candidate, (DWORD)out_capacity, out_path, NULL);
             found = (len > 0 && len < out_capacity);
@@ -390,13 +402,15 @@ BOOL config_resolve_restic_path(const WCHAR* ini_path, WCHAR* out_path, size_t o
     /* 1. Explicit [Settings] ResticPath priority */
     if (configured_val[0] != L'\0' && _wcsicmp(configured_val, CONFIG_DEFAULT_RESTIC_EXE) != 0) {
         if (has_path_component(configured_val)) {
+            /* "C:restic.exe" and "\\tools\\restic.exe" depend on the current drive or directory:
+               neither absolute nor relative to the plugin folder, they are ignored */
             WCHAR candidate[CONFIG_MAX_PATH] = {0};
-            if (is_relative_path(configured_val) && g_plugin_dir[0] != L'\0') {
-                join_path(g_plugin_dir, configured_val, candidate, CONFIG_MAX_PATH);
-            } else {
+            if (config_is_absolute_path(configured_val)) {
                 wcsncpy_s(candidate, CONFIG_MAX_PATH, configured_val, _TRUNCATE);
+            } else if (is_relative_path(configured_val) && g_plugin_dir[0] != L'\0') {
+                join_path(g_plugin_dir, configured_val, candidate, CONFIG_MAX_PATH);
             }
-            if (file_exists(candidate)) {
+            if (candidate[0] != L'\0' && file_exists(candidate)) {
                 wcsncpy_s(out_path, out_capacity, candidate, _TRUNCATE);
                 return TRUE;
             }

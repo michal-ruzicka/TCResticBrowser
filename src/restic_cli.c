@@ -17,6 +17,7 @@
 #include <string.h>
 #include <wchar.h>
 #include "json.h"
+#include "config.h"
 #include "log.h"
 
 /* 100-nanosecond FILETIME ticks per minute (timezone offset conversion) */
@@ -941,8 +942,8 @@ ResticResult restic_exec_command(
     }
     memset(out_result, 0, sizeof(ResticCommandOutput));
 
-    /* A bare file name would make CreateProcess search the current directory: refuse it */
-    if (restic_exe[0] == L'\0' || wcspbrk(restic_exe, L"\\/:") == NULL) {
+    /* A bare or relative name would make CreateProcess search the current directory: refuse it */
+    if (!config_is_absolute_path(restic_exe)) {
         return RESTIC_ERR_SPAWN_FAILED;
     }
 
@@ -1274,7 +1275,7 @@ ResticResult restic_dump_file(
         strlen(snapshot_id) > 64) {
         return RESTIC_ERR_INVALID_ARG;
     }
-    if (restic_exe[0] == L'\0' || wcspbrk(restic_exe, L"\\/:") == NULL) {
+    if (!config_is_absolute_path(restic_exe)) {
         return RESTIC_ERR_SPAWN_FAILED;
     }
 

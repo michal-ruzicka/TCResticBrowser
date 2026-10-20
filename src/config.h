@@ -74,6 +74,13 @@ BOOL config_resolve_ini_path(WCHAR* out_path, size_t out_capacity);
  */
 BOOL config_resolve_restic_path(const WCHAR* ini_path, WCHAR* out_path, size_t out_capacity);
 
+/*
+ * TRUE for "X:\..." and "\\server\..." (also "\\?\..."): a path that does not depend on the
+ * current drive or directory. Relative, drive-relative ("C:x") and root-relative ("\x") paths
+ * would follow the Total Commander panel and are never used for executables or files.
+ */
+BOOL config_is_absolute_path(const WCHAR* p);
+
 /**
  * Loads configuration and repository list from a specific INI file path. root_name is always
  * filled: with a valid [Settings] RootName, otherwise (also when the file is missing) with

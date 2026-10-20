@@ -14,20 +14,11 @@ static SRWLOCK g_log_lock          = SRWLOCK_INIT;
 static WCHAR g_log_path[CONFIG_MAX_PATH] = {0}; /* Empty: logging off */
 static BOOL g_log_dirs_ready       = FALSE;     /* Parent directories created for g_log_path */
 
-/* "X:\..." or "\\server\..." (also "\\?\..."); anything else would depend on the current directory */
-static BOOL is_absolute_path(const WCHAR* p) {
-    if (((p[0] >= L'A' && p[0] <= L'Z') || (p[0] >= L'a' && p[0] <= L'z')) && p[1] == L':' &&
-        (p[2] == L'\\' || p[2] == L'/')) {
-        return TRUE;
-    }
-    return (p[0] == L'\\' && p[1] == L'\\') || (p[0] == L'/' && p[1] == L'/');
-}
-
 void log_configure(const WCHAR* raw_path) {
     WCHAR expanded[CONFIG_MAX_PATH] = {0};
     if (raw_path && raw_path[0] != L'\0') {
         DWORD n = ExpandEnvironmentStringsW(raw_path, expanded, CONFIG_MAX_PATH);
-        if (n == 0 || n > CONFIG_MAX_PATH || !is_absolute_path(expanded)) {
+        if (n == 0 || n > CONFIG_MAX_PATH || !config_is_absolute_path(expanded)) {
             expanded[0] = L'\0';
         }
     }
