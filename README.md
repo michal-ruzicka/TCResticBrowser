@@ -26,8 +26,24 @@
 >    Windows-native `build.cmd` driving CMake and MSVC for both 32-bit and
 >    64-bit Total Commander, tests in every build, and the same build on
 >    GitHub Actions for every push.
+> On top of that, version 2.0.0 of the fork improves the plugin itself:
 >
-> Changes useful upstream are offered back to the original project.
+> - **A 32-bit build** next to the 64-bit one; the auto-installer picks the
+>   one that matches your Total Commander.
+> - **Configuration like in my other plugins:** a per-user
+>   `%APPDATA%\GHISLER\TCResticBrowser.ini` wins over the sample shipped in
+>   the plugin folder, so an update never overwrites your settings, and the
+>   file is read as UTF-8 — see [Configuration](#configuration).
+> - **A configurable name** of the plugin's folder in Network Neighborhood —
+>   see [Root Folder Name](#root-folder-name).
+> - **A new icon** drawn as SVG and designed to stay legible at 16 px.
+> - **A security fix:** a snapshot entry named like `..\..\evil.exe` (which
+>   restic stores verbatim from non-Windows systems) can no longer make `F5`
+>   write outside the target folder.
+>
+> The full list, including upgrade notes for 1.x users, is in the
+> [changelog](CHANGELOG.md). Changes useful upstream are offered back to the
+> original project.
 
 **A [Total Commander](https://www.ghisler.com/) File System plugin (WFX)
 that lets you browse [Restic](https://restic.net) backup repositories and
