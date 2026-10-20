@@ -121,6 +121,7 @@ if(NOT RESTIC_WFX_ASAN)
         PREFIX ""
         SUFFIX "${RESTIC_WFX_SUFFIX}"
     )
+    target_link_libraries(TCResticBrowser PRIVATE crypt32)  # CryptProtectMemory
 endif()
 
 # ---------------------------------------------------------------------------
@@ -132,9 +133,10 @@ endif()
 add_executable(test_json tests/test_json.c json.c)
 
 add_executable(test_config tests/test_config.c $<TARGET_OBJECTS:restic_core>)
+target_link_libraries(test_config PRIVATE crypt32)
 
 add_executable(test_restic_cli tests/test_restic_cli.c $<TARGET_OBJECTS:restic_core>)
-target_link_libraries(test_restic_cli PRIVATE shell32)  # CommandLineToArgvW
+target_link_libraries(test_restic_cli PRIVATE shell32 crypt32)  # CommandLineToArgvW, CryptProtectMemory
 
 # Black-box smoke test: loads the plugin like Total Commander does and links
 # no plugin code.

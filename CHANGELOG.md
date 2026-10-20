@@ -94,10 +94,15 @@ upstream 1.x line.
 
 ### Fixed
 
+- **Cached passwords are protected in memory.** They are encrypted with
+  `CryptProtectMemory`, kept in pages locked out of the page file and
+  excluded from Windows Error Reporting crash dumps, so a memory dump or
+  the hibernation file no longer contains them in plain text.
 - **A password is cached only once restic has accepted it.** After a
   local write error, `ESC` or a timeout an unverified password was kept;
   now the next attempt asks again. A password that worked before is not
   affected, and "repository locked" no longer drops a correct one.
+
 - **Snapshot entries whose name is not a single path component are no
   longer listed.** Restic stores names from non-Windows systems verbatim, so
   a snapshot could contain a file named, for example, `..\..\evil.exe`;

@@ -5,6 +5,7 @@
 #define _UNICODE
 #endif
 #include <windows.h>
+#include <dpapi.h>
 #if defined(_DEBUG) && !defined(__SANITIZE_ADDRESS__)
 #define _CRTDBG_MAP_ALLOC
 #include <stdlib.h>
@@ -37,16 +38,81 @@ static tRequestProcW  g_RequestProc  = NULL;
  * repositories alternately without being prompted again). Guarded by an SRW lock because Total
  * Commander may call into the plugin from background threads. Slots are wiped on wrong password,
  * FsInitW and DLL unload. SRWLOCK_INIT keeps the lock usable even if DllMain never ran (unit tests).
+ *
+ * The table lives in its own pages, allocated on first use:
+ *  - VirtualLock keeps them out of the page file;
+ *  - WerRegisterExcludedMemoryBlock (Windows 10+, looked up at run time) leaves them out of
+ *    Windows Error Reporting crash dumps;
+ *  - every cached password is encrypted with CryptProtectMemory(CRYPTPROTECTMEMORY_SAME_PROCESS),
+ *    whose key never appears in the process, so a memory dump, the hibernation file or a page that
+ *    escaped the lock holds ciphertext only. A password is decrypted into a stack buffer just for
+ *    the restic call and wiped right after it.
+ * If encryption fails, the password is not cached at all (the user is asked again next time).
  */
 typedef struct {
     BOOL  used;
     WCHAR alias[MAX_PATH];
-    WCHAR password[SESSION_MAX_PASSWORD];
+    WCHAR password[SESSION_MAX_PASSWORD]; /* CryptProtectMemory ciphertext, never plaintext */
 } SessionSlot;
 
-static SessionSlot g_Sessions[SESSION_SLOTS];
-static unsigned    g_SessionEvictNext = 0;
-static SRWLOCK     g_SessionLock      = SRWLOCK_INIT;
+_Static_assert(sizeof(((SessionSlot*)0)->password) % CRYPTPROTECTMEMORY_BLOCK_SIZE == 0,
+               "CryptProtectMemory works on whole blocks");
+
+typedef HRESULT (WINAPI *PFN_WerRegisterExcludedMemoryBlock)(const void*, DWORD);
+typedef HRESULT (WINAPI *PFN_WerUnregisterExcludedMemoryBlock)(const void*);
+
+static SessionSlot* g_Sessions         = NULL; /* SESSION_SLOTS slots in locked pages, or NULL */
+static SIZE_T       g_SessionBytes     = 0;
+static BOOL         g_SessionLocked    = FALSE; /* VirtualLock succeeded */
+static BOOL         g_SessionWerExcluded = FALSE;
+static unsigned     g_SessionEvictNext = 0;
+static SRWLOCK      g_SessionLock      = SRWLOCK_INIT;
+
+/* Allocates, locks and excludes the slot table from crash dumps; caller holds g_SessionLock */
+static BOOL session_table_locked(void) {
+    if (g_Sessions) return TRUE;
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    SIZE_T page  = si.dwPageSize ? si.dwPageSize : 4096;
+    SIZE_T bytes = (sizeof(SessionSlot) * SESSION_SLOTS + page - 1) / page * page;
+    SessionSlot* table = (SessionSlot*)VirtualAlloc(NULL, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!table) {
+        log_write(L"Password cache unavailable: VirtualAlloc failed (Windows error %lu)", GetLastError());
+        return FALSE;
+    }
+    g_SessionLocked = VirtualLock(table, bytes);
+    if (!g_SessionLocked) {
+        log_write(L"Password cache not locked in memory (Windows error %lu); passwords stay encrypted",
+                  GetLastError());
+    }
+    HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+    PFN_WerRegisterExcludedMemoryBlock reg =
+        kernel ? (PFN_WerRegisterExcludedMemoryBlock)(void*)GetProcAddress(kernel, "WerRegisterExcludedMemoryBlock")
+               : NULL;
+    g_SessionWerExcluded = reg && SUCCEEDED(reg(table, (DWORD)bytes));
+    g_Sessions     = table;
+    g_SessionBytes = bytes;
+    return TRUE;
+}
+
+/* Releases the slot table (DLL unload); caller holds g_SessionLock */
+static void session_table_release_locked(void) {
+    if (!g_Sessions) return;
+    SecureZeroMemory(g_Sessions, g_SessionBytes);
+    if (g_SessionWerExcluded) {
+        HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+        PFN_WerUnregisterExcludedMemoryBlock unreg =
+            kernel ? (PFN_WerUnregisterExcludedMemoryBlock)(void*)GetProcAddress(kernel, "WerUnregisterExcludedMemoryBlock")
+                   : NULL;
+        if (unreg) unreg(g_Sessions);
+    }
+    if (g_SessionLocked) VirtualUnlock(g_Sessions, g_SessionBytes);
+    VirtualFree(g_Sessions, 0, MEM_RELEASE);
+    g_Sessions           = NULL;
+    g_SessionBytes       = 0;
+    g_SessionLocked      = FALSE;
+    g_SessionWerExcluded = FALSE;
+}
 
 /**
  * Reentrant directory enumeration state returned as HANDLE by FsFindFirstW.
@@ -86,6 +152,7 @@ typedef struct {
 } WfxCancelContext;
 
 static SessionSlot* session_find_locked(const WCHAR* alias) {
+    if (!g_Sessions) return NULL;
     for (int i = 0; i < SESSION_SLOTS; ++i) {
         if (g_Sessions[i].used && _wcsicmp(g_Sessions[i].alias, alias) == 0) {
             return &g_Sessions[i];
@@ -94,14 +161,23 @@ static SessionSlot* session_find_locked(const WCHAR* alias) {
     return NULL;
 }
 
-/* Copies the cached password of `alias` into out_pwd. Returns FALSE if none is cached. */
+/*
+ * Decrypts the cached password of `alias` into out_pwd (SESSION_MAX_PASSWORD characters; the caller
+ * wipes it). Returns FALSE if none is cached.
+ */
 static BOOL session_get(const WCHAR* alias, WCHAR* out_pwd, size_t cap) {
     BOOL found = FALSE;
+    if (cap < SESSION_MAX_PASSWORD) return FALSE;
     AcquireSRWLockExclusive(&g_SessionLock);
-    const SessionSlot* slot = session_find_locked(alias);
+    SessionSlot* slot = session_find_locked(alias);
     if (slot) {
-        wcsncpy_s(out_pwd, cap, slot->password, _TRUNCATE);
-        found = TRUE;
+        memcpy(out_pwd, slot->password, sizeof(slot->password));
+        found = CryptUnprotectMemory(out_pwd, (DWORD)sizeof(slot->password), CRYPTPROTECTMEMORY_SAME_PROCESS);
+        if (!found) {
+            SecureZeroMemory(out_pwd, sizeof(slot->password));
+            SecureZeroMemory(slot, sizeof(*slot));
+        }
+        out_pwd[SESSION_MAX_PASSWORD - 1] = L'\0';
     }
     ReleaseSRWLockExclusive(&g_SessionLock);
     return found;
@@ -110,6 +186,10 @@ static BOOL session_get(const WCHAR* alias, WCHAR* out_pwd, size_t cap) {
 /* Stores (or replaces) the password of `alias`; the oldest slot is recycled when the table is full */
 static void session_put(const WCHAR* alias, const WCHAR* password) {
     AcquireSRWLockExclusive(&g_SessionLock);
+    if (!session_table_locked()) {
+        ReleaseSRWLockExclusive(&g_SessionLock);
+        return;
+    }
     SessionSlot* slot = session_find_locked(alias);
     for (int i = 0; !slot && i < SESSION_SLOTS; ++i) {
         if (!g_Sessions[i].used) slot = &g_Sessions[i];
@@ -121,6 +201,11 @@ static void session_put(const WCHAR* alias, const WCHAR* password) {
     slot->used = TRUE;
     wcsncpy_s(slot->alias, MAX_PATH, alias, _TRUNCATE);
     wcsncpy_s(slot->password, SESSION_MAX_PASSWORD, password, _TRUNCATE);
+    if (!CryptProtectMemory(slot->password, (DWORD)sizeof(slot->password), CRYPTPROTECTMEMORY_SAME_PROCESS)) {
+        DWORD err = GetLastError();
+        SecureZeroMemory(slot, sizeof(*slot)); /* Never keep a plaintext password */
+        log_write(L"Password for '%ls' not cached: CryptProtectMemory failed (Windows error %lu)", alias, err);
+    }
     ReleaseSRWLockExclusive(&g_SessionLock);
 }
 
@@ -135,7 +220,15 @@ static void session_forget(const WCHAR* alias) {
 /* Wipes every cached password from RAM */
 static void clear_password_session(void) {
     AcquireSRWLockExclusive(&g_SessionLock);
-    SecureZeroMemory(g_Sessions, sizeof(g_Sessions));
+    if (g_Sessions) SecureZeroMemory(g_Sessions, sizeof(SessionSlot) * SESSION_SLOTS);
+    g_SessionEvictNext = 0;
+    ReleaseSRWLockExclusive(&g_SessionLock);
+}
+
+/* Wipes and frees the password table (DLL unload) */
+static void release_password_session(void) {
+    AcquireSRWLockExclusive(&g_SessionLock);
+    session_table_release_locked();
     g_SessionEvictNext = 0;
     ReleaseSRWLockExclusive(&g_SessionLock);
 }
@@ -501,7 +594,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
         DisableThreadLibraryCalls(hinstDLL);
         config_set_plugin_dir_from_module((HMODULE)hinstDLL);
     } else if (fdwReason == DLL_PROCESS_DETACH) {
-        clear_password_session();
+        release_password_session();
     }
     return TRUE;
 }
