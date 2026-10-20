@@ -114,7 +114,8 @@ BOOL restic_describe_password(const WCHAR* password, WCHAR* out, size_t cap);
 
 /**
  * Parses the JSON array printed by `restic snapshots --json` (a literal `null` is treated as an
- * empty list) into directory entries named `YYYY-MM-DD_HH-MM-SS_[short_id]`.
+ * empty list) into directory entries named `YYYY-MM-DD_HH-MM-SS_[short_id]`. When two snapshots
+ * share a short_id, both names carry the shortest longer prefix of their IDs that is unique.
  * Caller must free `*out_items` with `free()`.
  */
 ResticResult restic_parse_snapshots_json(

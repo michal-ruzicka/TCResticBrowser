@@ -274,6 +274,26 @@ static void test_parse_snapshots_json(void) {
     EXPECT_TRUE(ft_u64(items[0].ftLastWriteTime) != 0, "Snapshot has a modification time");
     free(items);
 
+    /* Two snapshots sharing a short_id get the shortest unique ID prefix; the others keep 8 characters */
+    const char* colliding_json =
+        "[{\"time\":\"2026-10-18T10:00:00Z\",\"short_id\":\"12345678\","
+        "\"id\":\"1234567890aa000000000000000000000000000000000000000000000000000a\"},"
+        " {\"time\":\"2026-10-18T11:00:00Z\",\"short_id\":\"fedcba98\","
+        "\"id\":\"fedcba9800000000000000000000000000000000000000000000000000000000\"},"
+        " {\"time\":\"2026-10-18T12:00:00Z\",\"short_id\":\"12345678\","
+        "\"id\":\"1234567890ab000000000000000000000000000000000000000000000000000b\"}]";
+    res = restic_parse_snapshots_json(colliding_json, &items, &count);
+    EXPECT_TRUE(res == RESTIC_OK && count == 3, "Parse snapshots with a shared short_id");
+    if (res == RESTIC_OK && count == 3) {
+        EXPECT_WSTR_EQ(items[0].cFileName, L"2026-10-18_10-00-00_[1234567890aa]", "First colliding ID lengthened");
+        EXPECT_WSTR_EQ(items[1].cFileName, L"2026-10-18_11-00-00_[fedcba98]", "Unique short_id kept");
+        EXPECT_WSTR_EQ(items[2].cFileName, L"2026-10-18_12-00-00_[1234567890ab]", "Second colliding ID lengthened");
+        char id[65];
+        EXPECT_TRUE(restic_extract_snapshot_id(items[2].cFileName, id, sizeof(id)) && strcmp(id, "1234567890ab") == 0,
+                    "The longer prefix is what restic gets");
+    }
+    free(items);
+
     res = restic_parse_snapshots_json("[]", &items, &count);
     EXPECT_TRUE(res == RESTIC_OK && count == 0 && items == NULL, "Empty array");
     res = restic_parse_snapshots_json("null", &items, &count);
