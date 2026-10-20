@@ -33,7 +33,7 @@
 that lets you browse [Restic](https://restic.net) backup repositories and
 copy files out of their snapshots, right in Total Commander's panels.**
 
-The plugin adds `\\\Restic Backups` to Network Neighborhood (the name is
+The plugin adds `\\\TCResticBrowser` to Network Neighborhood (the name is
 [configurable](#root-folder-name)). Its top level
 lists the repositories configured in `TCResticBrowser.ini`; inside each one you
 find its snapshots, and inside a snapshot the backed-up directory tree.
@@ -41,7 +41,7 @@ Everything is strictly read-only: the plugin runs the official `restic.exe`
 to list and extract data and never modifies a repository.
 
 ```text
-\\\Restic Backups\
+\\\TCResticBrowser\
 ├── MyLocalBackup\                              <-- Level 0: Repository aliases (from TCResticBrowser.ini)
 │   ├── 2026-10-18_09-30-00_[a1b2c3d4]\         <-- Level 1: Snapshots (YYYY-MM-DD_HH-MM-SS_[short_id])
 │   │   └── C\
@@ -98,10 +98,10 @@ auto-installer:**
 4. Copy `TCResticBrowser.ini` from the plugin folder to
    `%APPDATA%\GHISLER\TCResticBrowser.ini` and add your repositories to the
    copy (see [Configuration](#configuration)). For a different folder name
-   than *Restic Backups*, see [Root Folder Name](#root-folder-name): it is
+   than *TCResticBrowser*, see [Root Folder Name](#root-folder-name): it is
    read only while the plugin is being installed.
 5. Open **Network Neighborhood** (`\\\` in the command line, or the `\`
-   drive button → Network) and enter **Restic Backups**.
+   drive button → Network) and enter **TCResticBrowser**.
 
 If you prefer to install manually, unzip the archive into a persistent
 folder (for example `C:\Tools\TCResticBrowser\`) and add `TCResticBrowser.wfx`
@@ -162,7 +162,7 @@ documentation.
 
 | Action | How It Works |
 | --- | --- |
-| **List Repositories** | Open **Network Neighborhood** (`\`) -> **`Restic Backups`**. Changes to `TCResticBrowser.ini` take effect immediately on panel refresh (`Ctrl+R` / `F2`). |
+| **List Repositories** | Open **Network Neighborhood** (`\`) -> **`TCResticBrowser`**. Changes to `TCResticBrowser.ini` take effect immediately on panel refresh (`Ctrl+R` / `F2`). |
 | **Browse Snapshots** | Enter a repository folder (`\<Alias>`). Prompted once for the repository password; kept in RAM for that alias across both panels until Total Commander unloads the plugin (or a wrong password is entered). Up to 3 password attempts are allowed. |
 | **Explore Files** | Enter any snapshot folder (`YYYY-MM-DD_HH-MM-SS_[short_id]`) and navigate the backed-up directory tree. |
 | **View File (`F3` / `Ctrl+Q`)** | Press **`F3`** (Lister) or **`Ctrl+Q`** (Quick View) on any file to stream it to a temporary location and view its contents. |
@@ -207,7 +207,7 @@ on the computer you run it on would take precedence.
 
 `RootName=` under `[Settings]` sets the name of the plugin's folder in
 Network Neighborhood; without it (or when it is empty or not a valid folder
-name) the folder is called **Restic Backups**. Total Commander asks the
+name) the folder is called **TCResticBrowser**. Total Commander asks the
 plugin for this name only while installing it and then remembers it, so a
 later change takes effect only after removing the plugin under
 **Configuration → Options → Plugins → File system plugins** and installing
@@ -235,7 +235,7 @@ When executing a command, the plugin searches for `restic.exe` in this order:
 ; and then searches the system PATH.
 ResticPath=C:\Tools\restic\restic.exe
 ; Optional name of the plugin's folder in Network Neighborhood
-; (default: Restic Backups; read only when the plugin is installed).
+; (default: TCResticBrowser; read only when the plugin is installed).
 RootName=Backups
 
 [Repositories]

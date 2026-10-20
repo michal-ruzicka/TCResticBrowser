@@ -6,7 +6,7 @@
 #define CONFIG_INI_FILENAME       L"TCResticBrowser.ini"
 #define CONFIG_USER_SUBDIR        L"GHISLER"   /* Total Commander's settings folder under %APPDATA% */
 #define CONFIG_DEFAULT_RESTIC_EXE L"restic.exe"
-#define CONFIG_DEFAULT_ROOT_NAME  L"Restic Backups"  /* Network Neighborhood name without [Settings] RootName */
+#define CONFIG_DEFAULT_ROOT_NAME  L"TCResticBrowser"  /* Network Neighborhood name without [Settings] RootName */
 #define CONFIG_MAX_PATH           1024
 #define CONFIG_MAX_INI_BYTES      (4 * 1024 * 1024)  /* A larger TCResticBrowser.ini is not read */
 

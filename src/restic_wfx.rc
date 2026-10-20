@@ -2,7 +2,7 @@
  * Windows Resource Script for Restic Total Commander WFX Plugin (TCResticBrowser.wfx / TCResticBrowser.wfx64)
  *
  * 1. Icon resource (ID 1): Total Commander loads the FIRST icon resource (by index)
- *    found in the WFX DLL and displays it next to "Restic Backups" in Network Neighborhood.
+ *    found in the WFX DLL and displays it next to "TCResticBrowser" in Network Neighborhood.
  * 2. Version resource (VS_VERSION_INFO): displayed in Windows Explorer / Total Commander
  *    file properties ("Details" tab).
  */

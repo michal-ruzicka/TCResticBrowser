@@ -427,7 +427,7 @@ static void test_root_name(void) {
     EXPECT_WSTR_EQ(cfg.root_name, CONFIG_DEFAULT_ROOT_NAME, "Default root name without an INI");
     config_free(&cfg);
     FsGetDefRootName(ansi, (int)sizeof(ansi));
-    EXPECT_TRUE(strcmp(ansi, "Restic Backups") == 0, "FsGetDefRootName default without an INI");
+    EXPECT_TRUE(strcmp(ansi, "TCResticBrowser") == 0, "FsGetDefRootName default without an INI");
 
     write_text_file(ini_path, "[Settings]\r\nResticPath=restic.exe\r\n");
     EXPECT_TRUE(config_load(&cfg), "INI without RootName loads");
@@ -447,7 +447,7 @@ static void test_root_name(void) {
     EXPECT_TRUE(strcmp(ansi, "My Backups") == 0, "FsGetDefRootName reports the configured name");
     char tiny[4];
     FsGetDefRootName(tiny, (int)sizeof(tiny));
-    EXPECT_TRUE(strcmp(tiny, "Res") == 0, "A name longer than maxlen falls back to the (truncated) default");
+    EXPECT_TRUE(strcmp(tiny, "TCR") == 0, "A name longer than maxlen falls back to the (truncated) default");
 
     /* Invalid or empty names keep the default; so does a first invalid one followed by a valid one */
     const char* invalid[] = {
@@ -475,7 +475,7 @@ static void test_root_name(void) {
     WideCharToMultiByte(CP_ACP, utf8_acp ? 0 : WC_NO_BEST_FIT_CHARS, L"Z\u00e1lohy \u65e5\u672c", -1,
                         expected, (int)sizeof(expected), NULL, utf8_acp ? NULL : &lossy);
     FsGetDefRootName(ansi, (int)sizeof(ansi));
-    EXPECT_TRUE(strcmp(ansi, lossy ? "Restic Backups" : expected) == 0,
+    EXPECT_TRUE(strcmp(ansi, lossy ? "TCResticBrowser" : expected) == 0,
                 "Name not representable in the ANSI code page falls back to the default");
 
     DeleteFileW(ini_path);

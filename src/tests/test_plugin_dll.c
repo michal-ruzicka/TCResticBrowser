@@ -228,10 +228,10 @@ static void test_primary_ini_next_to_dll(void) {
 
     char root_name[64] = {0};
     p.get_root_name(root_name, (int)sizeof(root_name));
-    EXPECT_TRUE(strcmp(root_name, "Restic Backups") == 0, "Default root name");
+    EXPECT_TRUE(strcmp(root_name, "TCResticBrowser") == 0, "Default root name");
     char tiny[5] = {'x', 'x', 'x', 'x', 'x'};
     p.get_root_name(tiny, (int)sizeof(tiny));
-    EXPECT_TRUE(strcmp(tiny, "Rest") == 0, "Root name truncated and terminated for small buffers");
+    EXPECT_TRUE(strcmp(tiny, "TCRe") == 0, "Root name truncated and terminated for small buffers");
 
     EXPECT_TRUE(p.init_w(1, NULL, NULL, NULL) == 0, "FsInitW returns 0");
 
@@ -330,7 +330,7 @@ static void test_user_ini_overrides_plugin_ini(void) {
     /* RootName from the active INI is what the installer gets from FsGetDefRootName */
     char root_name[64] = {0};
     p.get_root_name(root_name, (int)sizeof(root_name));
-    EXPECT_TRUE(strcmp(root_name, "Restic Backups") == 0, "Default root name without RootName");
+    EXPECT_TRUE(strcmp(root_name, "TCResticBrowser") == 0, "Default root name without RootName");
     EXPECT_TRUE(write_file(user_ini, "[Settings]\r\nRootName=Personal Backups\r\n[Repositories]\r\nPersonal=D:\\repo\r\n"),
                 "Write per-user INI with RootName");
     p.get_root_name(root_name, (int)sizeof(root_name));

@@ -16,8 +16,8 @@ upstream 1.x line.
   32-bit Total Commander next to `TCResticBrowser.wfx64`; the auto-installer
   picks the right one.
 - **Configurable root folder name.** `RootName=` under `[Settings]` names the
-  plugin's folder in Network Neighborhood; *Restic Backups* stays the
-  default. Total Commander reads it only while installing the plugin.
+  plugin's folder in Network Neighborhood. Total Commander reads it only
+  while installing the plugin.
 - **Reproducible builds.** The same sources and pinned toolchain produce a
   byte-identical ZIP (`/Brepro`, `/BREPRO`, `/pathmap`, pinned MSVC toolset
   and Windows SDK, ZIP timestamps from `release-date=` in `pluginst.inf`).
@@ -67,6 +67,10 @@ upstream 1.x line.
   next to the old one: after moving your configuration (see above), remove
   the old `restic` entry under *Configuration → Options → Plugins → File
   system plugins* and delete its folder.
+- **Default root folder name is *TCResticBrowser*** instead of
+  *Restic Backups*, matching the plugin, its files and its configuration
+  file. To keep the old name, set `RootName=Restic Backups` before
+  installing the new version.
 - **Release ZIP** is named `TCResticBrowser.vX.Y.Z.zip` and ships the
   license as `LICENSE.txt`.
 - **Documentation** restructured (README, CONTRIBUTING, this changelog), and

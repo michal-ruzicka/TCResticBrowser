@@ -61,8 +61,8 @@ INI key-value syntax, read by the plugin's own reader in `config.c` (not `GetPri
 [Settings]
 ; Optional path to restic.exe (if empty, checks plugin folder then system PATH)
 ResticPath=restic.exe
-; Optional Network Neighborhood root name (default "Restic Backups")
-RootName=Restic Backups
+; Optional Network Neighborhood root name (default "TCResticBrowser")
+RootName=Backups
 
 [Repositories]
 ; <Display_Alias>=<Restic_Repository_Target>
@@ -110,7 +110,7 @@ All exported functions use the `__stdcall` calling convention. Both Unicode (`W`
 - **`FsSetDefaultParams`**
   - Exported but empty: `DefaultIniName` is not used (see 3.1).
 - **`FsGetDefRootName`**
-  - Returns the root label displayed in Network Neighborhood: `[Settings] RootName` from the active INI, or `CONFIG_DEFAULT_ROOT_NAME` (`"Restic Backups"`) when it is missing, empty, not a valid folder name, not representable in the ANSI code page (the API is `char*`), or longer than `maxlen`. Total Commander calls it only while installing the plugin (without `FsInitW`) and stores the answer in `wincmd.ini` `[FileSystemPlugins]`, so a changed `RootName` needs the plugin to be re-added. Error dialogs (`RT_MsgOK`) use the same name as their title.
+  - Returns the root label displayed in Network Neighborhood: `[Settings] RootName` from the active INI, or `CONFIG_DEFAULT_ROOT_NAME` (`"TCResticBrowser"`) when it is missing, empty, not a valid folder name, not representable in the ANSI code page (the API is `char*`), or longer than `maxlen`. Total Commander calls it only while installing the plugin (without `FsInitW`) and stores the answer in `wincmd.ini` `[FileSystemPlugins]`, so a changed `RootName` needs the plugin to be re-added. Error dialogs (`RT_MsgOK`) use the same name as their title.
 - **`FsFindFirstW` / `FsFindFirst`**
   - Initializes directory enumeration for `Path`, allocates a reentrant `ResticFindHandle`, and populates the first `WIN32_FIND_DATAW` record.
   - On empty directories, calls `SetLastError(ERROR_NO_MORE_FILES)` and returns `INVALID_HANDLE_VALUE`.
@@ -129,7 +129,7 @@ All exported functions use the `__stdcall` calling convention. Both Unicode (`W`
 
 ### 5.1 Plugin Icon Specification (Total Commander WFX Standard)
 
-- **Network Neighborhood Root Icon (implemented):** Total Commander automatically displays the **first `ICON` resource (by index)** embedded inside the plugin DLL (`TCResticBrowser.wfx` / `TCResticBrowser.wfx64`) to the left of `"Restic Backups"` in Network Neighborhood (no extra exported function is required). Per the official WFX specification:
+- **Network Neighborhood Root Icon (implemented):** Total Commander automatically displays the **first `ICON` resource (by index)** embedded inside the plugin DLL (`TCResticBrowser.wfx` / `TCResticBrowser.wfx64`) to the left of `"TCResticBrowser"` in Network Neighborhood (no extra exported function is required). Per the official WFX specification:
   - Format: `src\restic_wfx.ico` linked into the DLL via `src\restic_wfx.rc`.
   - Included frames inside `src\restic_wfx.ico` (5 resolutions): **16×16, 24×24, 32×32, 48×48** (32-bit BGRA uncompressed BMP/DIB frames) plus **256×256** (32-bit RGBA PNG-compressed), rendered from the SVG sources `logo\restic-wfx-16.svg` (16 px) and `logo\restic-wfx.svg` (all other sizes); the regeneration commands are in CONTRIBUTING.md, *Plugin Icon*. Keep the icon simple enough to read at 16 px.
 - **Per-Item Custom Icons (`FsExtractCustomIconW`, optional):** only needed if custom icons are desired for individual repositories or snapshots inside the file list (`FS_ICONFLAG_SMALL` requests 16×16, otherwise 32×32). When omitted, Total Commander uses standard folder icons and normal Windows file-extension associations.
