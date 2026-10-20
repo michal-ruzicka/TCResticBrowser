@@ -38,7 +38,7 @@ linked against the static MSVC runtime, and contains no third-party code.
 | `.github/` | GitHub Actions CI workflow (`workflows/build.yml`) and Dependabot configuration |
 | `build\` | CMake out-of-source build trees and the ZIP staging folder (gitignored) |
 | `dist\` | Released ZIP bundles (gitignored) |
-| `logo\` | SVG sources of the plugin icon `src\restic_wfx.ico` (see [Plugin Icon](#plugin-icon)) |
+| `logo\` | SVG sources of the plugin icon `src\TCResticBrowser.ico` (see [Plugin Icon](#plugin-icon)) |
 | `src\` | C sources and headers, `CMakeLists.txt`, `.def`/`.rc`/`.ico`, `pluginst.inf`, the sample `TCResticBrowser.ini` |
 | `src\tests\` | Test programs and the JSON fuzz target |
 | `tmp\` | Optional live-test input `restic.exe` and the generated test repository (gitignored) |
@@ -278,10 +278,10 @@ Two hand-written SVG files in `logo\` are its source:
 
 | File | Frames |
 | --- | --- |
-| `logo\restic-wfx.svg` | 24, 32, 48 and 256 px (32-unit grid) |
-| `logo\restic-wfx-16.svg` | 16 px, the same design fitted to whole pixels so it stays sharp |
+| `logo\TCResticBrowser.svg` | 24, 32, 48 and 256 px (32-unit grid) |
+| `logo\TCResticBrowser-16.svg` | 16 px, the same design fitted to whole pixels so it stays sharp |
 
-`src\restic_wfx.ico` is a committed binary generated from them; the build
+`src\TCResticBrowser.ico` is a committed binary generated from them; the build
 only embeds it, so it does not affect reproducibility. After editing an SVG,
 regenerate it with `rsvg-convert` (librsvg) and `icotool` (icoutils), for
 example in WSL or a Debian container. The 16–48 px frames are stored as
@@ -289,9 +289,9 @@ example in WSL or a Debian container. The 16–48 px frames are stored as
 `test_plugin_dll` expects:
 
 ```sh
-rsvg-convert -w 16 -h 16 logo/restic-wfx-16.svg -o 16.png
-for z in 24 32 48 256; do rsvg-convert -w $z -h $z logo/restic-wfx.svg -o $z.png; done
-icotool -c -o src/restic_wfx.ico 16.png 24.png 32.png 48.png -r 256.png
+rsvg-convert -w 16 -h 16 logo/TCResticBrowser-16.svg -o 16.png
+for z in 24 32 48 256; do rsvg-convert -w $z -h $z logo/TCResticBrowser.svg -o $z.png; done
+icotool -c -o src/TCResticBrowser.ico 16.png 24.png 32.png 48.png -r 256.png
 ```
 
 The committed icon was made with librsvg 2.60.0 and icoutils 0.32.3 (Debian
@@ -328,7 +328,7 @@ Total Commander process
 **Read-only by omission:** a WFX plugin declares which operations it
 supports by which functions it exports. `FsPutFile`, `FsMkDir`,
 `FsDeleteFile`, `FsRemoveDir` and `FsRenMovFile` are deliberately not
-exported (`src\restic_wfx.def`, enforced by `test_plugin_dll`), so Total
+exported (`src\TCResticBrowser.def`, enforced by `test_plugin_dll`), so Total
 Commander itself disables writing into the plugin; `F6` move arrives as
 `FsGetFileW` with `FS_COPYFLAGS_MOVE` and is refused. Every Restic command
 also runs with `--no-lock`.

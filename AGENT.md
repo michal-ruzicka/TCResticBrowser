@@ -130,10 +130,10 @@ All exported functions use the `__stdcall` calling convention. Both Unicode (`W`
 ### 5.1 Plugin Icon Specification (Total Commander WFX Standard)
 
 - **Network Neighborhood Root Icon (implemented):** Total Commander automatically displays the **first `ICON` resource (by index)** embedded inside the plugin DLL (`TCResticBrowser.wfx` / `TCResticBrowser.wfx64`) to the left of `"TCResticBrowser"` in Network Neighborhood (no extra exported function is required). Per the official WFX specification:
-  - Format: `src\restic_wfx.ico` linked into the DLL via `src\restic_wfx.rc`.
-  - Included frames inside `src\restic_wfx.ico` (5 resolutions): **16×16, 24×24, 32×32, 48×48** (32-bit BGRA uncompressed BMP/DIB frames) plus **256×256** (32-bit RGBA PNG-compressed), rendered from the SVG sources `logo\restic-wfx-16.svg` (16 px) and `logo\restic-wfx.svg` (all other sizes); the regeneration commands are in CONTRIBUTING.md, *Plugin Icon*. Keep the icon simple enough to read at 16 px.
+  - Format: `src\TCResticBrowser.ico` linked into the DLL via `src\TCResticBrowser.rc`.
+  - Included frames inside `src\TCResticBrowser.ico` (5 resolutions): **16×16, 24×24, 32×32, 48×48** (32-bit BGRA uncompressed BMP/DIB frames) plus **256×256** (32-bit RGBA PNG-compressed), rendered from the SVG sources `logo\TCResticBrowser-16.svg` (16 px) and `logo\TCResticBrowser.svg` (all other sizes); the regeneration commands are in CONTRIBUTING.md, *Plugin Icon*. Keep the icon simple enough to read at 16 px.
 - **Per-Item Custom Icons (`FsExtractCustomIconW`, optional):** only needed if custom icons are desired for individual repositories or snapshots inside the file list (`FS_ICONFLAG_SMALL` requests 16×16, otherwise 32×32). When omitted, Total Commander uses standard folder icons and normal Windows file-extension associations.
-- **DLL Version Resource (`VS_VERSION_INFO`, implemented):** `version=` in `src\pluginst.inf` is the single source of truth for the plugin version. CMake turns it into `version.h` in the build directory (`src\version.h.in`: `MAJOR,MINOR,PATCH,0` / `"MAJOR.MINOR.PATCH"`, plus the per-bitness file name), which `src\restic_wfx.rc` embeds so Windows Explorer and Total Commander display the version and metadata in file properties ("Details" tab).
+- **DLL Version Resource (`VS_VERSION_INFO`, implemented):** `version=` in `src\pluginst.inf` is the single source of truth for the plugin version. CMake turns it into `version.h` in the build directory (`src\version.h.in`: `MAJOR,MINOR,PATCH,0` / `"MAJOR.MINOR.PATCH"`, plus the per-bitness file name), which `src\TCResticBrowser.rc` embeds so Windows Explorer and Total Commander display the version and metadata in file properties ("Details" tab).
 
 ---
 
@@ -146,14 +146,14 @@ TCResticBrowser/
 ├── .vsconfig                   # Pinned Visual Studio Build Tools components (toolset 14.51, SDK 26100, CMake, ASan)
 ├── .github/workflows/build.yml # CI on windows-latest: build.cmd, build.cmd check, live tests (pinned restic)
 ├── .clang-format               # Code formatting rules (C11, 4 spaces, 100 cols)
-├── logo/                       # SVG sources of src/restic_wfx.ico (restic-wfx.svg, restic-wfx-16.svg for 16 px)
+├── logo/                       # SVG sources of src/TCResticBrowser.ico (TCResticBrowser.svg, TCResticBrowser-16.svg for 16 px)
 ├── src/                        # Every build input, and nothing else
 │   ├── CMakeLists.txt          # Targets, compiler hardening, reproducibility flags, version.h generation
 │   ├── pluginst.inf            # Total Commander auto-install manifest; version= and release-date= are canonical
-│   ├── TCResticBrowser.ini       # Commented sample configuration (staged next to the DLL and into the ZIP)
-│   ├── restic_wfx.def          # Explicit DLL exports (undecorated names, also for x86 __stdcall)
-│   ├── restic_wfx.rc           # Windows resource script (ICON #1 + VS_VERSION_INFO metadata)
-│   ├── restic_wfx.ico          # Multi-resolution plugin icon
+│   ├── TCResticBrowser.ini     # Commented sample configuration (staged next to the DLL and into the ZIP)
+│   ├── TCResticBrowser.def     # Explicit DLL exports (undecorated names, also for x86 __stdcall)
+│   ├── TCResticBrowser.rc      # Windows resource script (ICON #1 + VS_VERSION_INFO metadata)
+│   ├── TCResticBrowser.ico     # Multi-resolution plugin icon
 │   ├── version.h.in            # Template for the generated version.h
 │   ├── fsplugin.h              # Total Commander WFX API declarations (+ FS_SET_TIME_UNKNOWN macro)
 │   ├── main.c                  # DllMain, WFX entry points, virtual path routing
@@ -253,8 +253,8 @@ Because the plugin runs in-process inside `TOTALCMD64.EXE` and handles dynamic m
 
 ### 8.5 Binary Security Hardening
 - **Compiler:** `/GS` (Buffer Security Check / stack cookie protection).
-- **Linker:** `/DYNAMICBASE` (ASLR - Address Space Layout Randomization) and `/NXCOMPAT` (DEP - Data Execution Prevention), plus `restic_wfx.def` to export undecorated symbol names (on x86 the `__stdcall` entry points would otherwise be exported as `_FsInit@16` and similar).
-- **Export surface:** only what `restic_wfx.def` lists is exported. `src/tests/test_plugin_dll.c` asserts the exact surface: only the read-only `Fs*` functions are exported; `FsGetFile/PutFile/DeleteFile/MkDir/RemoveDir/RenMovFile/SetAttr/SetTime/ExecuteFile` (and internal helpers such as `json_parse`) must stay absent, because Total Commander enables an operation as soon as the symbol exists.
+- **Linker:** `/DYNAMICBASE` (ASLR - Address Space Layout Randomization) and `/NXCOMPAT` (DEP - Data Execution Prevention), plus `TCResticBrowser.def` to export undecorated symbol names (on x86 the `__stdcall` entry points would otherwise be exported as `_FsInit@16` and similar).
+- **Export surface:** only what `TCResticBrowser.def` lists is exported. `src/tests/test_plugin_dll.c` asserts the exact surface: only the read-only `Fs*` functions are exported; `FsGetFile/PutFile/DeleteFile/MkDir/RemoveDir/RenMovFile/SetAttr/SetTime/ExecuteFile` (and internal helpers such as `json_parse`) must stay absent, because Total Commander enables an operation as soon as the symbol exists.
 - **Imports:** only `KERNEL32.dll` (static CRT). No extra import libraries are linked into the plugin (`CMakeLists.txt` replaces CMake's default import-library list with `kernel32.lib`; only `test_restic_cli` adds `shell32` for `CommandLineToArgvW`).
 
 ### 8.6 Build & Test Commands (`build.cmd` & `src/CMakeLists.txt`)
@@ -270,7 +270,7 @@ Every variant has its own build directory (`build\x64`, `build\x86`, `build\chec
 
 **Reproducible builds:** `/Brepro /experimental:deterministic` (compiler), `/BREPRO` (linker), `/pathmap:<src>=./`, no PDB in Release, pinned toolset (`EXPECTED_CL`, `CMAKE_T`, `CMAKE_SDK` in `build.cmd`, mirrored in `.vsconfig`). The ZIP is made deterministic by normalizing staged text files to CRLF, writing `sha256sums.sha256`, and setting every staged timestamp to `release-date=` from `src\pluginst.inf`. Bump `version=` and `release-date=` together.
 
-**Release package:** contents (all in the ZIP root, otherwise Total Commander does not detect `pluginst.inf`): `pluginst.inf`, `TCResticBrowser.wfx`, `TCResticBrowser.wfx64`, `TCResticBrowser.ini`, every repo-root Markdown file (`*.md`: README, CHANGELOG, CONTRIBUTING, AGENT, CLAUDE, LICENSE), `sha256sums.sha256`. `pluginst.inf` names the 32-bit file (`file=TCResticBrowser.wfx`); 64-bit Total Commander appends `64` itself. `type=wfx`, `defaultdir=TCResticBrowser`. The DLL is named after the project like the sibling plugins (`TCNewPlus.wfx`, `TCOfficeView.wlx`); the CMake target stays `restic` with `OUTPUT_NAME`.
+**Release package:** contents (all in the ZIP root, otherwise Total Commander does not detect `pluginst.inf`): `pluginst.inf`, `TCResticBrowser.wfx`, `TCResticBrowser.wfx64`, `TCResticBrowser.ini`, every repo-root Markdown file (`*.md`: README, CHANGELOG, CONTRIBUTING, AGENT, CLAUDE, LICENSE), `sha256sums.sha256`. `pluginst.inf` names the 32-bit file (`file=TCResticBrowser.wfx`); 64-bit Total Commander appends `64` itself. `type=wfx`, `defaultdir=TCResticBrowser`. The DLL is named after the project like the sibling plugins (`TCNewPlus.wfx`, `TCOfficeView.wlx`); so are the CMake target and the `.def`/`.rc`/`.ico` files in `src\`.
 
 If Total Commander still has a freshly built DLL loaded, the link fails; run `cm_UnloadPlugins` in Total Commander (or restart it) before rebuilding.
 

@@ -13,7 +13,7 @@
 #include <winver.h>
 #include "version.h"
 
-1 ICON "restic_wfx.ico"
+1 ICON "TCResticBrowser.ico"
 
 #ifdef _DEBUG
 #define VER_FILEFLAGS VS_FF_DEBUG

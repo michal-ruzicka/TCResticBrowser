@@ -111,13 +111,12 @@ add_library(restic_core OBJECT
 # ---------------------------------------------------------------------------
 
 if(NOT RESTIC_WFX_ASAN)
-    add_library(restic SHARED
+    add_library(TCResticBrowser SHARED
         $<TARGET_OBJECTS:restic_core>
-        restic_wfx.def
-        restic_wfx.rc   # plugin icon (Network Neighborhood) + VERSIONINFO
+        TCResticBrowser.def
+        TCResticBrowser.rc   # plugin icon (Network Neighborhood) + VERSIONINFO
     )
-    set_target_properties(restic PROPERTIES
-        OUTPUT_NAME "TCResticBrowser"
+    set_target_properties(TCResticBrowser PROPERTIES
         PREFIX ""
         SUFFIX "${RESTIC_WFX_SUFFIX}"
     )
