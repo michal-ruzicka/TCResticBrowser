@@ -71,8 +71,10 @@ upstream 1.x line.
   *Restic Backups*, matching the plugin, its files and its configuration
   file. To keep the old name, set `RootName=Restic Backups` before
   installing the new version.
-- **Release ZIP** is named `TCResticBrowser.vX.Y.Z.zip` and ships the
-  license as `LICENSE.txt`.
+- **Release ZIP** is named `TCResticBrowser.vX.Y.Z.zip` and, like the
+  author's other Total Commander plugins, ships all the Markdown
+  documentation (README, CHANGELOG, CONTRIBUTING, AGENT, CLAUDE) and the
+  license, now `LICENSE.md` instead of `LICENSE`.
 - **Documentation** restructured (README, CONTRIBUTING, this changelog), and
   the Python project template and the Pi coding-agent tooling (scripts and
   instructions in Italian) were removed.

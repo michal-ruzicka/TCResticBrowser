@@ -47,11 +47,11 @@ linked against the static MSVC runtime, and contains no third-party code.
 | `.vsconfig` | Visual Studio component selection; pins the MSVC toolset and Windows SDK versions for the CI workflow and `setup-build-environment-example.cmd` |
 | `build.cmd` | Top-level build driver |
 | `setup-build-environment-example.cmd` | Builds from scratch on a fresh Windows installation |
-| `AGENT.md` | Technical specification and coding-agent instructions |
-| `CHANGELOG.md` | Release notes in Keep a Changelog format |
-| `CLAUDE.md` | Points Claude Code at `AGENT.md` |
-| `CONTRIBUTING.md` | Developer documentation (this file) |
-| `LICENSE` | MIT License; bundled in every release ZIP as `LICENSE.txt` |
+| `AGENT.md` | Technical specification and coding-agent instructions; bundled in every release ZIP |
+| `CHANGELOG.md` | Release notes in Keep a Changelog format; bundled in every release ZIP |
+| `CLAUDE.md` | Points Claude Code at `AGENT.md`; bundled in every release ZIP |
+| `CONTRIBUTING.md` | Developer documentation (this file); bundled in every release ZIP |
+| `LICENSE.md` | MIT License; bundled in every release ZIP |
 | `README.md` | End-user documentation; bundled in every release ZIP |
 
 ## Build
@@ -428,5 +428,5 @@ but that copy is unsigned and is intended for testing PRs only.
 
 ## License
 
-This project is licensed under the MIT License — see [LICENSE](LICENSE) for
+This project is licensed under the MIT License — see [LICENSE.md](LICENSE.md) for
 the full text. Release notes are in [CHANGELOG.md](CHANGELOG.md).

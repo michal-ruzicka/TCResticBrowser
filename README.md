@@ -362,5 +362,5 @@ shared with the coding agents used on this project, is in
 ## License
 
 This project is licensed under the MIT License, like the upstream project it
-is forked from — see [LICENSE](LICENSE) for the full text. Release notes are
+is forked from — see [LICENSE.md](LICENSE.md) for the full text. Release notes are
 in [CHANGELOG.md](CHANGELOG.md).
