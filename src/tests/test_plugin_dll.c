@@ -1026,10 +1026,19 @@ static void test_live_end_to_end_navigation(void) {
     EXPECT_TRUE(wcsstr(g_e2e_progress_target, repo_abs) == NULL && wcsstr(g_e2e_progress_target, L"SecondRepo") != NULL,
                 "Progress dialog shows the alias, never the repository URL (it may contain credentials)");
     g_e2e_force_abort = FALSE;
-    /* ESC does not discard a valid password */
+    /* A password restic has not accepted yet is not kept after ESC: the next visit asks again */
     g_e2e_pwd_prompts = 0;
     h = p.find_first_w(L"\\SecondRepo", &fd);
-    EXPECT_TRUE(h != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 0, "Password survives a user abort");
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 1, "Unverified password not cached after a user abort");
+    p.find_close(h);
+    /* A password restic has accepted survives a later ESC */
+    g_e2e_force_abort = TRUE;
+    EXPECT_TRUE(p.find_first_w(L"\\SecondRepo", &fd) == INVALID_HANDLE_VALUE && GetLastError() == ERROR_CANCELLED,
+                "Second user abort");
+    g_e2e_force_abort = FALSE;
+    g_e2e_pwd_prompts = 0;
+    h = p.find_first_w(L"\\SecondRepo", &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 0, "Verified password survives a user abort");
     p.find_close(h);
 
     /* 7. Concurrent listings from several threads (TC may call the plugin from worker threads) */

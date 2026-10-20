@@ -399,10 +399,18 @@ static void handle_restic_failure(
     }
 }
 
-/* True when the outcome does not prove the password wrong, so it is worth caching for the next call */
+/*
+ * True only when restic demonstrably accepted the password, so it is worth caching for the next
+ * call. Restic opens the repository with the password (exit code 12 if it is wrong) before it locks
+ * it or reads a snapshot, so these outcomes prove it right: success, "repository locked" (exit
+ * code 11), unexpected output after exit code 0, and a path missing from a snapshot (restic had to
+ * decrypt the snapshot to tell). Anything that may end before the password was checked - a local
+ * write error, ESC, a timeout, a failure to start restic - leaves an unverified password uncached;
+ * a password cached earlier stays.
+ */
 static BOOL password_worth_caching(ResticResult res) {
-    return res == RESTIC_OK || res == RESTIC_ERR_PATH_NOT_FOUND || res == RESTIC_ERR_LOCAL_WRITE ||
-           res == RESTIC_ERR_CANCELLED || res == RESTIC_ERR_TIMEOUT;
+    return res == RESTIC_OK || res == RESTIC_ERR_REPO_LOCKED || res == RESTIC_ERR_JSON_PARSE ||
+           res == RESTIC_ERR_PATH_NOT_FOUND;
 }
 
 /* Executes a Level 1 (snapshots) or Level 2 (directory) query with password prompt/retry */
