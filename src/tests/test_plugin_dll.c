@@ -1174,15 +1174,18 @@ static void test_live_paths_with_spaces(void) {
                 copy_tree(L"tmp\\test_fixture\\repo", repo),
                 "Copy the fixture repository into a folder with spaces");
 
-    char exe_u8[MAX_PATH * 3] = {0}, repo_u8[MAX_PATH * 3] = {0}, ini_text[4096] = {0};
+    char exe_u8[MAX_PATH * 3] = {0}, repo_u8[MAX_PATH * 3] = {0}, dir_u8[MAX_PATH * 3] = {0};
+    static char ini_text[4096]; /* Static: /analyze (C6262) caps a frame at 16 KB */
     WideCharToMultiByte(CP_UTF8, 0, exe, -1, exe_u8, sizeof(exe_u8), NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, dir, -1, dir_u8, sizeof(dir_u8), NULL, NULL);
     WideCharToMultiByte(CP_UTF8, 0, repo, -1, repo_u8, sizeof(repo_u8), NULL, NULL);
     int ini_len = snprintf(
         ini_text,
         sizeof(ini_text),
-        "[Settings]\r\nResticPath=%s\r\n[Repositories]\r\n"
-        "Plain=%s\r\nTrailing Backslash=%s\\\r\nQuoted=\"%s\"\r\nQuoted Trailing=\"%s\\\"\r\n",
-        exe_u8, repo_u8, repo_u8, repo_u8, repo_u8
+        "[Settings]\r\nResticPath=%s\r\nPasswordTimeoutSeconds=5\r\n[Logging]\r\nLogPath=%s\\spaces.log\r\n"
+        "[Repositories]\r\n"
+        "Plain=%s\r\nTrailing Backslash=%s\\\r\nQuoted=\"%s\"\r\nQuoted Trailing=\"%s\\\"\r\nTimed=%s\r\n",
+        exe_u8, dir_u8, repo_u8, repo_u8, repo_u8, repo_u8, repo_u8
     );
     EXPECT_TRUE(ini_len > 0 && (size_t)ini_len < sizeof(ini_text), "Spaces INI fits its buffer");
     EXPECT_TRUE(write_file(ini, ini_text), "Write spaces INI");
@@ -1211,6 +1214,26 @@ static void test_live_paths_with_spaces(void) {
                  (unsigned)i);
         EXPECT_TRUE(snaps == 2 && g_e2e_pwd_prompts == 1 && g_e2e_msg_dialogs == 0, msg);
     }
+
+    /* PasswordTimeoutSeconds=5: reused within the timeout (counted from when restic first accepted
+       it, not from the last use), wiped by the timer afterwards even without any plugin call */
+    g_e2e_pwd_prompts = 0;
+    WIN32_FIND_DATAW fd2;
+    HANDLE h2 = p.find_first_w(L"\\Timed", &fd2);
+    if (h2 != INVALID_HANDLE_VALUE) p.find_close(h2);
+    h2 = p.find_first_w(L"\\Timed", &fd2);
+    if (h2 != INVALID_HANDLE_VALUE) p.find_close(h2);
+    EXPECT_TRUE(h2 != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 1, "Cached password reused within the timeout");
+    Sleep(6500);
+    WCHAR log_file[MAX_PATH];
+    swprintf_s(log_file, MAX_PATH, L"%ls\\spaces.log", dir);
+    char* log_text = read_text_file(log_file);
+    BOOL expired = log_text && strstr(log_text, "Cached password for 'Timed' forgotten: PasswordTimeoutSeconds (5 s) elapsed");
+    free(log_text);
+    EXPECT_TRUE(expired, "The timer wiped the password after the timeout without a plugin call");
+    h2 = p.find_first_w(L"\\Timed", &fd2);
+    if (h2 != INVALID_HANDLE_VALUE) p.find_close(h2);
+    EXPECT_TRUE(h2 != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 2, "Expired password is asked for again");
 
     unload_plugin_copy(&p, dir);
     DeleteFileW(ini);

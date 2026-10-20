@@ -197,6 +197,18 @@ Commander. Back it up before installing a new version of the plugin, as the
 installation replaces it with the sample. A `%APPDATA%\GHISLER\TCResticBrowser.ini`
 on the computer you run it on would take precedence.
 
+#### Password Timeout
+
+Passwords are kept in memory, encrypted, for 30 minutes from when restic
+first accepted them, then wiped; the next access asks again. Using a
+repository does not extend the time. `PasswordTimeoutSeconds=` under
+`[Settings]` changes it, `0` keeps passwords until Total Commander exits:
+
+```ini
+[Settings]
+PasswordTimeoutSeconds=600
+```
+
 #### Root Folder Name
 
 `RootName=` under `[Settings]` sets the name of the plugin's folder in

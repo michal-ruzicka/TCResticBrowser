@@ -796,6 +796,44 @@ static char* read_all(const WCHAR* path) {
     return buf;
 }
 
+/* [Settings] PasswordTimeoutSeconds: default, 0, first occurrence, invalid values keep the default */
+static void test_password_timeout_setting(void) {
+    WCHAR plugin_dir[MAX_PATH] = {0}, ini_path[MAX_PATH] = {0};
+    make_temp_dir(L"restic_timeout_plug", plugin_dir, MAX_PATH);
+    swprintf_s(ini_path, MAX_PATH, L"%ls\\%ls", plugin_dir, CONFIG_INI_FILENAME);
+    config_set_plugin_dir(plugin_dir);
+
+    ResticConfig cfg;
+    DeleteFileW(ini_path);
+    config_load(&cfg);
+    EXPECT_TRUE(cfg.password_timeout_s == 1800, "Default timeout without an INI is 30 minutes");
+    config_free(&cfg);
+
+    static const struct { const char* ini; DWORD expected; const char* what; } cases[] = {
+        {"[Settings]\r\nResticPath=restic.exe\r\n", 1800, "Missing setting: default"},
+        {"[Settings]\r\nPasswordTimeoutSeconds=0\r\n", 0, "0 = keep until Total Commander exits"},
+        {"[settings]\r\n passwordtimeoutseconds = 60 \r\nPasswordTimeoutSeconds=5\r\n", 60, "First occurrence, trimmed"},
+        {"[Settings]\r\nPasswordTimeoutSeconds=4294967295\r\n", 4294967295u, "Largest value"},
+        {"[Settings]\r\nPasswordTimeoutSeconds=4294967296\r\n", 1800, "Overflow: default"},
+        {"[Settings]\r\nPasswordTimeoutSeconds=-5\r\n", 1800, "Negative: default"},
+        {"[Settings]\r\nPasswordTimeoutSeconds=30 min\r\n", 1800, "Not a plain number: default"},
+        {"[Settings]\r\nPasswordTimeoutSeconds=\r\n", 1800, "Empty: default"},
+        {"[Settings]\r\nPasswordTimeoutSeconds=abc\r\nPasswordTimeoutSeconds=60\r\n", 1800,
+         "An invalid first occurrence is not replaced by a later one"},
+        {"[Repositories]\r\nPasswordTimeoutSeconds=D:\\repo\r\n", 1800, "Outside [Settings] it is a repository alias"},
+    };
+    for (size_t i = 0; i < _countof(cases); ++i) {
+        write_text_file(ini_path, cases[i].ini);
+        config_load(&cfg);
+        DWORD got = cfg.password_timeout_s;
+        config_free(&cfg);
+        EXPECT_TRUE(got == cases[i].expected, cases[i].what);
+    }
+
+    DeleteFileW(ini_path);
+    RemoveDirectoryW(plugin_dir);
+}
+
 /* Optional diagnostic log: [Logging] LogPath parsing, expansion, file creation, redaction */
 static void test_logging(void) {
     WCHAR plugin_dir[MAX_PATH] = {0}, ini_path[MAX_PATH] = {0};
@@ -918,6 +956,7 @@ int main(void) {
     test_wfx_routing_and_callbacks();
     test_missing_ini_is_harmless();
     test_logging();
+    test_password_timeout_setting();
 
     RemoveDirectoryW(user_dir);
     RemoveDirectoryW(appdata_dir);

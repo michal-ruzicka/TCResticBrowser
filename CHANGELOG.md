@@ -18,6 +18,11 @@ upstream 1.x line.
 - **Configurable root folder name.** `RootName=` under `[Settings]` names the
   plugin's folder in Network Neighborhood. Total Commander reads it only
   while installing the plugin.
+- **Password timeout.** Cached passwords are wiped 30 minutes after
+  restic first accepted them, even while Total Commander sits idle, and
+  asked for again on the next access. `PasswordTimeoutSeconds=` under
+  `[Settings]` changes the time; `0` keeps them until Total Commander exits,
+  as before.
 - **Optional diagnostic log**, like in the author's other Total Commander
   plugins: `LogPath=` under `[Logging]` (off by default) records every
   `restic` command line with its exit code, duration and error output, the

@@ -4,6 +4,12 @@
 #ifndef _UNICODE
 #define _UNICODE
 #endif
+#ifdef _MSC_VER
+/* Windows SDK 10.0.26100 annotates the fourth parameter of SetThreadpoolTimer, a plain DWORD, as
+   _In_opt_, which /analyze reports as C6553 at every call. This file has no SAL annotations of its
+   own, so the check has nothing else to find here. */
+#pragma warning(disable : 6553)
+#endif
 #include <windows.h>
 #include <dpapi.h>
 #if defined(_DEBUG) && !defined(__SANITIZE_ADDRESS__)
@@ -53,6 +59,7 @@ typedef struct {
     BOOL  used;
     WCHAR alias[MAX_PATH];
     WCHAR password[SESSION_MAX_PASSWORD]; /* CryptProtectMemory ciphertext, never plaintext */
+    ULONGLONG cached_at;                  /* GetTickCount64() when restic first accepted it */
 } SessionSlot;
 
 _Static_assert(sizeof(((SessionSlot*)0)->password) % CRYPTPROTECTMEMORY_BLOCK_SIZE == 0,
@@ -67,6 +74,16 @@ static BOOL         g_SessionLocked    = FALSE; /* VirtualLock succeeded */
 static BOOL         g_SessionWerExcluded = FALSE;
 static unsigned     g_SessionEvictNext = 0;
 static SRWLOCK      g_SessionLock      = SRWLOCK_INIT;
+
+/*
+ * [Settings] PasswordTimeoutSeconds: a cached password is wiped this long after restic first
+ * accepted it, whether or not it was used since (0 = keep until Total Commander exits). A
+ * thread-pool timer fires at the next expiry, so a password does not outlive its timeout while
+ * Total Commander sits idle for days. GetTickCount64 keeps counting during sleep and hibernation.
+ */
+static ULONGLONG    g_PasswordTimeoutMs   = CONFIG_DEFAULT_PASSWORD_TIMEOUT_S * 1000ull;
+static PTP_TIMER    g_SessionTimer        = NULL;
+static BOOL         g_SessionShuttingDown = FALSE; /* DLL unload: never create the timer again */
 
 /* Allocates, locks and excludes the slot table from crash dumps; caller holds g_SessionLock */
 static BOOL session_table_locked(void) {
@@ -151,6 +168,71 @@ typedef struct {
     const WCHAR* repo_alias; /* Never the repository URL: it may embed credentials */
 } WfxCancelContext;
 
+static void session_expire_locked(void);
+
+static VOID CALLBACK session_timer_callback(PTP_CALLBACK_INSTANCE instance, PVOID context, PTP_TIMER timer) {
+    (void)instance;
+    (void)context;
+    (void)timer;
+    AcquireSRWLockExclusive(&g_SessionLock);
+    session_expire_locked();
+    ReleaseSRWLockExclusive(&g_SessionLock);
+}
+
+/* Arms the expiry timer to fire in due_ms (0: stop it); caller holds g_SessionLock */
+static void session_arm_timer_locked(ULONGLONG due_ms) {
+    if (due_ms == 0) {
+        if (g_SessionTimer) SetThreadpoolTimer(g_SessionTimer, NULL, 0, 0);
+        return;
+    }
+    if (!g_SessionTimer) {
+        if (g_SessionShuttingDown) return;
+        g_SessionTimer = CreateThreadpoolTimer(session_timer_callback, NULL, NULL);
+        if (!g_SessionTimer) {
+            log_write(L"Password timeout timer unavailable (Windows error %lu); expiry is checked on use only",
+                      GetLastError());
+            return;
+        }
+    }
+    ULARGE_INTEGER due;
+    due.QuadPart = (ULONGLONG)(-(LONGLONG)((due_ms + 100) * 10000)); /* Relative, 100 ns units */
+    FILETIME ft;
+    ft.dwLowDateTime  = due.LowPart;
+    ft.dwHighDateTime = due.HighPart;
+    SetThreadpoolTimer(g_SessionTimer, &ft, 0, 1000);
+}
+
+/* Wipes the passwords whose timeout elapsed and re-arms the timer; caller holds g_SessionLock */
+static void session_expire_locked(void) {
+    if (!g_Sessions) return;
+    ULONGLONG now = GetTickCount64(), next_due = 0;
+    for (int i = 0; i < SESSION_SLOTS; ++i) {
+        SessionSlot* slot = &g_Sessions[i];
+        if (!slot->used || g_PasswordTimeoutMs == 0) continue;
+        ULONGLONG age = now - slot->cached_at;
+        if (age >= g_PasswordTimeoutMs) {
+            log_write(L"Cached password for '%ls' forgotten: PasswordTimeoutSeconds (%llu s) elapsed",
+                      slot->alias, g_PasswordTimeoutMs / 1000);
+            SecureZeroMemory(slot, sizeof(*slot));
+            continue;
+        }
+        ULONGLONG left = g_PasswordTimeoutMs - age;
+        if (next_due == 0 || left < next_due) next_due = left;
+    }
+    session_arm_timer_locked(next_due);
+}
+
+/* Applies [Settings] PasswordTimeoutSeconds; a shorter timeout also applies to cached passwords */
+static void apply_password_timeout(DWORD seconds) {
+    AcquireSRWLockExclusive(&g_SessionLock);
+    ULONGLONG ms = (ULONGLONG)seconds * 1000ull;
+    if (ms != g_PasswordTimeoutMs) {
+        g_PasswordTimeoutMs = ms;
+        session_expire_locked();
+    }
+    ReleaseSRWLockExclusive(&g_SessionLock);
+}
+
 static SessionSlot* session_find_locked(const WCHAR* alias) {
     if (!g_Sessions) return NULL;
     for (int i = 0; i < SESSION_SLOTS; ++i) {
@@ -169,6 +251,7 @@ static BOOL session_get(const WCHAR* alias, WCHAR* out_pwd, size_t cap) {
     BOOL found = FALSE;
     if (cap < SESSION_MAX_PASSWORD) return FALSE;
     AcquireSRWLockExclusive(&g_SessionLock);
+    session_expire_locked();
     SessionSlot* slot = session_find_locked(alias);
     if (slot) {
         memcpy(out_pwd, slot->password, sizeof(slot->password));
@@ -201,11 +284,13 @@ static void session_put(const WCHAR* alias, const WCHAR* password) {
     slot->used = TRUE;
     wcsncpy_s(slot->alias, MAX_PATH, alias, _TRUNCATE);
     wcsncpy_s(slot->password, SESSION_MAX_PASSWORD, password, _TRUNCATE);
+    slot->cached_at = GetTickCount64();
     if (!CryptProtectMemory(slot->password, (DWORD)sizeof(slot->password), CRYPTPROTECTMEMORY_SAME_PROCESS)) {
         DWORD err = GetLastError();
         SecureZeroMemory(slot, sizeof(*slot)); /* Never keep a plaintext password */
         log_write(L"Password for '%ls' not cached: CryptProtectMemory failed (Windows error %lu)", alias, err);
     }
+    session_expire_locked(); /* Arms the timer for this password's expiry */
     ReleaseSRWLockExclusive(&g_SessionLock);
 }
 
@@ -222,21 +307,45 @@ static void clear_password_session(void) {
     AcquireSRWLockExclusive(&g_SessionLock);
     if (g_Sessions) SecureZeroMemory(g_Sessions, sizeof(SessionSlot) * SESSION_SLOTS);
     g_SessionEvictNext = 0;
+    session_arm_timer_locked(0);
     ReleaseSRWLockExclusive(&g_SessionLock);
 }
 
-/* Wipes and frees the password table (DLL unload) */
-static void release_password_session(void) {
+/*
+ * Wipes and frees the password table (DLL unload). On FreeLibrary the expiry timer is stopped and
+ * pending callbacks are cancelled or waited for, outside g_SessionLock (a running callback needs
+ * it), before the code they would run is unmapped. At process exit other threads are already gone.
+ */
+static void release_password_session(BOOL process_exit) {
+    AcquireSRWLockExclusive(&g_SessionLock);
+    g_SessionShuttingDown = TRUE;
+    PTP_TIMER timer       = g_SessionTimer;
+    g_SessionTimer        = NULL;
+    if (timer) SetThreadpoolTimer(timer, NULL, 0, 0);
+    ReleaseSRWLockExclusive(&g_SessionLock);
+
+    if (timer && !process_exit) {
+        WaitForThreadpoolTimerCallbacks(timer, TRUE);
+        CloseThreadpoolTimer(timer);
+    }
+
     AcquireSRWLockExclusive(&g_SessionLock);
     session_table_release_locked();
     g_SessionEvictNext = 0;
     ReleaseSRWLockExclusive(&g_SessionLock);
 }
 
+/* config_load() plus the settings the plugin applies globally (PasswordTimeoutSeconds) */
+static BOOL load_config(ResticConfig* cfg) {
+    BOOL ok = config_load(cfg);
+    apply_password_timeout(cfg->password_timeout_s);
+    return ok;
+}
+
 /* The Network Neighborhood root name: [Settings] RootName, or CONFIG_DEFAULT_ROOT_NAME */
 static void load_root_name(WCHAR* out, size_t capacity) {
     ResticConfig cfg;
-    config_load(&cfg);
+    load_config(&cfg);
     wcsncpy_s(out, capacity, cfg.root_name, _TRUNCATE);
     config_free(&cfg);
 }
@@ -530,6 +639,7 @@ static HANDLE execute_repo_query(
     WCHAR password[SESSION_MAX_PASSWORD] = {0}; /* Local copy, wiped before returning */
     WCHAR wrong_hint[PASSWORD_HINT_CHARS] = {0}; /* What looked odd in a rejected password */
     BOOL have_password                   = session_get(repo->alias, password, _countof(password));
+    BOOL from_cache                      = have_password; /* Cached: keep its original timestamp */
     WIN32_FIND_DATAW* items              = NULL;
     size_t count                         = 0;
     WCHAR err_msg[512]                   = {0};
@@ -543,6 +653,7 @@ static HANDLE execute_repo_query(
                 return INVALID_HANDLE_VALUE;
             }
             have_password = TRUE;
+            from_cache    = FALSE;
         }
 
         err_msg[0] = L'\0';
@@ -575,7 +686,7 @@ static HANDLE execute_repo_query(
         break;
     }
 
-    if (have_password && password_worth_caching(res)) {
+    if (have_password && !from_cache && password_worth_caching(res)) {
         session_put(repo->alias, password);
     }
     SecureZeroMemory(password, sizeof(password));
@@ -594,7 +705,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
         DisableThreadLibraryCalls(hinstDLL);
         config_set_plugin_dir_from_module((HMODULE)hinstDLL);
     } else if (fdwReason == DLL_PROCESS_DETACH) {
-        release_password_session();
+        release_password_session(lpvReserved != NULL);
     }
     return TRUE;
 }
@@ -648,7 +759,7 @@ int __stdcall FsInitW(
     g_RequestProc  = pRequestProcW;
 
     ResticConfig cfg; /* Applies [Logging] LogPath before the first log line */
-    config_load(&cfg);
+    load_config(&cfg);
     config_free(&cfg);
     log_write(L"FsInitW: TCResticBrowser %hs (%u-bit), plugin directory %ls", RESTIC_WFX_PRODUCT_VER,
               (unsigned)(sizeof(void*) * 8), config_get_plugin_dir());
@@ -682,7 +793,7 @@ static void log_configuration(const ResticConfig* cfg) {
 /* Populates a ResticFindHandle for the root path "\" from [Repositories] */
 static HANDLE enumerate_root_repositories(WIN32_FIND_DATAW* FindData) {
     ResticConfig cfg;
-    BOOL loaded = config_load(&cfg);
+    BOOL loaded = load_config(&cfg);
     log_configuration(&cfg);
     if (!loaded || cfg.repo_count == 0) {
         config_free(&cfg);
@@ -737,7 +848,7 @@ HANDLE __stdcall FsFindFirstW(WCHAR* Path, WIN32_FIND_DATAW* FindData) {
 
     /* Level 1 & Level 2+: resolve repository configuration and invoke Restic */
     ResticConfig cfg;
-    if (!config_load(&cfg)) {
+    if (!load_config(&cfg)) {
         config_free(&cfg);
         SetLastError(ERROR_PATH_NOT_FOUND);
         return INVALID_HANDLE_VALUE;
@@ -852,7 +963,7 @@ int __stdcall FsGetFileW(WCHAR* RemoteName, WCHAR* LocalName, int CopyFlags, Rem
     }
 
     ResticConfig cfg;
-    if (!config_load(&cfg)) {
+    if (!load_config(&cfg)) {
         config_free(&cfg);
         return FS_FILE_NOTFOUND; /* No configuration file: the repository alias cannot exist */
     }
@@ -884,6 +995,7 @@ int __stdcall FsGetFileW(WCHAR* RemoteName, WCHAR* LocalName, int CopyFlags, Rem
     WCHAR password[SESSION_MAX_PASSWORD] = {0};
     WCHAR wrong_hint[PASSWORD_HINT_CHARS] = {0}; /* What looked odd in a rejected password */
     BOOL have_password                   = session_get(repo->alias, password, _countof(password));
+    BOOL from_cache                      = have_password; /* Cached: keep its original timestamp */
     WCHAR err_msg[512]                   = {0};
     ResticResult res                     = RESTIC_ERR_WRONG_PASSWORD;
 
@@ -895,6 +1007,7 @@ int __stdcall FsGetFileW(WCHAR* RemoteName, WCHAR* LocalName, int CopyFlags, Rem
                 return FS_FILE_USERABORT;
             }
             have_password = TRUE;
+            from_cache    = FALSE;
         }
 
         err_msg[0] = L'\0';
@@ -924,7 +1037,7 @@ int __stdcall FsGetFileW(WCHAR* RemoteName, WCHAR* LocalName, int CopyFlags, Rem
         break;
     }
 
-    if (have_password && password_worth_caching(res)) {
+    if (have_password && !from_cache && password_worth_caching(res)) {
         session_put(repo->alias, password);
     }
     SecureZeroMemory(password, sizeof(password));

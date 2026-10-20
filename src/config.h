@@ -7,6 +7,7 @@
 #define CONFIG_USER_SUBDIR        L"GHISLER"   /* Total Commander's settings folder under %APPDATA% */
 #define CONFIG_DEFAULT_RESTIC_EXE L"restic.exe"
 #define CONFIG_DEFAULT_ROOT_NAME  L"TCResticBrowser"  /* Network Neighborhood name without [Settings] RootName */
+#define CONFIG_DEFAULT_PASSWORD_TIMEOUT_S 1800u  /* [Settings] PasswordTimeoutSeconds default: 30 min */
 #define CONFIG_MAX_PATH           1024
 #define CONFIG_MAX_INI_BYTES      (4 * 1024 * 1024)  /* A larger TCResticBrowser.ini is not read */
 
@@ -26,6 +27,7 @@ typedef struct {
     WCHAR restic_path[CONFIG_MAX_PATH];  /* Resolved path or command for restic.exe */
     WCHAR root_name[MAX_PATH];           /* [Settings] RootName, or CONFIG_DEFAULT_ROOT_NAME */
     WCHAR log_path[CONFIG_MAX_PATH];     /* [Logging] LogPath as written (unexpanded); empty = off */
+    DWORD password_timeout_s;            /* [Settings] PasswordTimeoutSeconds; 0 = keep until exit */
     ResticRepoEntry* repos;              /* Heap-allocated array of repository entries */
     size_t repo_count;                   /* Number of repositories in repos */
 } ResticConfig;
@@ -74,7 +76,9 @@ BOOL config_resolve_restic_path(const WCHAR* ini_path, WCHAR* out_path, size_t o
 /**
  * Loads configuration and repository list from a specific INI file path. root_name is always
  * filled: with a valid [Settings] RootName, otherwise (also when the file is missing) with
- * CONFIG_DEFAULT_ROOT_NAME.
+ * CONFIG_DEFAULT_ROOT_NAME. password_timeout_s is [Settings] PasswordTimeoutSeconds (a decimal
+ * number of seconds, 0 = no timeout), or CONFIG_DEFAULT_PASSWORD_TIMEOUT_S when it is missing or
+ * not such a number.
  * Caller must release allocated resources via config_free().
  */
 BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config);

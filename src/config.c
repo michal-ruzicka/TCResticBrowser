@@ -470,10 +470,24 @@ static BOOL upsert_repo_entry(
     return TRUE;
 }
 
+/* Parses a plain decimal number of seconds (digits only, at most 4294967295) */
+static BOOL parse_seconds(const WCHAR* text, DWORD* out) {
+    if (!text || text[0] == L'\0') return FALSE;
+    unsigned long long value = 0;
+    for (const WCHAR* p = text; *p; ++p) {
+        if (*p < L'0' || *p > L'9') return FALSE;
+        value = value * 10 + (unsigned long long)(*p - L'0');
+        if (value > 0xFFFFFFFFull) return FALSE;
+    }
+    *out = (DWORD)value;
+    return TRUE;
+}
+
 BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
     if (!out_config) return FALSE;
     memset(out_config, 0, sizeof(ResticConfig));
     wcsncpy_s(out_config->root_name, MAX_PATH, CONFIG_DEFAULT_ROOT_NAME, _TRUNCATE);
+    out_config->password_timeout_s = CONFIG_DEFAULT_PASSWORD_TIMEOUT_S;
 
     if (!ini_path || ini_path[0] == L'\0') {
         config_resolve_restic_path(NULL, out_config->restic_path, CONFIG_MAX_PATH);
@@ -499,6 +513,7 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
     size_t repo_capacity = 0;
     BOOL root_name_seen = FALSE;
     BOOL log_path_seen = FALSE;
+    BOOL timeout_seen = FALSE;
     IniReader reader = {ini_text, NULL};
     WCHAR *alias = NULL, *target = NULL;
     while (ini_next_entry(&reader, &alias, &target)) {
@@ -508,6 +523,15 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
                 wcsncpy_s(out_config->root_name, MAX_PATH, target, _TRUNCATE);
             }
             root_name_seen = TRUE;
+            continue;
+        }
+        if (ini_in_section(&reader, L"Settings") && _wcsicmp(alias, L"PasswordTimeoutSeconds") == 0) {
+            /* First occurrence wins; anything but a plain decimal number keeps the default */
+            DWORD seconds = 0;
+            if (!timeout_seen && parse_seconds(target, &seconds)) {
+                out_config->password_timeout_s = seconds;
+            }
+            timeout_seen = TRUE;
             continue;
         }
         if (ini_in_section(&reader, L"Logging") && _wcsicmp(alias, L"LogPath") == 0) {
