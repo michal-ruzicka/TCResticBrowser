@@ -5,6 +5,7 @@
 #define _UNICODE
 #endif
 #include "config.h"
+#include "log.h"
 #if defined(_DEBUG) && !defined(__SANITIZE_ADDRESS__)
 #define _CRTDBG_MAP_ALLOC
 #include <stdlib.h>
@@ -497,6 +498,7 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
     /* Every [Repositories] line is "<Alias>=<Target>"; a repeated alias updates the earlier entry */
     size_t repo_capacity = 0;
     BOOL root_name_seen = FALSE;
+    BOOL log_path_seen = FALSE;
     IniReader reader = {ini_text, NULL};
     WCHAR *alias = NULL, *target = NULL;
     while (ini_next_entry(&reader, &alias, &target)) {
@@ -506,6 +508,14 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
                 wcsncpy_s(out_config->root_name, MAX_PATH, target, _TRUNCATE);
             }
             root_name_seen = TRUE;
+            continue;
+        }
+        if (ini_in_section(&reader, L"Logging") && _wcsicmp(alias, L"LogPath") == 0) {
+            /* First occurrence wins; an over-long path leaves logging off */
+            if (!log_path_seen && wcslen(target) < CONFIG_MAX_PATH) {
+                wcsncpy_s(out_config->log_path, CONFIG_MAX_PATH, target, _TRUNCATE);
+            }
+            log_path_seen = TRUE;
             continue;
         }
         if (!ini_in_section(&reader, L"Repositories")) {
@@ -537,7 +547,9 @@ BOOL config_load(ResticConfig* out_config) {
 
     WCHAR resolved_ini[CONFIG_MAX_PATH] = {0};
     config_resolve_ini_path(resolved_ini, CONFIG_MAX_PATH);
-    return config_load_from_file(resolved_ini, out_config);
+    BOOL ok = config_load_from_file(resolved_ini, out_config);
+    log_configure(out_config->log_path);
+    return ok;
 }
 
 const ResticRepoEntry* config_find_repo(const ResticConfig* config, const WCHAR* alias) {

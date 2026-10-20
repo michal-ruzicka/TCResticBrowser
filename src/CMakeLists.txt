@@ -101,6 +101,7 @@ add_library(restic_core OBJECT
     config.c
     restic_cli.c
     json.c
+    log.c
 )
 
 # ---------------------------------------------------------------------------

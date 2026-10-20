@@ -18,6 +18,8 @@
 #include "fsplugin.h"
 #include "config.h"
 #include "restic_cli.h"
+#include "log.h"
+#include "version.h"
 
 #define SESSION_MAX_PASSWORD  512
 #define SESSION_SLOTS         8
@@ -167,6 +169,7 @@ static void report_plugin_error(const WCHAR* repo_alias, const WCHAR* detail) {
         );
     }
 
+    log_write(L"Error shown to the user: %ls", msg);
     if (g_LogProc) {
         g_LogProc(g_PluginNr, MSGTYPE_IMPORTANTERROR, msg);
     }
@@ -214,9 +217,13 @@ static BOOL prompt_repository_password(
     );
     out_pwd[cap - 1] = L'\0';
     if (!accepted || out_pwd[0] == L'\0') {
+        log_write(L"Password prompt for '%ls'%ls: %ls", repo_alias, is_retry ? L" (retry)" : L"",
+                  accepted ? L"empty password, treated as cancel" : L"cancelled");
         SecureZeroMemory(out_pwd, cap * sizeof(WCHAR));
         return FALSE;
     }
+    log_write(L"Password prompt for '%ls'%ls: %u characters entered", repo_alias,
+              is_retry ? L" (retry)" : L"", (unsigned)wcslen(out_pwd));
     return TRUE;
 }
 
@@ -525,6 +532,12 @@ int __stdcall FsInitW(
     g_ProgressProc = pProgressProcW;
     g_LogProc      = pLogProcW;
     g_RequestProc  = pRequestProcW;
+
+    ResticConfig cfg; /* Applies [Logging] LogPath before the first log line */
+    config_load(&cfg);
+    config_free(&cfg);
+    log_write(L"FsInitW: TCResticBrowser %hs (%u-bit), plugin directory %ls", RESTIC_WFX_PRODUCT_VER,
+              (unsigned)(sizeof(void*) * 8), config_get_plugin_dir());
     return 0;
 }
 
@@ -536,10 +549,28 @@ void __stdcall FsSetDefaultParams(FsDefaultParamStruct* dps) {
     (void)dps;
 }
 
+/* Logs the effective configuration (repository credentials redacted) */
+static void log_configuration(const ResticConfig* cfg) {
+    if (!log_enabled()) return;
+    WCHAR log_path[CONFIG_MAX_PATH];
+    log_get_path(log_path, _countof(log_path));
+    log_write(L"Configuration: %ls", cfg->ini_path);
+    log_write(L"  ResticPath resolved to: %ls", cfg->restic_path);
+    log_write(L"  RootName: %ls; LogPath: %ls", cfg->root_name, log_path);
+    log_write(L"  %u repositories:", (unsigned)cfg->repo_count);
+    for (size_t i = 0; i < cfg->repo_count; ++i) {
+        WCHAR target[CONFIG_MAX_PATH];
+        log_redact_target(cfg->repos[i].target, target, _countof(target));
+        log_write(L"    %ls = %ls", cfg->repos[i].alias, target);
+    }
+}
+
 /* Populates a ResticFindHandle for the root path "\" from [Repositories] */
 static HANDLE enumerate_root_repositories(WIN32_FIND_DATAW* FindData) {
     ResticConfig cfg;
-    if (!config_load(&cfg) || cfg.repo_count == 0) {
+    BOOL loaded = config_load(&cfg);
+    log_configuration(&cfg);
+    if (!loaded || cfg.repo_count == 0) {
         config_free(&cfg);
         SetLastError(ERROR_NO_MORE_FILES);
         return INVALID_HANDLE_VALUE;
@@ -600,11 +631,13 @@ HANDLE __stdcall FsFindFirstW(WCHAR* Path, WIN32_FIND_DATAW* FindData) {
 
     const ResticRepoEntry* repo = config_find_repo(&cfg, parsed.repo_alias);
     if (!repo) {
+        log_write(L"List %ls: no repository alias '%ls' in %ls", Path, parsed.repo_alias, cfg.ini_path);
         config_free(&cfg);
         SetLastError(ERROR_PATH_NOT_FOUND);
         return INVALID_HANDLE_VALUE;
     }
 
+    log_write(L"List %ls", Path);
     HANDLE hdl = execute_repo_query(Path, cfg.restic_path, repo, &parsed, FindData);
     config_free(&cfg);
     return hdl;
@@ -727,6 +760,7 @@ int __stdcall FsGetFileW(WCHAR* RemoteName, WCHAR* LocalName, int CopyFlags, Rem
         config_free(&cfg);
         return FS_FILE_USERABORT;
     }
+    log_write(L"Copy %ls -> %ls%ls", RemoteName, LocalName, (CopyFlags & FS_COPYFLAGS_OVERWRITE) ? L" (overwrite)" : L"");
 
     ULONGLONG total_size            = ri ? (((ULONGLONG)ri->SizeHigh << 32) | ri->SizeLow) : 0;
     const FILETIME* mtime           = ri ? &ri->LastWriteTime : NULL;

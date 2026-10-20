@@ -224,6 +224,23 @@ Quotes around the whole value are allowed and removed. A backslash at the
 end of a path is kept and does not continue the line, so
 `Firefox Profile=C:\My Backups\Firefox.restic-repo\` works as well.
 
+#### Logging
+
+Diagnostic logging is **off by default**. To find out why a repository does
+not open, set `LogPath` under `[Logging]` to a file; environment variables
+are expanded and missing folders are created:
+
+```ini
+[Logging]
+LogPath=%TEMP%\TCResticBrowser.log
+```
+
+The log records each `restic` command line with its exit code, duration and
+error output, the configuration in use, password prompts and the error
+messages shown. It never contains a password, only how many characters were
+entered, and credentials in repository URLs are masked. Clear the value to
+turn logging off again; the file is not rotated, so delete it when done.
+
 #### Example `TCResticBrowser.ini`
 
 ```ini

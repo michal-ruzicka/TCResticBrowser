@@ -25,6 +25,7 @@ typedef struct {
     WCHAR ini_path[CONFIG_MAX_PATH];     /* Full path to the active TCResticBrowser.ini */
     WCHAR restic_path[CONFIG_MAX_PATH];  /* Resolved path or command for restic.exe */
     WCHAR root_name[MAX_PATH];           /* [Settings] RootName, or CONFIG_DEFAULT_ROOT_NAME */
+    WCHAR log_path[CONFIG_MAX_PATH];     /* [Logging] LogPath as written (unexpanded); empty = off */
     ResticRepoEntry* repos;              /* Heap-allocated array of repository entries */
     size_t repo_count;                   /* Number of repositories in repos */
 } ResticConfig;
@@ -79,7 +80,8 @@ BOOL config_resolve_restic_path(const WCHAR* ini_path, WCHAR* out_path, size_t o
 BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config);
 
 /**
- * Resolves the active INI file path and loads it.
+ * Resolves the active INI file path and loads it, and applies its [Logging] LogPath to the
+ * diagnostic log (log_configure), so logging follows the INI without a restart.
  * Caller must release allocated resources via config_free().
  */
 BOOL config_load(ResticConfig* out_config);

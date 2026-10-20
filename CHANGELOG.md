@@ -18,6 +18,12 @@ upstream 1.x line.
 - **Configurable root folder name.** `RootName=` under `[Settings]` names the
   plugin's folder in Network Neighborhood. Total Commander reads it only
   while installing the plugin.
+- **Optional diagnostic log**, like in the author's other Total Commander
+  plugins: `LogPath=` under `[Logging]` (off by default) records every
+  `restic` command line with its exit code, duration and error output, the
+  configuration in use, password prompts and error messages. Passwords are
+  never logged, only their length, and credentials in repository URLs are
+  masked.
 - **Reproducible builds.** The same sources and pinned toolchain produce a
   byte-identical ZIP (`/Brepro`, `/BREPRO`, `/pathmap`, pinned MSVC toolset
   and Windows SDK, ZIP timestamps from `release-date=` in `pluginst.inf`).

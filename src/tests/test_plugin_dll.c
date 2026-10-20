@@ -14,6 +14,7 @@
 #endif
 #include <windows.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
 #include "version.h"
@@ -111,6 +112,22 @@ static BOOL write_file(const WCHAR* path, const char* text) {
     BOOL ok = (h != INVALID_HANDLE_VALUE) && WriteFile(h, text, len, &written, NULL) && written == len;
     if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
     return ok;
+}
+
+/* Reads a whole file as a NUL-terminated byte string (caller frees); NULL when missing */
+static char* read_text_file(const WCHAR* path) {
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+    DWORD size = GetFileSize(h, NULL), got = 0;
+    char* buf = (char*)malloc((size_t)size + 1);
+    if (buf && ReadFile(h, buf, size, &got, NULL)) {
+        buf[got] = '\0';
+    } else {
+        free(buf);
+        buf = NULL;
+    }
+    CloseHandle(h);
+    return buf;
 }
 
 /* Copies the DLL into dir (so DllMain resolves that directory as the plugin directory) and loads it */
@@ -806,8 +823,9 @@ static void test_live_end_to_end_navigation(void) {
     EXPECT_TRUE(make_unique_dir(L"restic_dll_e2e", dir, MAX_PATH), "Create E2E plugin directory");
     swprintf_s(ini, MAX_PATH, L"%ls\\TCResticBrowser.ini", dir);
 
-    char restic_a[MAX_PATH] = {0}, repo_a[MAX_PATH] = {0}, ini_text[6144] = {0};
+    char restic_a[MAX_PATH] = {0}, repo_a[MAX_PATH] = {0}, dir_a[MAX_PATH] = {0}, ini_text[6144] = {0};
     WideCharToMultiByte(CP_ACP, 0, restic_abs, -1, restic_a, sizeof(restic_a), NULL, NULL);
+    WideCharToMultiByte(CP_ACP, 0, dir, -1, dir_a, sizeof(dir_a), NULL, NULL);
     WideCharToMultiByte(CP_ACP, 0, repo_abs, -1, repo_a, sizeof(repo_a), NULL, NULL);
     char long_alias[256];
     memset(long_alias, 'L', 250);
@@ -815,10 +833,12 @@ static void test_live_end_to_end_navigation(void) {
     int ini_len = snprintf(
         ini_text,
         sizeof(ini_text),
-        "[Settings]\r\nResticPath=%s\r\n[Repositories]\r\nMainRepo=%s\r\nSecondRepo=%s\r\nThirdRepo=%s\r\n"
+        "[Settings]\r\nResticPath=%s\r\n[Logging]\r\nLogPath=%s\\log dir\\e2e.log\r\n"
+        "[Repositories]\r\nMainRepo=%s\r\nSecondRepo=%s\r\nThirdRepo=%s\r\n"
         "ExtractRepo=%s\r\n"
         "MissingRepo=C:\\no_such_restic_repo_999\r\n%s=C:\\no_such_restic_repo_999\r\n",
         restic_a,
+        dir_a,
         repo_a,
         repo_a,
         repo_a,
@@ -1022,8 +1042,32 @@ static void test_live_end_to_end_navigation(void) {
         EXPECT_TRUE(g_e2e_mt_failures == 0, "Concurrent listings all succeed (cached sessions, thread-safe)");
     }
 
+    /* [Logging] LogPath: restic runs, exit codes and prompts are logged; passwords never are */
+    WCHAR log_dir[MAX_PATH], log_file[MAX_PATH];
+    swprintf_s(log_dir, MAX_PATH, L"%ls\\log dir", dir);
+    swprintf_s(log_file, MAX_PATH, L"%ls\\e2e.log", log_dir);
+    char* log_text = read_text_file(log_file);
+    EXPECT_TRUE(log_text != NULL, "Diagnostic log written to [Logging] LogPath");
+    char fixture_pwd_u8[128] = {0};
+    WideCharToMultiByte(CP_UTF8, 0, FIXTURE_PASSWORD, -1, fixture_pwd_u8, sizeof(fixture_pwd_u8), NULL, NULL);
+    BOOL logged_init   = strstr(log_text, "FsInitW: TCResticBrowser") != NULL;
+    BOOL logged_run    = strstr(log_text, "restic run: ") != NULL && strstr(log_text, "snapshots --json --no-lock") != NULL;
+    BOOL logged_wrong  = strstr(log_text, "exit code 12 after ") != NULL &&
+                         strstr(log_text, "wrong password or no key found") != NULL;
+    BOOL logged_prompt = strstr(log_text, "Password prompt for 'MainRepo'") != NULL &&
+                         strstr(log_text, "characters entered") != NULL;
+    BOOL logged_error  = strstr(log_text, "Error shown to the user: ") != NULL;
+    BOOL leaked        = strstr(log_text, fixture_pwd_u8) != NULL || strstr(log_text, "wrong_first_attempt") != NULL ||
+                         strstr(log_text, "always_wrong") != NULL;
+    free(log_text);
+    EXPECT_TRUE(logged_init && logged_run && logged_wrong, "Log has the plugin start, restic command lines and exit codes");
+    EXPECT_TRUE(logged_prompt && logged_error, "Log has password prompts (length only) and errors shown to the user");
+    EXPECT_TRUE(!leaked, "No password, right or wrong, appears in the log");
+
     unload_plugin_copy(&p, dir);
     DeleteFileW(ini);
+    DeleteFileW(log_file);
+    RemoveDirectoryW(log_dir);
     RemoveDirectoryW(dir);
 }
 

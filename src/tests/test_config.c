@@ -16,6 +16,7 @@
 #include <wchar.h>
 #include <string.h>
 #include "config.h"
+#include "log.h"
 #include "fsplugin.h"
 
 static int g_tests_run    = 0;
@@ -779,6 +780,118 @@ static void test_wfx_routing_and_callbacks(void) {
     RemoveDirectoryW(plugin_dir);
 }
 
+/* Reads a whole file as a NUL-terminated byte string (caller frees); NULL when missing */
+static char* read_all(const WCHAR* path) {
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+    DWORD size = GetFileSize(h, NULL), got = 0;
+    char* buf = (char*)malloc((size_t)size + 1);
+    if (buf && ReadFile(h, buf, size, &got, NULL)) {
+        buf[got] = '\0';
+    } else {
+        free(buf);
+        buf = NULL;
+    }
+    CloseHandle(h);
+    return buf;
+}
+
+/* Optional diagnostic log: [Logging] LogPath parsing, expansion, file creation, redaction */
+static void test_logging(void) {
+    WCHAR plugin_dir[CONFIG_MAX_PATH] = {0}, ini_path[CONFIG_MAX_PATH] = {0};
+    WCHAR log_root[CONFIG_MAX_PATH] = {0}, log_file[CONFIG_MAX_PATH] = {0}, got[CONFIG_MAX_PATH];
+    make_temp_dir(L"restic_log_plug", plugin_dir, CONFIG_MAX_PATH);
+    make_temp_dir(L"restic_log_out", log_root, CONFIG_MAX_PATH);
+    swprintf_s(ini_path, CONFIG_MAX_PATH, L"%ls\\%ls", plugin_dir, CONFIG_INI_FILENAME);
+    swprintf_s(log_file, CONFIG_MAX_PATH, L"%ls\\new dir\\sub\\TCResticBrowser.log", log_root);
+    config_set_plugin_dir(plugin_dir);
+    SetEnvironmentVariableW(L"TCRB_TEST_LOG_ROOT", log_root);
+
+    /* Off by default: no [Logging] section */
+    ResticConfig cfg;
+    write_text_file(ini_path, "[Settings]\r\nResticPath=restic.exe\r\n");
+    EXPECT_TRUE(config_load(&cfg), "INI without [Logging] loads");
+    EXPECT_TRUE(cfg.log_path[0] == L'\0' && !log_enabled(), "Logging is off without LogPath");
+    config_free(&cfg);
+
+    /* First LogPath in [Logging] wins, environment variables are expanded; LogPath elsewhere is ignored */
+    write_text_file(ini_path,
+                    "[Settings]\r\nLogPath=C:\\settings.log\r\n"
+                    "[logging]\r\n logpath = %TCRB_TEST_LOG_ROOT%\\new dir\\sub\\TCResticBrowser.log \r\n"
+                    "LogPath=C:\\second.log\r\n");
+    EXPECT_TRUE(config_load(&cfg), "INI with [Logging] loads");
+    EXPECT_WSTR_EQ(cfg.log_path, L"%TCRB_TEST_LOG_ROOT%\\new dir\\sub\\TCResticBrowser.log",
+                   "LogPath kept as written");
+    config_free(&cfg);
+    EXPECT_TRUE(log_enabled(), "config_load turns logging on");
+    log_get_path(got, _countof(got));
+    EXPECT_WSTR_EQ(got, log_file, "LogPath expanded");
+
+    log_write(L"first line %d", 1);
+    log_write(L"non-ASCII \u017dlu\u0165ou\u010dk\u00fd k\u016f\u0148 \u65e5\u672c");
+    char* text = read_all(log_file);
+    EXPECT_TRUE(text != NULL, "Log file and its missing parent directories created");
+    BOOL has_first = strstr(text, "first line 1\r\n") != NULL;
+    BOOL has_utf8  = strstr(text, "non-ASCII \xC5\xBDlu\xC5\xA5ou\xC4\x8Dk\xC3\xBD k\xC5\xAF\xC5\x88 \xE6\x97\xA5\xE6\x9C\xAC\r\n") != NULL;
+    BOOL has_pid   = strstr(text, "[pid ") != NULL;
+    BOOL no_bom    = (unsigned char)text[0] != 0xEF;
+    free(text);
+    EXPECT_TRUE(has_first && has_pid, "Lines are appended with a time/pid/tid prefix and CRLF");
+    EXPECT_TRUE(has_utf8 && no_bom, "Lines are UTF-8 without a byte-order mark");
+
+    /* The file is not kept open: it can be deleted, and the next line recreates it */
+    EXPECT_TRUE(DeleteFileW(log_file), "Log file can be deleted while logging is on");
+    log_write(L"after delete");
+    text = read_all(log_file);
+    EXPECT_TRUE(text != NULL && strstr(text, "after delete") != NULL, "Next line recreates the log file");
+    free(text);
+
+    /* A relative path (it would depend on Total Commander's current directory) or an empty value: off */
+    write_text_file(ini_path, "[Logging]\r\nLogPath=relative\\TCResticBrowser.log\r\n");
+    config_load(&cfg);
+    config_free(&cfg);
+    EXPECT_TRUE(!log_enabled(), "Relative LogPath leaves logging off");
+    write_text_file(ini_path, "[Logging]\r\nLogPath=\r\n");
+    config_load(&cfg);
+    config_free(&cfg);
+    EXPECT_TRUE(!log_enabled(), "Empty LogPath turns logging off");
+    log_write(L"must not appear");
+    text = read_all(log_file);
+    EXPECT_TRUE(text != NULL && strstr(text, "must not appear") == NULL, "Nothing is written while logging is off");
+    free(text);
+
+    /* Removing the INI turns logging off as well */
+    DeleteFileW(ini_path);
+    log_configure(L"%TCRB_TEST_LOG_ROOT%\\x.log");
+    EXPECT_TRUE(log_enabled(), "log_configure turns logging on directly");
+    config_load(&cfg);
+    config_free(&cfg);
+    EXPECT_TRUE(!log_enabled(), "No INI: logging off");
+
+    /* Credentials in repository URLs are masked; other targets are kept */
+    WCHAR red[256];
+    log_redact_target(L"rest:https://user:secret@host:8000/repo", red, _countof(red));
+    EXPECT_WSTR_EQ(red, L"rest:https://***@host:8000/repo", "rest: URL credentials masked");
+    log_redact_target(L"s3:https://key:p@ss@minio.local/bucket", red, _countof(red));
+    EXPECT_WSTR_EQ(red, L"s3:https://***@minio.local/bucket", "Last '@' ends the userinfo");
+    log_redact_target(L"rest:http://host/repo?x=a@b", red, _countof(red));
+    EXPECT_WSTR_EQ(red, L"rest:http://host/repo?x=a@b", "'@' after the authority is not userinfo");
+    log_redact_target(L"sftp:user@host:/srv/repo", red, _countof(red));
+    EXPECT_WSTR_EQ(red, L"sftp:user@host:/srv/repo", "sftp: target without a password kept");
+    log_redact_target(L"C:\\Backups\\repo", red, _countof(red));
+    EXPECT_WSTR_EQ(red, L"C:\\Backups\\repo", "Local path kept");
+
+    WCHAR dir1[CONFIG_MAX_PATH], dir2[CONFIG_MAX_PATH];
+    swprintf_s(dir2, CONFIG_MAX_PATH, L"%ls\\new dir\\sub", log_root);
+    swprintf_s(dir1, CONFIG_MAX_PATH, L"%ls\\new dir", log_root);
+    DeleteFileW(log_file);
+    RemoveDirectoryW(dir2);
+    RemoveDirectoryW(dir1);
+    RemoveDirectoryW(log_root);
+    RemoveDirectoryW(plugin_dir);
+    SetEnvironmentVariableW(L"TCRB_TEST_LOG_ROOT", NULL);
+}
+
 int main(void) {
 #if defined(_DEBUG) && !defined(__SANITIZE_ADDRESS__)
     _CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
@@ -804,6 +917,7 @@ int main(void) {
     test_large_repository_list();
     test_wfx_routing_and_callbacks();
     test_missing_ini_is_harmless();
+    test_logging();
 
     RemoveDirectoryW(user_dir);
     RemoveDirectoryW(appdata_dir);

@@ -17,6 +17,7 @@
 #include <string.h>
 #include <wchar.h>
 #include "json.h"
+#include "log.h"
 
 /* 100-nanosecond FILETIME ticks per minute (timezone offset conversion) */
 #define FILETIME_TICKS_PER_MINUTE 600000000ULL
@@ -652,6 +653,69 @@ fail:
     return NULL;
 }
 
+/* ------------------------------------------------------------------------------------------ */
+/* Diagnostic log (off unless [Logging] LogPath is set). Never logs the password itself.      */
+/* ------------------------------------------------------------------------------------------ */
+
+static const WCHAR* result_name(ResticResult r) {
+    switch (r) {
+        case RESTIC_OK: return L"OK";
+        case RESTIC_ERR_INVALID_ARG: return L"invalid argument";
+        case RESTIC_ERR_SPAWN_FAILED: return L"restic.exe could not be started";
+        case RESTIC_ERR_OUT_OF_MEMORY: return L"out of memory";
+        case RESTIC_ERR_WRONG_PASSWORD: return L"wrong password or no key found";
+        case RESTIC_ERR_REPO_NOT_FOUND: return L"repository not found";
+        case RESTIC_ERR_REPO_LOCKED: return L"repository locked";
+        case RESTIC_ERR_CLI_FAILED: return L"restic failed";
+        case RESTIC_ERR_JSON_PARSE: return L"unexpected restic output";
+        case RESTIC_ERR_PATH_NOT_FOUND: return L"path not found";
+        case RESTIC_ERR_LOCAL_WRITE: return L"local write failed";
+        case RESTIC_ERR_TIMEOUT: return L"timeout";
+        case RESTIC_ERR_CANCELLED: return L"cancelled";
+    }
+    return L"unknown";
+}
+
+/* Logs the command about to run: the repository (credentials redacted) and the password length only */
+static void log_restic_start(const WCHAR* cmd_line, const WCHAR* repo_target, const WCHAR* password) {
+    if (!log_enabled()) return;
+    WCHAR repo[1024];
+    log_redact_target(repo_target, repo, _countof(repo));
+    log_write(L"restic run: %ls", cmd_line);
+    log_write(L"  repository: %ls; password: %u characters", repo, (unsigned)wcslen(password));
+}
+
+/* Logs how a run ended, with restic's stderr (line breaks shown as " | ") */
+static void log_restic_end(ResticResult result, BOOL exited, DWORD exit_code, ULONGLONG start, const ByteBuf* err) {
+    if (!log_enabled()) return;
+    ULONGLONG ms = GetTickCount64() - start;
+    if (exited) {
+        log_write(L"  exit code %lu after %llu ms: %ls", exit_code, ms, result_name(result));
+    } else {
+        log_write(L"  ended after %llu ms: %ls", ms, result_name(result));
+    }
+    if (err && err->data && err->len > 0) {
+        WCHAR text[LOG_MAX_LINE - 128];
+        utf8_to_wide_trunc(err->data, text, _countof(text));
+        WCHAR flat[LOG_MAX_LINE - 128];
+        size_t o = 0;
+        for (const WCHAR* p = text; *p && o + 4 < _countof(flat); ++p) {
+            if (*p == L'\r') continue;
+            if (*p == L'\n') {
+                if (p[1] != L'\0') {
+                    flat[o++] = L' ';
+                    flat[o++] = L'|';
+                    flat[o++] = L' ';
+                }
+                continue;
+            }
+            flat[o++] = *p;
+        }
+        flat[o] = L'\0';
+        log_write(L"  stderr: %ls", flat);
+    }
+}
+
 /*
  * Starts cmd_line hidden with stdin=NUL and stdout/stderr redirected to two anonymous pipes.
  * Only these three handles are inherited (PROC_THREAD_ATTRIBUTE_HANDLE_LIST): other threads of the
@@ -837,13 +901,17 @@ ResticResult restic_exec_command(
 
     HANDLE out_pipe = NULL, err_pipe = NULL;
     PROCESS_INFORMATION pi;
+    ULONGLONG started = GetTickCount64();
+    log_restic_start(cmd_line, repo_target, password);
     BOOL spawned = spawn_hidden(cmd_line, env_block, &out_pipe, &err_pipe, &pi);
+    DWORD spawn_error = spawned ? 0 : GetLastError();
 
     /* Credentials must not outlive the CreateProcess call in this process' memory */
     SecureZeroMemory(env_block, env_chars * sizeof(WCHAR));
     free(env_block);
     free(cmd_line);
     if (!spawned) {
+        log_write(L"  could not start restic.exe (Windows error %lu)", spawn_error);
         return RESTIC_ERR_SPAWN_FAILED;
     }
     CloseHandle(pi.hThread);
@@ -854,9 +922,11 @@ ResticResult restic_exec_command(
         result = collect_output(pi.hProcess, out_pipe, err_pipe, options, &out, &err);
     }
 
+    BOOL exited = FALSE;
     if (result == RESTIC_OK) {
         DWORD exit_code = 1;
         GetExitCodeProcess(pi.hProcess, &exit_code);
+        exited = TRUE;
         out_result->exit_code = exit_code;
         if (exit_code != 0) {
             build_error_message(&out, &err, out_result->error_message, _countof(out_result->error_message));
@@ -872,6 +942,7 @@ ResticResult restic_exec_command(
         WaitForSingleObject(pi.hProcess, 5000);
     }
 
+    log_restic_end(result, exited, out_result->exit_code, started, &err);
     CloseHandle(out_pipe);
     CloseHandle(err_pipe);
     CloseHandle(pi.hProcess);
@@ -1200,11 +1271,15 @@ ResticResult restic_dump_file(
 
     HANDLE out_pipe = NULL, err_pipe = NULL;
     PROCESS_INFORMATION pi;
+    ULONGLONG started = GetTickCount64();
+    log_restic_start(cmd_line, repo_target, password);
     BOOL spawned = spawn_hidden(cmd_line, env_block, &out_pipe, &err_pipe, &pi);
+    DWORD spawn_error = spawned ? 0 : GetLastError();
     SecureZeroMemory(env_block, env_chars * sizeof(WCHAR));
     free(env_block);
     free(cmd_line);
     if (!spawned) {
+        log_write(L"  could not start restic.exe (Windows error %lu)", spawn_error);
         free(st.part_path);
         free(st.chunk);
         return RESTIC_ERR_SPAWN_FAILED;
@@ -1259,9 +1334,11 @@ ResticResult restic_dump_file(
         }
     }
 
+    BOOL exited = FALSE;
+    DWORD exit_code = 1;
     if (result == RESTIC_OK) {
-        DWORD exit_code = 1;
         GetExitCodeProcess(pi.hProcess, &exit_code);
+        exited = TRUE;
         if (exit_code != 0) {
             if (out_error_msg && err_capacity > 0) {
                 ByteBuf empty_out = {0};
@@ -1296,6 +1373,7 @@ ResticResult restic_dump_file(
         DeleteFileW(st.part_path);
     }
 
+    log_restic_end(result, exited, exit_code, started, &err);
     free(st.part_path);
     free(st.chunk);
     free(err.data);
