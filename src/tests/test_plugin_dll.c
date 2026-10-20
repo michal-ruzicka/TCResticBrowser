@@ -1027,6 +1027,122 @@ static void test_live_end_to_end_navigation(void) {
     RemoveDirectoryW(dir);
 }
 
+/* Copies the directory tree src into dst (created); used to place the fixture repository elsewhere */
+static BOOL copy_tree(const WCHAR* src, const WCHAR* dst) {
+    if (!CreateDirectoryW(dst, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return FALSE;
+    WCHAR pattern[MAX_PATH * 2];
+    swprintf_s(pattern, _countof(pattern), L"%ls\\*", src);
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
+    BOOL ok = TRUE;
+    do {
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+        WCHAR from[MAX_PATH * 2], to[MAX_PATH * 2];
+        swprintf_s(from, _countof(from), L"%ls\\%ls", src, fd.cFileName);
+        swprintf_s(to, _countof(to), L"%ls\\%ls", dst, fd.cFileName);
+        ok = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? copy_tree(from, to) : CopyFileW(from, to, FALSE);
+    } while (ok && FindNextFileW(h, &fd));
+    FindClose(h);
+    return ok;
+}
+
+/* Deletes the directory tree path (best effort) */
+static void delete_tree(const WCHAR* path) {
+    WCHAR pattern[MAX_PATH * 2];
+    swprintf_s(pattern, _countof(pattern), L"%ls\\*", path);
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pattern, &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+            WCHAR child[MAX_PATH * 2];
+            swprintf_s(child, _countof(child), L"%ls\\%ls", path, fd.cFileName);
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                delete_tree(child);
+            } else {
+                SetFileAttributesW(child, FILE_ATTRIBUTE_NORMAL);
+                DeleteFileW(child);
+            }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    RemoveDirectoryW(path);
+}
+
+/*
+ * Scenario D: paths with spaces, written the ways a user would write them in TCResticBrowser.ini -
+ * ResticPath and repository paths with spaces, unquoted and quoted, with and without a trailing
+ * backslash. restic.exe and the repository live in folders with spaces, like "C:\Program Files".
+ */
+static void test_live_paths_with_spaces(void) {
+    if (GetFileAttributesW(L"tmp\\restic.exe") == INVALID_FILE_ATTRIBUTES ||
+        GetFileAttributesW(L"tmp\\test_fixture\\repo\\config") == INVALID_FILE_ATTRIBUTES) {
+        printf("[SKIP] tmp\\restic.exe or tmp\\test_fixture\\repo not found: spaces E2E test skipped.\n");
+        return;
+    }
+
+    WCHAR dir[MAX_PATH], exe_dir[MAX_PATH], exe[MAX_PATH], repo[MAX_PATH], ini[MAX_PATH];
+    EXPECT_TRUE(make_unique_dir(L"restic dll spaces", dir, MAX_PATH), "Create plugin directory with spaces");
+    swprintf_s(exe_dir, MAX_PATH, L"%ls\\Program Files\\Restic", dir);
+    swprintf_s(exe, MAX_PATH, L"%ls\\restic.exe", exe_dir);
+    swprintf_s(repo, MAX_PATH, L"%ls\\My Backups\\Firefox Thunderbird.restic-repo", dir);
+    swprintf_s(ini, MAX_PATH, L"%ls\\TCResticBrowser.ini", dir);
+
+    WCHAR program_files[MAX_PATH], backups[MAX_PATH];
+    swprintf_s(program_files, MAX_PATH, L"%ls\\Program Files", dir);
+    swprintf_s(backups, MAX_PATH, L"%ls\\My Backups", dir);
+    EXPECT_TRUE((CreateDirectoryW(program_files, NULL) || GetLastError() == ERROR_ALREADY_EXISTS) &&
+                (CreateDirectoryW(exe_dir, NULL) || GetLastError() == ERROR_ALREADY_EXISTS) &&
+                CopyFileW(L"tmp\\restic.exe", exe, FALSE),
+                "Copy restic.exe into a folder with spaces");
+    EXPECT_TRUE((CreateDirectoryW(backups, NULL) || GetLastError() == ERROR_ALREADY_EXISTS) &&
+                copy_tree(L"tmp\\test_fixture\\repo", repo),
+                "Copy the fixture repository into a folder with spaces");
+
+    char exe_u8[MAX_PATH * 3] = {0}, repo_u8[MAX_PATH * 3] = {0}, ini_text[4096] = {0};
+    WideCharToMultiByte(CP_UTF8, 0, exe, -1, exe_u8, sizeof(exe_u8), NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, repo, -1, repo_u8, sizeof(repo_u8), NULL, NULL);
+    int ini_len = snprintf(
+        ini_text,
+        sizeof(ini_text),
+        "[Settings]\r\nResticPath=%s\r\n[Repositories]\r\n"
+        "Plain=%s\r\nTrailing Backslash=%s\\\r\nQuoted=\"%s\"\r\nQuoted Trailing=\"%s\\\"\r\n",
+        exe_u8, repo_u8, repo_u8, repo_u8, repo_u8
+    );
+    EXPECT_TRUE(ini_len > 0 && (size_t)ini_len < sizeof(ini_text), "Spaces INI fits its buffer");
+    EXPECT_TRUE(write_file(ini, ini_text), "Write spaces INI");
+
+    Plugin p;
+    EXPECT_TRUE(load_plugin_copy(dir, &p), "Load plugin copy from a folder with spaces");
+    EXPECT_TRUE(p.init_w(43, (void*)e2e_progress_proc, (void*)e2e_log_proc, (void*)e2e_request_proc) == 0,
+                "Register Total Commander callbacks (spaces)");
+
+    const WCHAR* aliases[] = {L"Plain", L"Trailing Backslash", L"Quoted", L"Quoted Trailing"};
+    for (size_t i = 0; i < _countof(aliases); ++i) {
+        g_e2e_pwd_mode    = 1;
+        g_e2e_pwd_prompts = 0;
+        g_e2e_msg_dialogs = 0;
+        WCHAR path[MAX_PATH];
+        swprintf_s(path, MAX_PATH, L"\\%ls", aliases[i]);
+        WIN32_FIND_DATAW fd;
+        HANDLE h = p.find_first_w(path, &fd);
+        size_t snaps = 0;
+        if (h != INVALID_HANDLE_VALUE) {
+            do snaps++; while (p.find_next_w(h, &fd));
+            p.find_close(h);
+        }
+        char msg[160];
+        snprintf(msg, sizeof(msg), "Snapshots listed through alias #%u (path with spaces), one prompt, no error",
+                 (unsigned)i);
+        EXPECT_TRUE(snaps == 2 && g_e2e_pwd_prompts == 1 && g_e2e_msg_dialogs == 0, msg);
+    }
+
+    unload_plugin_copy(&p, dir);
+    DeleteFileW(ini);
+    delete_tree(dir);
+}
+
 /* Fills `out` with `name` in the directory of this executable */
 static BOOL path_next_to_exe(const WCHAR* name, WCHAR* out, size_t cap) {
     WCHAR exe[MAX_PATH];
@@ -1064,6 +1180,7 @@ int main(void) {
     test_primary_ini_next_to_dll();
     test_user_ini_overrides_plugin_ini();
     test_live_end_to_end_navigation();
+    test_live_paths_with_spaces();
 
     RemoveDirectoryW(g_user_dir);
     RemoveDirectoryW(appdata_dir);

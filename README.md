@@ -216,6 +216,14 @@ When executing a command, the plugin searches for `restic.exe` in this order:
 2. `<plugin_dir>\restic.exe` (next to the plugin DLL).
 3. The system `PATH` environment variable *(for security against working-directory hijacking, the process current directory is never searched)*.
 
+#### Paths with Spaces
+
+Write paths with spaces as they are, without quotes: everything after `=` up
+to the end of the line is the value, with surrounding spaces trimmed.
+Quotes around the whole value are allowed and removed. A backslash at the
+end of a path is kept and does not continue the line, so
+`Firefox Profile=C:\My Backups\Firefox.restic-repo\` works as well.
+
 #### Example `TCResticBrowser.ini`
 
 ```ini
@@ -227,7 +235,7 @@ When executing a command, the plugin searches for `restic.exe` in this order:
 ; Optional path to restic.exe.
 ; If omitted or commented out, the plugin checks <plugin_dir>\restic.exe first
 ; and then searches the system PATH.
-ResticPath=C:\Tools\restic\restic.exe
+ResticPath=C:\Program Files\Restic\restic.exe
 ; Optional name of the plugin's folder in Network Neighborhood
 ; (default: TCResticBrowser; read only when the plugin is installed).
 RootName=Backups
@@ -236,8 +244,9 @@ RootName=Backups
 ; Format: <Alias>=<Repository Path or URL>
 ; Each <Alias> is displayed as a top-level folder inside "\\\Backups\".
 
-; 1. Local disk repository
+; 1. Local disk repository (spaces in aliases and paths need no quotes)
 LocalDocs=D:\Backups\restic_docs
+Firefox Profile=C:\Users\me\AppData\Local\My Backups\Firefox Profile.restic-repo
 
 ; 2. Network share (SMB / UNC path)
 NasBackup=\\NAS\Backups\workstation_repo
