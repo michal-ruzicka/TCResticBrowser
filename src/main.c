@@ -51,7 +51,9 @@ static tRequestProcW  g_RequestProc  = NULL;
  * In-memory credential sessions, one slot per repository alias (two panels can browse two
  * repositories alternately without being prompted again). Guarded by an SRW lock because Total
  * Commander may call into the plugin from background threads. Slots are wiped on wrong password,
- * FsInitW and DLL unload. SRWLOCK_INIT keeps the lock usable even if DllMain never ran (unit tests).
+ * FsInitW, DLL unload, PasswordTimeoutSeconds expiry and the forget entry; the least recently
+ * cached one makes room when all slots are taken. SRWLOCK_INIT keeps the lock usable even if
+ * DllMain never ran (unit tests).
  *
  * The table lives in its own pages, allocated on first use:
  *  - VirtualLock keeps them out of the page file;
@@ -68,6 +70,7 @@ typedef struct {
     WCHAR alias[MAX_PATH];
     WCHAR password[SESSION_MAX_PASSWORD]; /* CryptProtectMemory ciphertext, never plaintext */
     ULONGLONG cached_at;                  /* GetTickCount64() when restic first accepted it (last used) */
+    ULONGLONG generation;                 /* Unique per session_put: tells a replaced password apart */
 } SessionSlot;
 
 _Static_assert(sizeof(((SessionSlot*)0)->password) % CRYPTPROTECTMEMORY_BLOCK_SIZE == 0,
@@ -80,7 +83,7 @@ static SessionSlot* g_Sessions         = NULL; /* SESSION_SLOTS slots in locked 
 static SIZE_T       g_SessionBytes     = 0;
 static BOOL         g_SessionLocked    = FALSE; /* VirtualLock succeeded */
 static BOOL         g_SessionWerExcluded = FALSE;
-static unsigned     g_SessionEvictNext = 0;
+static ULONGLONG    g_SessionGeneration = 0;
 static SRWLOCK      g_SessionLock      = SRWLOCK_INIT;
 
 /*
@@ -259,10 +262,12 @@ static SessionSlot* session_find_locked(const WCHAR* alias) {
 
 /*
  * Decrypts the cached password of `alias` into out_pwd (SESSION_MAX_PASSWORD characters; the caller
- * wipes it). Returns FALSE if none is cached.
+ * wipes it) and returns its generation for session_touch/session_forget. Returns FALSE if none is
+ * cached.
  */
-static BOOL session_get(const WCHAR* alias, WCHAR* out_pwd, size_t cap) {
-    BOOL found = FALSE;
+static BOOL session_get(const WCHAR* alias, WCHAR* out_pwd, size_t cap, ULONGLONG* out_generation) {
+    BOOL found      = FALSE;
+    *out_generation = 0;
     if (cap < SESSION_MAX_PASSWORD) return FALSE;
     AcquireSRWLockExclusive(&g_SessionLock);
     session_expire_locked();
@@ -273,6 +278,8 @@ static BOOL session_get(const WCHAR* alias, WCHAR* out_pwd, size_t cap) {
         if (!found) {
             SecureZeroMemory(out_pwd, sizeof(slot->password));
             SecureZeroMemory(slot, sizeof(*slot));
+        } else {
+            *out_generation = slot->generation;
         }
         out_pwd[SESSION_MAX_PASSWORD - 1] = L'\0';
     }
@@ -280,7 +287,7 @@ static BOOL session_get(const WCHAR* alias, WCHAR* out_pwd, size_t cap) {
     return found;
 }
 
-/* Stores (or replaces) the password of `alias`; the oldest slot is recycled when the table is full */
+/* Stores (or replaces) the password of `alias`; the least recently cached slot makes room if needed */
 static void session_put(const WCHAR* alias, const WCHAR* password) {
     AcquireSRWLockExclusive(&g_SessionLock);
     if (!session_table_locked()) {
@@ -292,10 +299,18 @@ static void session_put(const WCHAR* alias, const WCHAR* password) {
         if (!g_Sessions[i].used) slot = &g_Sessions[i];
     }
     if (!slot) {
-        slot = &g_Sessions[g_SessionEvictNext++ % SESSION_SLOTS];
+        slot = &g_Sessions[0];
+        for (int i = 1; i < SESSION_SLOTS; ++i) {
+            const SessionSlot* s = &g_Sessions[i];
+            if (s->cached_at < slot->cached_at ||
+                (s->cached_at == slot->cached_at && s->generation < slot->generation)) { /* Same tick */
+                slot = &g_Sessions[i];
+            }
+        }
     }
     SecureZeroMemory(slot, sizeof(*slot));
-    slot->used = TRUE;
+    slot->used       = TRUE;
+    slot->generation = ++g_SessionGeneration;
     wcsncpy_s(slot->alias, MAX_PATH, alias, _TRUNCATE);
     wcsncpy_s(slot->password, SESSION_MAX_PASSWORD, password, _TRUNCATE);
     slot->cached_at = GetTickCount64();
@@ -308,22 +323,28 @@ static void session_put(const WCHAR* alias, const WCHAR* password) {
     ReleaseSRWLockExclusive(&g_SessionLock);
 }
 
-/* PasswordTimeoutResetOnUse: restic completed an operation with the cached password of `alias` */
-static void session_touch(const WCHAR* alias) {
+/*
+ * PasswordTimeoutResetOnUse: restic completed an operation with the cached password of `alias`
+ * (generation from session_get; a password replaced meanwhile is left alone)
+ */
+static void session_touch(const WCHAR* alias, ULONGLONG generation) {
     AcquireSRWLockExclusive(&g_SessionLock);
     SessionSlot* slot = g_PasswordResetOnUse ? session_find_locked(alias) : NULL;
-    if (slot) {
+    if (slot && slot->generation == generation) {
         slot->cached_at = GetTickCount64();
         session_expire_locked(); /* Re-arms the timer for the later expiry */
     }
     ReleaseSRWLockExclusive(&g_SessionLock);
 }
 
-/* Wipes the cached password of a single repository */
-static void session_forget(const WCHAR* alias) {
+/*
+ * Wipes the cached password of a single repository that restic rejected, unless another thread
+ * has replaced it with a verified one since session_get returned `generation`
+ */
+static void session_forget(const WCHAR* alias, ULONGLONG generation) {
     AcquireSRWLockExclusive(&g_SessionLock);
     SessionSlot* slot = session_find_locked(alias);
-    if (slot) SecureZeroMemory(slot, sizeof(*slot));
+    if (slot && slot->generation == generation) SecureZeroMemory(slot, sizeof(*slot));
     ReleaseSRWLockExclusive(&g_SessionLock);
 }
 
@@ -348,7 +369,6 @@ static unsigned cached_password_count(void) {
 static void clear_password_session(void) {
     AcquireSRWLockExclusive(&g_SessionLock);
     if (g_Sessions) SecureZeroMemory(g_Sessions, sizeof(SessionSlot) * SESSION_SLOTS);
-    g_SessionEvictNext = 0;
     session_arm_timer_locked(0);
     ReleaseSRWLockExclusive(&g_SessionLock);
 }
@@ -356,9 +376,21 @@ static void clear_password_session(void) {
 /*
  * Wipes and frees the password table (DLL unload). On FreeLibrary the expiry timer is stopped and
  * pending callbacks are cancelled or waited for, outside g_SessionLock (a running callback needs
- * it), before the code they would run is unmapped. At process exit other threads are already gone.
+ * it), before the code they would run is unmapped.
+ *
+ * At process exit Windows has already terminated every other thread, possibly one holding
+ * g_SessionLock (an SRW lock has no owner to release it), so the lock is never waited for there:
+ * the table holds ciphertext only and goes with the process; it is wiped if the lock is free.
  */
 static void release_password_session(BOOL process_exit) {
+    if (process_exit) {
+        if (TryAcquireSRWLockExclusive(&g_SessionLock)) {
+            if (g_Sessions) SecureZeroMemory(g_Sessions, g_SessionBytes);
+            ReleaseSRWLockExclusive(&g_SessionLock);
+        }
+        return;
+    }
+
     AcquireSRWLockExclusive(&g_SessionLock);
     g_SessionShuttingDown = TRUE;
     PTP_TIMER timer       = g_SessionTimer;
@@ -366,14 +398,13 @@ static void release_password_session(BOOL process_exit) {
     if (timer) SetThreadpoolTimer(timer, NULL, 0, 0);
     ReleaseSRWLockExclusive(&g_SessionLock);
 
-    if (timer && !process_exit) {
+    if (timer) {
         WaitForThreadpoolTimerCallbacks(timer, TRUE);
         CloseThreadpoolTimer(timer);
     }
 
     AcquireSRWLockExclusive(&g_SessionLock);
     session_table_release_locked();
-    g_SessionEvictNext = 0;
     ReleaseSRWLockExclusive(&g_SessionLock);
 }
 
@@ -680,8 +711,9 @@ static HANDLE execute_repo_query(
 
     WCHAR password[SESSION_MAX_PASSWORD] = {0}; /* Local copy, wiped before returning */
     WCHAR wrong_hint[PASSWORD_HINT_CHARS] = {0}; /* What looked odd in a rejected password */
-    BOOL have_password                   = session_get(repo->alias, password, _countof(password));
-    BOOL from_cache                      = have_password; /* Cached: not stored again (see session_touch) */
+    ULONGLONG cached_generation          = 0;
+    BOOL have_password = session_get(repo->alias, password, _countof(password), &cached_generation);
+    BOOL from_cache    = have_password; /* Cached: not stored again (see session_touch) */
     WIN32_FIND_DATAW* items              = NULL;
     size_t count                         = 0;
     WCHAR err_msg[512]                   = {0};
@@ -719,7 +751,7 @@ static HANDLE execute_repo_query(
         }
 
         if (res == RESTIC_ERR_WRONG_PASSWORD) {
-            session_forget(repo->alias);
+            if (from_cache) session_forget(repo->alias, cached_generation);
             restic_describe_password(password, wrong_hint, _countof(wrong_hint));
             SecureZeroMemory(password, sizeof(password));
             have_password = FALSE;
@@ -730,7 +762,7 @@ static HANDLE execute_repo_query(
 
     if (have_password && password_worth_caching(res)) {
         if (from_cache) {
-            session_touch(repo->alias);
+            session_touch(repo->alias, cached_generation);
         } else {
             session_put(repo->alias, password);
         }
@@ -748,7 +780,7 @@ static HANDLE execute_repo_query(
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
     (void)lpvReserved;
     if (fdwReason == DLL_PROCESS_ATTACH) {
-        DisableThreadLibraryCalls(hinstDLL);
+        /* No DisableThreadLibraryCalls: Microsoft advises against it with the static CRT (/MT) */
         config_set_plugin_dir_from_module((HMODULE)hinstDLL);
     } else if (fdwReason == DLL_PROCESS_DETACH) {
         release_password_session(lpvReserved != NULL);
@@ -841,7 +873,8 @@ static HANDLE enumerate_root_repositories(WIN32_FIND_DATAW* FindData) {
     ResticConfig cfg;
     BOOL loaded = load_config(&cfg);
     log_configuration(&cfg);
-    if (!loaded || cfg.repo_count == 0) {
+    unsigned cached = cached_password_count(); /* Listed even if the INI has lost its repositories */
+    if ((!loaded || cfg.repo_count == 0) && cached == 0) {
         config_free(&cfg);
         SetLastError(ERROR_NO_MORE_FILES);
         return INVALID_HANDLE_VALUE;
@@ -856,7 +889,6 @@ static HANDLE enumerate_root_repositories(WIN32_FIND_DATAW* FindData) {
 
     /* The forget command first (only while passwords are cached), then the repository folders */
     size_t count = 0;
-    unsigned cached = cached_password_count();
     if (cached > 0) {
         items[count].dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
         FS_SET_TIME_UNKNOWN(items[count].ftLastWriteTime);
@@ -1080,7 +1112,8 @@ int __stdcall FsGetFileW(WCHAR* RemoteName, WCHAR* LocalName, int CopyFlags, Rem
         config_free(&cfg);
         return FS_FILE_NOTFOUND; /* No configuration file: the repository alias cannot exist */
     }
-    const ResticRepoEntry* repo = config_find_repo(&cfg, parsed.repo_alias);
+    const ResticRepoEntry* repo = is_forget_entry_name(parsed.repo_alias) ? NULL
+                                                                          : config_find_repo(&cfg, parsed.repo_alias);
     if (!repo) {
         config_free(&cfg);
         return FS_FILE_NOTFOUND;
@@ -1107,8 +1140,9 @@ int __stdcall FsGetFileW(WCHAR* RemoteName, WCHAR* LocalName, int CopyFlags, Rem
 
     WCHAR password[SESSION_MAX_PASSWORD] = {0};
     WCHAR wrong_hint[PASSWORD_HINT_CHARS] = {0}; /* What looked odd in a rejected password */
-    BOOL have_password                   = session_get(repo->alias, password, _countof(password));
-    BOOL from_cache                      = have_password; /* Cached: not stored again (see session_touch) */
+    ULONGLONG cached_generation          = 0;
+    BOOL have_password = session_get(repo->alias, password, _countof(password), &cached_generation);
+    BOOL from_cache    = have_password; /* Cached: not stored again (see session_touch) */
     WCHAR err_msg[512]                   = {0};
     ResticResult res                     = RESTIC_ERR_WRONG_PASSWORD;
 
@@ -1141,7 +1175,7 @@ int __stdcall FsGetFileW(WCHAR* RemoteName, WCHAR* LocalName, int CopyFlags, Rem
         );
 
         if (res == RESTIC_ERR_WRONG_PASSWORD) {
-            session_forget(repo->alias);
+            if (from_cache) session_forget(repo->alias, cached_generation);
             restic_describe_password(password, wrong_hint, _countof(wrong_hint));
             SecureZeroMemory(password, sizeof(password));
             have_password = FALSE;
@@ -1152,7 +1186,7 @@ int __stdcall FsGetFileW(WCHAR* RemoteName, WCHAR* LocalName, int CopyFlags, Rem
 
     if (have_password && password_worth_caching(res)) {
         if (from_cache) {
-            session_touch(repo->alias);
+            session_touch(repo->alias, cached_generation);
         } else {
             session_put(repo->alias, password);
         }

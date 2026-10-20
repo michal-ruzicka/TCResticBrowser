@@ -1106,6 +1106,16 @@ static void test_live_end_to_end_navigation(void) {
     EXPECT_TRUE(h != INVALID_HANDLE_VALUE && wcscmp(fd.cFileName, L"\U0001F5D1 Forget 1 Password") == 0,
                 "Singular entry name");
     p.find_close(h);
+    /* An INI without repositories still lists the entry, so cached passwords can always be wiped */
+    EXPECT_TRUE(write_file(ini, "[Settings]\r\n[Repositories]\r\n"), "Write an INI without repositories");
+    h = p.find_first_w(L"\\", &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE && wcscmp(fd.cFileName, L"\U0001F5D1 Forget 1 Password") == 0 &&
+                !p.find_next_w(h, &fd),
+                "Forget entry listed alone when the INI has no repositories");
+    if (h != INVALID_HANDLE_VALUE) p.find_close(h);
+    EXPECT_TRUE(write_file(ini, ini_text), "Restore the E2E INI");
+    h = p.find_first_w(L"\\", &fd); /* Reads it again, which also turns the log back on */
+    if (h != INVALID_HANDLE_VALUE) p.find_close(h);
     wcscpy_s(exec_name, MAX_PATH, forget);
     EXPECT_TRUE(p.execute_w(NULL, exec_name, open_verb) == FS_EXEC_SYMLINK &&
                 wcscmp(g_e2e_last_msg, L"Forgot 1 remembered repository password.") == 0,
