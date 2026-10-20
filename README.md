@@ -358,6 +358,32 @@ How the reader is tested:
   sanitizer finding or a violated invariant; code coverage stopped growing
   within the first minute.
 
+## Expected Future Works
+
+Planned for versions after 2.0.0, in no particular order:
+
+- **S3 credentials asked for like the repository password.** Instead of
+  relying on `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` in Total
+  Commander's environment, the plugin would ask for the access key and
+  secret key in a dialog and keep them in memory only, as it does with the
+  Restic password.
+- **Verified rclone backends.** Check (and add tests) that `rclone:`
+  repositories work through the plugin; restic handles them itself, so no
+  problems are expected.
+- **Directory structure matching `restic mount`.** Browse snapshots by
+  `ids`, `hosts`, `tags` and `snapshots`, ideally exactly like the folder
+  tree `restic mount` presents.
+- **Faster browsing of large and remote repositories.** Every folder opened
+  starts a new `restic ls`, and restic reloads the repository index each
+  time, so big or remote (e.g. S3) repositories can take seconds per folder.
+  Measure first, then cache listings, preferably together with the new
+  directory structure above.
+- **`--password-file` and `--password-command` per repository.** An INI
+  setting whose value the plugin passes to `restic` as the ordinary
+  `--password-file` / `--password-command` argument, so such repositories
+  open without a password prompt. Total Commander and the plugin never see
+  the password.
+
 ## Contributing
 
 Build instructions, repo layout and architecture notes for developers live
