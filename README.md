@@ -157,7 +157,8 @@ documentation.
 | Action | How It Works |
 | --- | --- |
 | **List Repositories** | Open **Network Neighborhood** (`\`) -> **`TCResticBrowser`**. Changes to `TCResticBrowser.ini` take effect immediately on panel refresh (`Ctrl+R` / `F2`). |
-| **Browse Snapshots** | Enter a repository folder (`\<Alias>`). Prompted once for the repository password; kept in RAM for that alias across both panels until Total Commander unloads the plugin (or a wrong password is entered). Up to 3 password attempts are allowed. |
+| **Browse Snapshots** | Enter a repository folder (`\<Alias>`). Prompted once for the repository password; once restic accepts it, it is kept in RAM (encrypted) for that alias across both panels for 30 minutes (see [Password Timeout](#password-timeout)). Up to 3 password attempts are allowed. |
+| **Forget Passwords** | While passwords are remembered, the plugin's root folder starts with **`🗑 Forget N Passwords`** (N is their number). Press **Enter** on it to wipe them all at once; the root folder is then re-read without the entry, and the next access asks again. The entry is not removed by itself when the passwords expire; it disappears the next time the root folder is read (`Ctrl+R`). |
 | **Explore Files** | Enter any snapshot folder (`YYYY-MM-DD_HH-MM-SS_[short_id]`) and navigate the backed-up directory tree. |
 | **View File (`F3` / `Ctrl+Q`)** | Press **`F3`** (Lister) or **`Ctrl+Q`** (Quick View) on any file to stream it to a temporary location and view its contents. |
 | **Restore / Extract (`F5`)** | Select one or more files or directories and press **`F5`** to copy them to the target panel, preserving original `LastWriteTime` timestamps. Standard Total Commander overwrite prompts are supported. |

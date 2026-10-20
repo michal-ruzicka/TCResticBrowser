@@ -23,6 +23,10 @@ upstream 1.x line.
   asked for again on the next access. `PasswordTimeoutSeconds=` under
   `[Settings]` changes the time; `0` keeps them until Total Commander exits,
   as before.
+- **`🗑 Forget N Passwords`** at the top of the plugin's root folder,
+  shown while passwords are remembered and named after their number:
+  pressing Enter on it wipes them all at once and re-reads the root
+  folder, so the entry goes away.
 - **Optional diagnostic log**, like in the author's other Total Commander
   plugins: `LogPath=` under `[Logging]` (off by default) records every
   `restic` command line with its exit code, duration and error output, the

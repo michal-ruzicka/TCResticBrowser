@@ -31,6 +31,14 @@
 #define SESSION_MAX_PASSWORD  512
 #define SESSION_SLOTS         8
 #define MAX_PASSWORD_ATTEMPTS 3
+/*
+ * Virtual file in the plugin root, listed only while passwords are cached and named after their
+ * number ("<wastebasket> Forget 2 Passwords"): Enter on it (FsExecuteFileW "open") wipes them all
+ * and has Total Commander re-read the root.
+ * Any root name starting with FORGET_ENTRY_PREFIX is the command (the count may have changed since
+ * the listing). The wastebasket emoji (U+1F5D1) keeps it apart from the repository folders.
+ */
+#define FORGET_ENTRY_PREFIX L"\U0001F5D1 Forget "
 #define WFX_RESTIC_TIMEOUT_MS (30u * 60u * 1000u) /* Safety net if a hung command is never aborted */
 
 /* Host callbacks supplied by Total Commander in FsInitW */
@@ -300,6 +308,23 @@ static void session_forget(const WCHAR* alias) {
     SessionSlot* slot = session_find_locked(alias);
     if (slot) SecureZeroMemory(slot, sizeof(*slot));
     ReleaseSRWLockExclusive(&g_SessionLock);
+}
+
+/* TRUE for a root entry name that is the forget command (also used to reserve such aliases) */
+static BOOL is_forget_entry_name(const WCHAR* name) {
+    return name && _wcsnicmp(name, FORGET_ENTRY_PREFIX, wcslen(FORGET_ENTRY_PREFIX)) == 0;
+}
+
+/* Number of passwords currently cached */
+static unsigned cached_password_count(void) {
+    unsigned n = 0;
+    AcquireSRWLockExclusive(&g_SessionLock);
+    session_expire_locked();
+    for (int i = 0; g_Sessions && i < SESSION_SLOTS; ++i) {
+        if (g_Sessions[i].used) n++;
+    }
+    ReleaseSRWLockExclusive(&g_SessionLock);
+    return n;
 }
 
 /* Wipes every cached password from RAM */
@@ -801,22 +826,87 @@ static HANDLE enumerate_root_repositories(WIN32_FIND_DATAW* FindData) {
         return INVALID_HANDLE_VALUE;
     }
 
-    WIN32_FIND_DATAW* items = (WIN32_FIND_DATAW*)calloc(cfg.repo_count, sizeof(WIN32_FIND_DATAW));
+    WIN32_FIND_DATAW* items = (WIN32_FIND_DATAW*)calloc(cfg.repo_count + 1, sizeof(WIN32_FIND_DATAW));
     if (!items) {
         config_free(&cfg);
         SetLastError(ERROR_NOT_ENOUGH_MEMORY);
         return INVALID_HANDLE_VALUE;
     }
 
-    size_t count = cfg.repo_count;
-    for (size_t i = 0; i < count; ++i) {
-        items[i].dwFileAttributes = FILE_ATTRIBUTE_DIRECTORY;
-        FS_SET_TIME_UNKNOWN(items[i].ftLastWriteTime); /* Aliases have no date */
-        wcsncpy_s(items[i].cFileName, MAX_PATH, cfg.repos[i].alias, _TRUNCATE);
+    /* The forget command first (only while passwords are cached), then the repository folders */
+    size_t count = 0;
+    unsigned cached = cached_password_count();
+    if (cached > 0) {
+        items[count].dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
+        FS_SET_TIME_UNKNOWN(items[count].ftLastWriteTime);
+        _snwprintf_s(items[count].cFileName, MAX_PATH, _TRUNCATE, L"%ls%u Password%ls", FORGET_ENTRY_PREFIX,
+                     cached, cached == 1 ? L"" : L"s");
+        count++;
+    }
+    for (size_t i = 0; i < cfg.repo_count; ++i) {
+        if (is_forget_entry_name(cfg.repos[i].alias)) {
+            log_write(L"Repository alias '%ls' is reserved for the forget command and not listed", cfg.repos[i].alias);
+            continue;
+        }
+        items[count].dwFileAttributes = FILE_ATTRIBUTE_DIRECTORY;
+        FS_SET_TIME_UNKNOWN(items[count].ftLastWriteTime); /* Aliases have no date */
+        wcsncpy_s(items[count].cFileName, MAX_PATH, cfg.repos[i].alias, _TRUNCATE);
+        count++;
     }
 
     config_free(&cfg);
     return wrap_find_items(items, count, FindData);
+}
+
+/*
+ * Enter on a file ("open"): the root forget entry wipes every cached password, says how many
+ * there were and sends Total Commander back to the root (FS_EXEC_SYMLINK to "\\"), which re-reads
+ * it, so the entry disappears without Ctrl+R; any other file is downloaded and opened by
+ * Total Commander itself, as before this function was exported. "properties" has nothing to show; "chmod" and "quote"
+ * commands are not supported by this read-only plugin.
+ */
+int __stdcall FsExecuteFileW(HWND MainWin, WCHAR* RemoteName, WCHAR* Verb) {
+    (void)MainWin;
+    if (!RemoteName || !Verb) return FS_EXEC_ERROR;
+    BOOL is_forget = RemoteName[0] == L'\\' && wcschr(RemoteName + 1, L'\\') == NULL &&
+                     is_forget_entry_name(RemoteName + 1);
+
+    if (_wcsicmp(Verb, L"open") == 0) {
+        if (!is_forget) return FS_EXEC_YOURSELF;
+        unsigned n = cached_password_count();
+        clear_password_session();
+        log_write(L"Forget All Passwords: %u cached password(s) wiped", n);
+        if (g_RequestProc) {
+            WCHAR msg[128], title[MAX_PATH], unused[4] = {0};
+            if (n == 0) {
+                wcscpy_s(msg, _countof(msg), L"No repository password was remembered.");
+            } else {
+                _snwprintf_s(msg, _countof(msg), _TRUNCATE, L"Forgot %u remembered repository password%ls.", n,
+                             n == 1 ? L"" : L"s");
+            }
+            load_root_name(title, _countof(title));
+            g_RequestProc(g_PluginNr, RT_MsgOK, title, msg, unused, _countof(unused));
+        }
+        wcscpy_s(RemoteName, MAX_PATH, L"\\");
+        return FS_EXEC_SYMLINK;
+    }
+    if (_wcsicmp(Verb, L"properties") == 0) return FS_EXEC_OK;
+    return FS_EXEC_ERROR;
+}
+
+int __stdcall FsExecuteFile(HWND MainWin, char* RemoteName, char* Verb) {
+    WCHAR remote_w[MAX_PATH], verb_w[MAX_PATH];
+    if (!RemoteName || !Verb ||
+        MultiByteToWideChar(CP_ACP, 0, RemoteName, -1, remote_w, MAX_PATH) == 0 ||
+        MultiByteToWideChar(CP_ACP, 0, Verb, -1, verb_w, MAX_PATH) == 0) {
+        return FS_EXEC_ERROR;
+    }
+    int rc = FsExecuteFileW(MainWin, remote_w, verb_w);
+    if (rc == FS_EXEC_SYMLINK &&
+        WideCharToMultiByte(CP_ACP, 0, remote_w, -1, RemoteName, MAX_PATH, NULL, NULL) == 0) {
+        return FS_EXEC_ERROR; /* Cannot hand the new path back */
+    }
+    return rc;
 }
 
 HANDLE __stdcall FsFindFirst(char* Path, WIN32_FIND_DATAA* FindData) {
@@ -854,7 +944,9 @@ HANDLE __stdcall FsFindFirstW(WCHAR* Path, WIN32_FIND_DATAW* FindData) {
         return INVALID_HANDLE_VALUE;
     }
 
-    const ResticRepoEntry* repo = config_find_repo(&cfg, parsed.repo_alias);
+    const ResticRepoEntry* repo = is_forget_entry_name(parsed.repo_alias)
+                                      ? NULL
+                                      : config_find_repo(&cfg, parsed.repo_alias);
     if (!repo) {
         log_write(L"List %ls: no repository alias '%ls' in %ls", Path, parsed.repo_alias, cfg.ini_path);
         config_free(&cfg);

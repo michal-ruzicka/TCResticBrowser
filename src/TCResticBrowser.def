@@ -10,3 +10,5 @@ EXPORTS
     FsFindClose
     FsGetFile
     FsGetFileW
+    FsExecuteFile
+    FsExecuteFileW

@@ -57,6 +57,10 @@ static int g_tests_failed = 0;
 #define FS_FILE_WRITEERROR     4
 #define FS_FILE_USERABORT      5
 #define FS_FILE_NOTSUPPORTED   6
+#define FS_EXEC_OK             0
+#define FS_EXEC_ERROR          1
+#define FS_EXEC_YOURSELF       (-1)
+#define FS_EXEC_SYMLINK        (-2)
 
 #define FS_COPYFLAGS_OVERWRITE 1
 #define FS_COPYFLAGS_RESUME    2
@@ -85,6 +89,7 @@ typedef BOOL   (__stdcall *PFN_FindNextW)(HANDLE, WIN32_FIND_DATAW*);
 typedef int    (__stdcall *PFN_FindClose)(HANDLE);
 typedef int    (__stdcall *PFN_GetFile)(char*, char*, int, RemoteInfo*);
 typedef int    (__stdcall *PFN_GetFileW)(WCHAR*, WCHAR*, int, RemoteInfo*);
+typedef int    (__stdcall *PFN_ExecuteFileW)(HWND, WCHAR*, WCHAR*);
 
 typedef struct {
     HMODULE module;
@@ -97,6 +102,7 @@ typedef struct {
     PFN_FindClose find_close;
     PFN_GetFile get_file;
     PFN_GetFileW get_file_w;
+    PFN_ExecuteFileW execute_w;
 } Plugin;
 
 static BOOL make_unique_dir(const WCHAR* tag, WCHAR* out, size_t cap) {
@@ -147,6 +153,7 @@ static BOOL load_plugin_copy(const WCHAR* dir, Plugin* p) {
     p->find_close        = (PFN_FindClose)(void*)GetProcAddress(p->module, "FsFindClose");
     p->get_file          = (PFN_GetFile)(void*)GetProcAddress(p->module, "FsGetFile");
     p->get_file_w        = (PFN_GetFileW)(void*)GetProcAddress(p->module, "FsGetFileW");
+    p->execute_w         = (PFN_ExecuteFileW)(void*)GetProcAddress(p->module, "FsExecuteFileW");
     return TRUE;
 }
 
@@ -165,7 +172,7 @@ static void test_export_surface(void) {
 
     const char* required[] = {"FsInit", "FsInitW", "FsFindFirst", "FsFindFirstW", "FsFindNext",
                               "FsFindNextW", "FsFindClose", "FsGetDefRootName", "FsSetDefaultParams",
-                              "FsGetFile", "FsGetFileW"};
+                              "FsGetFile", "FsGetFileW", "FsExecuteFile", "FsExecuteFileW"};
     for (size_t i = 0; i < _countof(required); ++i) {
         FARPROC fn = GetProcAddress(m, required[i]);
         g_tests_run++;
@@ -179,7 +186,7 @@ static void test_export_surface(void) {
     const char* forbidden[] = {"FsPutFile", "FsPutFileW", "FsDeleteFile", "FsDeleteFileW",
                                "FsMkDir", "FsMkDirW", "FsRemoveDir", "FsRemoveDirW",
                                "FsRenMovFile", "FsRenMovFileW", "FsSetAttr", "FsSetTime",
-                               "FsExecuteFile", "json_parse", "json_free", "DllMain"};
+                               "json_parse", "json_free", "DllMain"};
     for (size_t i = 0; i < _countof(forbidden); ++i) {
         FARPROC fn = GetProcAddress(m, forbidden[i]);
         g_tests_run++;
@@ -255,6 +262,7 @@ static void test_primary_ini_next_to_dll(void) {
     WIN32_FIND_DATAW fd;
     HANDLE h = p.find_first_w(L"\\", &fd);
     EXPECT_TRUE(h != INVALID_HANDLE_VALUE, "Root enumeration starts");
+    EXPECT_TRUE(wcsncmp(fd.cFileName, L"\U0001F5D1", 2) != 0, "No forget entry while no password is cached");
     EXPECT_WSTR_EQ(fd.cFileName, L"Alpha", "First alias");
     EXPECT_TRUE((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0, "Alias is a directory");
     EXPECT_TRUE(p.find_next_w(h, &fd), "Second alias available");
@@ -1069,6 +1077,54 @@ static void test_live_end_to_end_navigation(void) {
     EXPECT_TRUE(wcsstr(g_e2e_last_prompt, L"Wrong password. Note: the password you entered ends with a space.") != NULL,
                 "Retry prompt points out the trailing space");
 
+    /* While passwords are cached, the root starts with "<wastebasket> Forget N Passwords"; Enter on it
+       wipes them all, reports how many and sends Total Commander back to the root (re-read) */
+    WCHAR forget[MAX_PATH] = L"\\", exec_name[MAX_PATH];
+    h = p.find_first_w(L"\\", &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE && wcsncmp(fd.cFileName, L"\U0001F5D1 Forget ", 9) == 0 &&
+                wcscmp(fd.cFileName + wcslen(fd.cFileName) - 10, L" Passwords") == 0 &&
+                (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0,
+                "Root starts with the 'Forget N Passwords' file while passwords are cached");
+    wcscat_s(forget, MAX_PATH, fd.cFileName);
+    p.find_close(h);
+    WCHAR open_verb[] = L"open";
+    g_e2e_msg_dialogs = 0;
+    wcscpy_s(exec_name, MAX_PATH, forget);
+    EXPECT_TRUE(p.execute_w(NULL, exec_name, open_verb) == FS_EXEC_SYMLINK && g_e2e_msg_dialogs == 1 &&
+                wcsstr(g_e2e_last_msg, L"remembered repository passwords.") != NULL && wcscmp(exec_name, L"\\") == 0,
+                "Forget wipes the cache, reports the number and sends Total Commander back to the root");
+    h = p.find_first_w(L"\\", &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE && wcsncmp(fd.cFileName, L"\U0001F5D1", 2) != 0,
+                "The forget entry disappears once nothing is cached");
+    p.find_close(h);
+    g_e2e_pwd_mode    = 1;
+    g_e2e_pwd_prompts = 0;
+    h = p.find_first_w(L"\\MainRepo", &fd);
+    if (h != INVALID_HANDLE_VALUE) p.find_close(h);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 1, "A forgotten password is asked for again");
+    h = p.find_first_w(L"\\", &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE && wcscmp(fd.cFileName, L"\U0001F5D1 Forget 1 Password") == 0,
+                "Singular entry name");
+    p.find_close(h);
+    wcscpy_s(exec_name, MAX_PATH, forget);
+    EXPECT_TRUE(p.execute_w(NULL, exec_name, open_verb) == FS_EXEC_SYMLINK &&
+                wcscmp(g_e2e_last_msg, L"Forgot 1 remembered repository password.") == 0,
+                "A stale entry name (other count) still forgets; singular message");
+    wcscpy_s(exec_name, MAX_PATH, forget);
+    EXPECT_TRUE(p.execute_w(NULL, exec_name, open_verb) == FS_EXEC_SYMLINK &&
+                wcscmp(g_e2e_last_msg, L"No repository password was remembered.") == 0 &&
+                wcscmp(exec_name, L"\\") == 0,
+                "Nothing to forget: a stale entry still sends Total Commander back to the root");
+    WCHAR some_file[] = L"\\MainRepo\\2026-10-18_12-00-00_[abcd1234]\\readme.txt";
+    WCHAR properties[] = L"properties", chmod_verb[] = L"chmod 755", quote_verb[] = L"quote cd x";
+    EXPECT_TRUE(p.execute_w(NULL, some_file, open_verb) == FS_EXEC_YOURSELF,
+                "Enter on a snapshot file is left to Total Commander (download and open)");
+    EXPECT_TRUE(p.execute_w(NULL, forget, properties) == FS_EXEC_OK &&
+                p.execute_w(NULL, some_file, chmod_verb) == FS_EXEC_ERROR &&
+                p.execute_w(NULL, some_file, quote_verb) == FS_EXEC_ERROR,
+                "properties is a no-op, chmod and quote commands are refused");
+    EXPECT_TRUE(p.find_first_w(forget, &fd) == INVALID_HANDLE_VALUE, "The forget entry is not a folder");
+
     /* [Logging] LogPath: restic runs, exit codes and prompts are logged; passwords never are */
     WCHAR log_dir[MAX_PATH], log_file[MAX_PATH];
     swprintf_s(log_dir, MAX_PATH, L"%ls\\log dir", dir);
@@ -1084,6 +1140,7 @@ static void test_live_end_to_end_navigation(void) {
     BOOL logged_prompt = strstr(log_text, "Password prompt for 'MainRepo'") != NULL &&
                          strstr(log_text, "characters entered") != NULL;
     BOOL logged_error  = strstr(log_text, "Error shown to the user: ") != NULL;
+    BOOL logged_forget = strstr(log_text, "Forget All Passwords: 1 cached password(s) wiped") != NULL;
     BOOL logged_hint   = strstr(log_text, "Password prompt for 'HintRepo': ") != NULL &&
                          strstr(log_text, "characters entered; the password ends with a space") != NULL;
     BOOL leaked        = strstr(log_text, fixture_pwd_u8) != NULL || strstr(log_text, "wrong_first_attempt") != NULL ||
@@ -1092,6 +1149,7 @@ static void test_live_end_to_end_navigation(void) {
     EXPECT_TRUE(logged_init && logged_run && logged_wrong, "Log has the plugin start, restic command lines and exit codes");
     EXPECT_TRUE(logged_prompt && logged_error, "Log has password prompts (length only) and errors shown to the user");
     EXPECT_TRUE(logged_hint, "Log notes a trailing space in an entered password");
+    EXPECT_TRUE(logged_forget, "Log notes Forget All Passwords");
     EXPECT_TRUE(!leaked, "No password, right or wrong, appears in the log");
 
     unload_plugin_copy(&p, dir);
