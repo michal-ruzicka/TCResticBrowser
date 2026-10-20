@@ -126,11 +126,9 @@ void log_redact_target(const WCHAR* target, WCHAR* out, size_t cap) {
     const WCHAR* scheme_end = wcsstr(target, L"://");
     if (!scheme_end) return;
     const WCHAR* authority = scheme_end + 3;
-    const WCHAR* authority_end = authority + wcscspn(authority, L"/?#");
-    const WCHAR* at = NULL;
-    for (const WCHAR* p = authority; p < authority_end; ++p) {
-        if (*p == L'@') at = p; /* The last '@' ends the userinfo */
-    }
+    /* The last '@' anywhere, not only before the first '/': a password written with an unencoded
+       '/', '?' or '#' would otherwise end the authority early and be logged in plain text */
+    const WCHAR* at = wcsrchr(authority, L'@');
     if (!at) return;
 
     _snwprintf_s(out, cap, _TRUNCATE, L"%.*ls***%ls", (int)(authority - target), target, at);

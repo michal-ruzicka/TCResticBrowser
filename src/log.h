@@ -34,7 +34,8 @@ void log_write(const WCHAR* fmt, ...);
 
 /*
  * Copies a repository target with the URL credentials replaced by three asterisks: in
- * "rest:https://user:secret@host/repo" the "user:secret" part is masked. Targets without a
- * "scheme://...@" authority (local paths, sftp:user@host:/path) are copied unchanged.
+ * "rest:https://user:secret@host/repo" the "user:secret" part is masked. Everything up to the last
+ * '@' after "scheme://" is masked, even past a '/', because a password may contain an unencoded '/'.
+ * Targets without "scheme://...@" (local paths, sftp:user@host:/path) are copied unchanged.
  */
 void log_redact_target(const WCHAR* target, WCHAR* out, size_t cap);

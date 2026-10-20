@@ -985,8 +985,10 @@ static void test_logging(void) {
     EXPECT_WSTR_EQ(red, L"rest:https://***@host:8000/repo", "rest: URL credentials masked");
     log_redact_target(L"s3:https://key:p@ss@minio.local/bucket", red, _countof(red));
     EXPECT_WSTR_EQ(red, L"s3:https://***@minio.local/bucket", "Last '@' ends the userinfo");
+    log_redact_target(L"rest:https://user:pa/ss?x#y@host/repo", red, _countof(red));
+    EXPECT_WSTR_EQ(red, L"rest:https://***@host/repo", "Unencoded '/', '?' and '#' in a password stay masked");
     log_redact_target(L"rest:http://host/repo?x=a@b", red, _countof(red));
-    EXPECT_WSTR_EQ(red, L"rest:http://host/repo?x=a@b", "'@' after the authority is not userinfo");
+    EXPECT_WSTR_EQ(red, L"rest:http://***@b", "An '@' after the host is masked too (better too much than too little)");
     log_redact_target(L"sftp:user@host:/srv/repo", red, _countof(red));
     EXPECT_WSTR_EQ(red, L"sftp:user@host:/srv/repo", "sftp: target without a password kept");
     log_redact_target(L"C:\\Backups\\repo", red, _countof(red));
