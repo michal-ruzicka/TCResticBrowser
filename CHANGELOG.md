@@ -60,7 +60,8 @@ upstream 1.x line.
 - **Own JSON reader instead of cJSON.** The cJSON submodule is replaced by a
   strict, read-only reader of about 370 lines (`src\json.c`), so the plugin
   contains no third-party code. File sizes are now read as exact 64-bit
-  integers. See *Why the Plugin Has Its Own JSON Reader* in the README.
+  integers. See [*Why the Plugin Has Its Own JSON Reader*](README.md#why-the-plugin-has-its-own-json-reader)
+  in the README.
 - **Configuration file renamed and looked up like in the author's other
   Total Commander plugins.** `restic_plugin.ini` became `TCResticBrowser.ini`,
   and `%APPDATA%\GHISLER\TCResticBrowser.ini` (per-user override) wins over
@@ -105,14 +106,28 @@ upstream 1.x line.
 
 ### Fixed
 
-- **Cached passwords are protected in memory.** They are encrypted with
-  `CryptProtectMemory`, kept in pages locked out of the page file and
-  excluded from Windows Error Reporting crash dumps, so a memory dump or
-  the hibernation file no longer contains them in plain text.
 - **A password is cached only once restic has accepted it.** After a
   local write error, `ESC` or a timeout an unverified password was kept;
   now the next attempt asks again. A password that worked before is not
   affected, and "repository locked" no longer drops a correct one.
+- **Remembered passwords of more than eight repositories.** The least
+  recently used one now makes room for a new one, instead of the next slot
+  in turn, which could be the password just entered. A wrong password
+  rejected on one panel no longer wipes a correct one that the other panel
+  stored in the meantime.
+- **Snapshots in repositories with many snapshots.** Folder names carried
+  the 8-character short ID, which restic refuses once two snapshots share
+  it (likely from tens of thousands of snapshots on), so such snapshots
+  could not be opened. Their names now carry a longer, unique prefix.
+- **Total Commander no longer closes** when `ResticPath` or a `PATH` entry
+  is longer than the plugin's path buffers; such a value is ignored.
+- **`ESC` also works while restic prints a very long listing.**
+- **A read-only target file stays read-only** when replacing it fails.
+- **Documentation of a relative `ResticPath`.** It is resolved against the
+  plugin folder, not the folder of the configuration file as documented
+  before. The minimum restic version, 0.17.1, is now documented.
+
+### Security
 
 - **Snapshot entries whose name is not a single path component are no
   longer listed.** Restic stores names from non-Windows systems verbatim, so
@@ -120,9 +135,19 @@ upstream 1.x line.
   copying its folder with `F5` could then write outside the chosen target
   directory. Names containing `\` or `/`, or consisting only of dots and
   spaces, are now skipped.
-- **Documentation of a relative `ResticPath`.** It is resolved against the
-  plugin folder, not the folder of the configuration file as documented
-  before.
+- **`restic.exe` is never taken from the current directory**, which
+  follows the Total Commander panel. Relative `PATH` entries (such as `.`)
+  and drive- or root-relative `ResticPath` values (`C:restic.exe`,
+  `\tools\restic.exe`) could resolve to a `restic.exe` in the folder being
+  browsed; they are now ignored.
+- **Cached passwords are protected in memory.** They are encrypted with
+  `CryptProtectMemory`, kept in pages locked out of the page file and
+  excluded from Windows Error Reporting crash dumps, so a memory dump or
+  the hibernation file no longer contains them in plain text.
+- **Extraction never overwrites or follows an existing temporary file.**
+  The temporary file next to the target (`~rp<number>.tmp`) is created
+  only if no file or link of that name exists; otherwise another name is
+  used.
 
 ## [v1.0.0] – 2026-10-18
 
@@ -139,3 +164,6 @@ by Pietro Partescano, the base of this fork was commit [c8481b43c9ab2867eee82471
 - **Passwords kept in memory only**, asked for through Total Commander's
   password dialog and passed to `restic.exe` in an isolated environment
   block.
+
+[Unreleased]: https://github.com/michal-ruzicka/TCResticBrowser/compare/c8481b43c9ab2867eee824719e3a9c6785db6c61...HEAD
+[v1.0.0]: https://github.com/goldfix/Restic_WFX_Plugin/tree/1.0.0
