@@ -264,6 +264,70 @@ BOOL restic_normalize_filter_path(
     return TRUE;
 }
 
+typedef enum {
+    PWC_PLAIN = 0,
+    PWC_SPACE,
+    PWC_TAB,
+    PWC_LINE_BREAK,
+    PWC_CONTROL,
+    PWC_NBSP,
+    PWC_UNUSUAL_SPACE,
+    PWC_INVISIBLE,
+    PWC_COUNT
+} PasswordCharClass;
+
+static PasswordCharClass classify_password_char(WCHAR c) {
+    if (c == L' ') return PWC_SPACE;
+    if (c == L'\t') return PWC_TAB;
+    if (c == L'\r' || c == L'\n' || c == 0x0B || c == 0x0C || c == 0x85 || c == 0x2028 || c == 0x2029) {
+        return PWC_LINE_BREAK;
+    }
+    if (c < 0x20 || (c >= 0x7F && c <= 0x9F)) return PWC_CONTROL;
+    if (c == 0xA0 || c == 0x2007 || c == 0x202F) return PWC_NBSP;
+    if (c == 0x1680 || (c >= 0x2000 && c <= 0x200A) || c == 0x205F || c == 0x3000) return PWC_UNUSUAL_SPACE;
+    if (c == 0xAD || c == 0x180E || (c >= 0x200B && c <= 0x200F) || (c >= 0x202A && c <= 0x202E) ||
+        (c >= 0x2060 && c <= 0x2064) || c == 0xFEFF) {
+        return PWC_INVISIBLE;
+    }
+    return PWC_PLAIN;
+}
+
+static const WCHAR* const kPasswordCharNames[PWC_COUNT] = {
+    L"", L"a space", L"a tab", L"a line break", L"a control character", L"a non-breaking space",
+    L"an unusual space character", L"an invisible character (such as a zero-width space)"
+};
+
+/* Appends "; <verb> <name>" (truncating, never failing) */
+static void append_phrase(WCHAR* out, size_t cap, const WCHAR* verb, PasswordCharClass cls) {
+    size_t len = wcslen(out);
+    if (len + 1 >= cap) return;
+    _snwprintf_s(out + len, cap - len, _TRUNCATE, L"%ls%ls %ls", len > 0 ? L"; " : L"", verb,
+                 kPasswordCharNames[cls]);
+}
+
+BOOL restic_describe_password(const WCHAR* password, WCHAR* out, size_t cap) {
+    if (!out || cap == 0) return FALSE;
+    out[0] = L'\0';
+    size_t n = password ? wcslen(password) : 0;
+    if (n == 0) return FALSE;
+
+    PasswordCharClass first = classify_password_char(password[0]);
+    PasswordCharClass last  = n > 1 ? classify_password_char(password[n - 1]) : PWC_PLAIN;
+    BOOL inner[PWC_COUNT]   = {FALSE};
+    for (size_t i = 1; i + 1 < n; ++i) {
+        inner[classify_password_char(password[i])] = TRUE;
+    }
+
+    if (first != PWC_PLAIN) append_phrase(out, cap, L"starts with", first);
+    if (last != PWC_PLAIN) append_phrase(out, cap, L"ends with", last);
+    for (int cls = PWC_TAB; cls < PWC_COUNT; ++cls) { /* Inner ordinary spaces are fine */
+        if (inner[cls] && cls != (int)first && cls != (int)last) {
+            append_phrase(out, cap, L"contains", (PasswordCharClass)cls);
+        }
+    }
+    return out[0] != L'\0';
+}
+
 WCHAR* restic_quote_arg(const WCHAR* arg) {
     if (!arg) return NULL;
 

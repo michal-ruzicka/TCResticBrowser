@@ -213,6 +213,40 @@ static void test_path_and_quote_helpers(void) {
 }
 
 /* Parsing `restic snapshots --json` */
+/* Hints about stray whitespace and invisible characters in a rejected password */
+static void test_describe_password(void) {
+    WCHAR hint[384];
+    EXPECT_TRUE(!restic_describe_password(L"0123456789abcdef", hint, _countof(hint)) && hint[0] == L'\0',
+                "Plain password: nothing to report");
+    EXPECT_TRUE(!restic_describe_password(L"correct horse battery staple", hint, _countof(hint)),
+                "Inner ordinary spaces of a passphrase are not reported");
+    EXPECT_TRUE(!restic_describe_password(L"p\u00e4ss\u65e5\u672c", hint, _countof(hint)), "Non-ASCII letters are fine");
+    EXPECT_TRUE(!restic_describe_password(L"", hint, _countof(hint)) && !restic_describe_password(NULL, hint, _countof(hint)),
+                "Empty and NULL passwords");
+
+    EXPECT_TRUE(restic_describe_password(L"0123abcd ", hint, _countof(hint)), "Trailing space reported");
+    EXPECT_WSTR_EQ(hint, L"ends with a space", "Trailing space");
+    restic_describe_password(L" 0123abcd", hint, _countof(hint));
+    EXPECT_WSTR_EQ(hint, L"starts with a space", "Leading space");
+    restic_describe_password(L"0123abcd\r\n", hint, _countof(hint));
+    EXPECT_WSTR_EQ(hint, L"ends with a line break", "Trailing CRLF");
+    restic_describe_password(L"\tab\ncd\u00a0", hint, _countof(hint));
+    EXPECT_WSTR_EQ(hint, L"starts with a tab; ends with a non-breaking space; contains a line break",
+                   "Leading tab, inner line feed, trailing no-break space");
+    restic_describe_password(L"ab\u200bcd\aef\u3000gh\tij", hint, _countof(hint));
+    EXPECT_WSTR_EQ(hint,
+                   L"contains a tab; contains a control character; contains an unusual space character; "
+                   L"contains an invisible character (such as a zero-width space)",
+                   "Inner tab, bell, ideographic space and zero-width space");
+    restic_describe_password(L"\ufeffsecret", hint, _countof(hint));
+    EXPECT_WSTR_EQ(hint, L"starts with an invisible character (such as a zero-width space)", "Leading BOM");
+    restic_describe_password(L" ", hint, _countof(hint));
+    EXPECT_WSTR_EQ(hint, L"starts with a space", "Single space");
+    WCHAR tiny[8];
+    EXPECT_TRUE(restic_describe_password(L" x ", tiny, _countof(tiny)) && wcslen(tiny) < _countof(tiny),
+                "Truncated to a small buffer");
+}
+
 static void test_parse_snapshots_json(void) {
     const char* sample_json =
         "[\n"
@@ -1069,6 +1103,7 @@ int main(void) {
     test_iso8601_parsing();
     test_snapshot_naming();
     test_path_and_quote_helpers();
+    test_describe_password();
     test_parse_snapshots_json();
     test_parse_ls_ndjson();
     test_exec_streams_and_exit_codes();

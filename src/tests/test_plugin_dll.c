@@ -371,7 +371,8 @@ static int   g_e2e_progress_calls   = 0;
 static BOOL  g_e2e_force_abort      = FALSE;
 static BOOL  g_e2e_abort_after_start = FALSE; /* abort once the transfer reports progress above 0 % */
 static int   g_e2e_pwd_mode         = 0; /* 0 = wrong once then correct, 1 = always correct, 2 = always wrong,
-                                           3 = user submits an empty password, 4 = user cancels the dialog */
+                                           3 = user submits an empty password, 4 = user cancels the dialog,
+                                           5 = correct password with a trailing space once, then correct */
 static WCHAR g_e2e_last_prompt[256] = {0};
 static WCHAR g_e2e_last_msg[256]    = {0};
 static WCHAR g_e2e_progress_target[512] = {0};
@@ -418,6 +419,10 @@ static BOOL __stdcall e2e_request_proc(
         }
         if (g_e2e_pwd_mode == 4) {
             return FALSE;
+        }
+        if (g_e2e_pwd_mode == 5 && g_e2e_pwd_prompts == 1) {
+            _snwprintf_s(ReturnedText, (size_t)maxlen, _TRUNCATE, L"%ls ", FIXTURE_PASSWORD);
+            return TRUE;
         }
         if (g_e2e_pwd_mode == 0 && g_e2e_pwd_prompts == 1) {
             wcsncpy_s(ReturnedText, (size_t)maxlen, L"wrong_first_attempt", _TRUNCATE);
@@ -835,10 +840,11 @@ static void test_live_end_to_end_navigation(void) {
         sizeof(ini_text),
         "[Settings]\r\nResticPath=%s\r\n[Logging]\r\nLogPath=%s\\log dir\\e2e.log\r\n"
         "[Repositories]\r\nMainRepo=%s\r\nSecondRepo=%s\r\nThirdRepo=%s\r\n"
-        "ExtractRepo=%s\r\n"
+        "ExtractRepo=%s\r\nHintRepo=%s\r\n"
         "MissingRepo=C:\\no_such_restic_repo_999\r\n%s=C:\\no_such_restic_repo_999\r\n",
         restic_a,
         dir_a,
+        repo_a,
         repo_a,
         repo_a,
         repo_a,
@@ -1042,6 +1048,17 @@ static void test_live_end_to_end_navigation(void) {
         EXPECT_TRUE(g_e2e_mt_failures == 0, "Concurrent listings all succeed (cached sessions, thread-safe)");
     }
 
+    /* A rejected password with a trailing space: the retry prompt (and the log) says so */
+    g_e2e_pwd_mode    = 5;
+    g_e2e_pwd_prompts = 0;
+    g_e2e_msg_dialogs = 0;
+    h = p.find_first_w(L"\\HintRepo", &fd);
+    if (h != INVALID_HANDLE_VALUE) p.find_close(h);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 2 && g_e2e_msg_dialogs == 0,
+                "Password with a trailing space rejected, then the correct one accepted");
+    EXPECT_TRUE(wcsstr(g_e2e_last_prompt, L"Wrong password. Note: the password you entered ends with a space.") != NULL,
+                "Retry prompt points out the trailing space");
+
     /* [Logging] LogPath: restic runs, exit codes and prompts are logged; passwords never are */
     WCHAR log_dir[MAX_PATH], log_file[MAX_PATH];
     swprintf_s(log_dir, MAX_PATH, L"%ls\\log dir", dir);
@@ -1057,11 +1074,14 @@ static void test_live_end_to_end_navigation(void) {
     BOOL logged_prompt = strstr(log_text, "Password prompt for 'MainRepo'") != NULL &&
                          strstr(log_text, "characters entered") != NULL;
     BOOL logged_error  = strstr(log_text, "Error shown to the user: ") != NULL;
+    BOOL logged_hint   = strstr(log_text, "Password prompt for 'HintRepo': ") != NULL &&
+                         strstr(log_text, "characters entered; the password ends with a space") != NULL;
     BOOL leaked        = strstr(log_text, fixture_pwd_u8) != NULL || strstr(log_text, "wrong_first_attempt") != NULL ||
                          strstr(log_text, "always_wrong") != NULL;
     free(log_text);
     EXPECT_TRUE(logged_init && logged_run && logged_wrong, "Log has the plugin start, restic command lines and exit codes");
     EXPECT_TRUE(logged_prompt && logged_error, "Log has password prompts (length only) and errors shown to the user");
+    EXPECT_TRUE(logged_hint, "Log notes a trailing space in an entered password");
     EXPECT_TRUE(!leaked, "No password, right or wrong, appears in the log");
 
     unload_plugin_copy(&p, dir);

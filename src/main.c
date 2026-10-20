@@ -181,14 +181,20 @@ static void report_plugin_error(const WCHAR* repo_alias, const WCHAR* detail) {
     }
 }
 
+/* Upper bound of restic_describe_password() text (a few short phrases) */
+#define PASSWORD_HINT_CHARS 384
+
 /*
  * Prompts the user for the repository password via Total Commander's RequestProcW.
+ * `wrong_hint` is the restic_describe_password() text of the password restic just rejected
+ * (NULL or empty: none), shown so a stray space or line break can be spotted in a masked field.
  * Returns FALSE when the dialog is cancelled or an empty password is entered (Restic refuses
  * empty passwords, and accepting one would only produce a confusing generic failure).
  */
 static BOOL prompt_repository_password(
     const WCHAR* repo_alias,
     BOOL is_retry,
+    const WCHAR* wrong_hint,
     WCHAR* out_pwd,
     size_t cap
 ) {
@@ -196,15 +202,17 @@ static BOOL prompt_repository_password(
         return FALSE;
     }
 
-    WCHAR prompt_text[MAX_PATH + 96];
-    _snwprintf_s(
-        prompt_text,
-        _countof(prompt_text),
-        _TRUNCATE,
-        is_retry ? L"Wrong password. Enter password for '%ls':"
-                 : L"Enter password for repository '%ls':",
-        repo_alias
-    );
+    WCHAR prompt_text[MAX_PATH + PASSWORD_HINT_CHARS + 128];
+    if (is_retry && wrong_hint && wrong_hint[0] != L'\0') {
+        _snwprintf_s(prompt_text, _countof(prompt_text), _TRUNCATE,
+                     L"Wrong password. Note: the password you entered %ls. Enter password for '%ls':",
+                     wrong_hint, repo_alias);
+    } else {
+        _snwprintf_s(prompt_text, _countof(prompt_text), _TRUNCATE,
+                     is_retry ? L"Wrong password. Enter password for '%ls':"
+                              : L"Enter password for repository '%ls':",
+                     repo_alias);
+    }
 
     out_pwd[0] = L'\0'; /* RequestProc shows ReturnedText as the default value */
     BOOL accepted = g_RequestProc(
@@ -222,8 +230,11 @@ static BOOL prompt_repository_password(
         SecureZeroMemory(out_pwd, cap * sizeof(WCHAR));
         return FALSE;
     }
-    log_write(L"Password prompt for '%ls'%ls: %u characters entered", repo_alias,
-              is_retry ? L" (retry)" : L"", (unsigned)wcslen(out_pwd));
+    WCHAR hint[PASSWORD_HINT_CHARS];
+    BOOL odd = restic_describe_password(out_pwd, hint, _countof(hint));
+    log_write(L"Password prompt for '%ls'%ls: %u characters entered%ls%ls", repo_alias,
+              is_retry ? L" (retry)" : L"", (unsigned)wcslen(out_pwd), odd ? L"; the password " : L"",
+              odd ? hint : L"");
     return TRUE;
 }
 
@@ -416,6 +427,7 @@ static HANDLE execute_repo_query(
     ResticExecOptions exec_opts = {WFX_RESTIC_TIMEOUT_MS, wfx_cancel_callback, &cancel_ctx};
 
     WCHAR password[SESSION_MAX_PASSWORD] = {0}; /* Local copy, wiped before returning */
+    WCHAR wrong_hint[PASSWORD_HINT_CHARS] = {0}; /* What looked odd in a rejected password */
     BOOL have_password                   = session_get(repo->alias, password, _countof(password));
     WIN32_FIND_DATAW* items              = NULL;
     size_t count                         = 0;
@@ -424,7 +436,7 @@ static HANDLE execute_repo_query(
 
     for (int attempt = 0; attempt < MAX_PASSWORD_ATTEMPTS; ++attempt) {
         if (!have_password) {
-            if (!prompt_repository_password(repo->alias, attempt > 0, password, _countof(password))) {
+            if (!prompt_repository_password(repo->alias, attempt > 0, wrong_hint, password, _countof(password))) {
                 SecureZeroMemory(password, sizeof(password));
                 SetLastError(ERROR_CANCELLED);
                 return INVALID_HANDLE_VALUE;
@@ -454,6 +466,7 @@ static HANDLE execute_repo_query(
 
         if (res == RESTIC_ERR_WRONG_PASSWORD) {
             session_forget(repo->alias);
+            restic_describe_password(password, wrong_hint, _countof(wrong_hint));
             SecureZeroMemory(password, sizeof(password));
             have_password = FALSE;
             continue;
@@ -768,13 +781,14 @@ int __stdcall FsGetFileW(WCHAR* RemoteName, WCHAR* LocalName, int CopyFlags, Rem
     WfxDumpProgressContext prog_ctx = {RemoteName, LocalName, total_size};
 
     WCHAR password[SESSION_MAX_PASSWORD] = {0};
+    WCHAR wrong_hint[PASSWORD_HINT_CHARS] = {0}; /* What looked odd in a rejected password */
     BOOL have_password                   = session_get(repo->alias, password, _countof(password));
     WCHAR err_msg[512]                   = {0};
     ResticResult res                     = RESTIC_ERR_WRONG_PASSWORD;
 
     for (int attempt = 0; attempt < MAX_PASSWORD_ATTEMPTS; ++attempt) {
         if (!have_password) {
-            if (!prompt_repository_password(repo->alias, attempt > 0, password, _countof(password))) {
+            if (!prompt_repository_password(repo->alias, attempt > 0, wrong_hint, password, _countof(password))) {
                 SecureZeroMemory(password, sizeof(password));
                 config_free(&cfg);
                 return FS_FILE_USERABORT;
@@ -801,6 +815,7 @@ int __stdcall FsGetFileW(WCHAR* RemoteName, WCHAR* LocalName, int CopyFlags, Rem
 
         if (res == RESTIC_ERR_WRONG_PASSWORD) {
             session_forget(repo->alias);
+            restic_describe_password(password, wrong_hint, _countof(wrong_hint));
             SecureZeroMemory(password, sizeof(password));
             have_password = FALSE;
             continue;

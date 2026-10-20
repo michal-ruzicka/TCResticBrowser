@@ -24,6 +24,13 @@ upstream 1.x line.
   configuration in use, password prompts and error messages. Passwords are
   never logged, only their length, and credentials in repository URLs are
   masked.
+- **Hint about invisible characters in a rejected password.** When restic
+  rejects a password that starts or ends with a space, tab or line break,
+  or contains a line break, tab, non-breaking space, zero-width or other
+  invisible character, the next password prompt says so (for example
+  "the password you entered ends with a space"), and the diagnostic log
+  notes it as well. Inner ordinary spaces of a passphrase are not reported,
+  and the password itself is never shown or logged.
 - **Reproducible builds.** The same sources and pinned toolchain produce a
   byte-identical ZIP (`/Brepro`, `/BREPRO`, `/pathmap`, pinned MSVC toolset
   and Windows SDK, ZIP timestamps from `release-date=` in `pluginst.inf`).

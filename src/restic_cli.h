@@ -103,6 +103,16 @@ BOOL restic_normalize_filter_path(
 WCHAR* restic_quote_arg(const WCHAR* arg);
 
 /**
+ * Describes characters in a password that are easy to enter by mistake and impossible to see in a
+ * password field: a leading or trailing space, tab, line break or invisible character, and line
+ * breaks, tabs, control, non-breaking, unusual space or zero-width characters anywhere inside
+ * (ordinary inner spaces are normal in passphrases and not reported). Writes a phrase such as
+ * "ends with a space; contains a tab" to `out` and returns TRUE, or returns FALSE (empty `out`)
+ * when there is nothing to report. The text never contains the password's own characters.
+ */
+BOOL restic_describe_password(const WCHAR* password, WCHAR* out, size_t cap);
+
+/**
  * Parses the JSON array printed by `restic snapshots --json` (a literal `null` is treated as an
  * empty list) into directory entries named `YYYY-MM-DD_HH-MM-SS_[short_id]`.
  * Caller must free `*out_items` with `free()`.

@@ -238,7 +238,9 @@ LogPath=%TEMP%\TCResticBrowser.log
 The log records each `restic` command line with its exit code, duration and
 error output, the configuration in use, password prompts and the error
 messages shown. It never contains a password, only how many characters were
-entered, and credentials in repository URLs are masked. Clear the value to
+entered and whether the entry starts or ends with whitespace or contains
+invisible characters (the password prompt after a wrong password points
+these out too), and credentials in repository URLs are masked. Clear the value to
 turn logging off again; the file is not rotated, so delete it when done.
 
 #### Example `TCResticBrowser.ini`
