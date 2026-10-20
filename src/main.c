@@ -67,7 +67,7 @@ typedef struct {
     BOOL  used;
     WCHAR alias[MAX_PATH];
     WCHAR password[SESSION_MAX_PASSWORD]; /* CryptProtectMemory ciphertext, never plaintext */
-    ULONGLONG cached_at;                  /* GetTickCount64() when restic first accepted it */
+    ULONGLONG cached_at;                  /* GetTickCount64() when restic first accepted it (last used) */
 } SessionSlot;
 
 _Static_assert(sizeof(((SessionSlot*)0)->password) % CRYPTPROTECTMEMORY_BLOCK_SIZE == 0,
@@ -85,11 +85,13 @@ static SRWLOCK      g_SessionLock      = SRWLOCK_INIT;
 
 /*
  * [Settings] PasswordTimeoutSeconds: a cached password is wiped this long after restic first
- * accepted it, whether or not it was used since (0 = keep until Total Commander exits). A
+ * accepted it (0 = keep until Total Commander exits); with PasswordTimeoutResetOnUse=yes, every
+ * operation restic completes with the cached password starts the interval again instead. A
  * thread-pool timer fires at the next expiry, so a password does not outlive its timeout while
  * Total Commander sits idle for days. GetTickCount64 keeps counting during sleep and hibernation.
  */
 static ULONGLONG    g_PasswordTimeoutMs   = CONFIG_DEFAULT_PASSWORD_TIMEOUT_S * 1000ull;
+static BOOL         g_PasswordResetOnUse  = FALSE; /* [Settings] PasswordTimeoutResetOnUse */
 static PTP_TIMER    g_SessionTimer        = NULL;
 static BOOL         g_SessionShuttingDown = FALSE; /* DLL unload: never create the timer again */
 
@@ -230,9 +232,13 @@ static void session_expire_locked(void) {
     session_arm_timer_locked(next_due);
 }
 
-/* Applies [Settings] PasswordTimeoutSeconds; a shorter timeout also applies to cached passwords */
-static void apply_password_timeout(DWORD seconds) {
+/*
+ * Applies [Settings] PasswordTimeoutSeconds and PasswordTimeoutResetOnUse; a shorter timeout also
+ * applies to passwords already cached.
+ */
+static void apply_password_timeout(DWORD seconds, BOOL reset_on_use) {
     AcquireSRWLockExclusive(&g_SessionLock);
+    g_PasswordResetOnUse = reset_on_use;
     ULONGLONG ms = (ULONGLONG)seconds * 1000ull;
     if (ms != g_PasswordTimeoutMs) {
         g_PasswordTimeoutMs = ms;
@@ -302,6 +308,17 @@ static void session_put(const WCHAR* alias, const WCHAR* password) {
     ReleaseSRWLockExclusive(&g_SessionLock);
 }
 
+/* PasswordTimeoutResetOnUse: restic completed an operation with the cached password of `alias` */
+static void session_touch(const WCHAR* alias) {
+    AcquireSRWLockExclusive(&g_SessionLock);
+    SessionSlot* slot = g_PasswordResetOnUse ? session_find_locked(alias) : NULL;
+    if (slot) {
+        slot->cached_at = GetTickCount64();
+        session_expire_locked(); /* Re-arms the timer for the later expiry */
+    }
+    ReleaseSRWLockExclusive(&g_SessionLock);
+}
+
 /* Wipes the cached password of a single repository */
 static void session_forget(const WCHAR* alias) {
     AcquireSRWLockExclusive(&g_SessionLock);
@@ -363,7 +380,7 @@ static void release_password_session(BOOL process_exit) {
 /* config_load() plus the settings the plugin applies globally (PasswordTimeoutSeconds) */
 static BOOL load_config(ResticConfig* cfg) {
     BOOL ok = config_load(cfg);
-    apply_password_timeout(cfg->password_timeout_s);
+    apply_password_timeout(cfg->password_timeout_s, cfg->password_timeout_reset_on_use);
     return ok;
 }
 
@@ -664,7 +681,7 @@ static HANDLE execute_repo_query(
     WCHAR password[SESSION_MAX_PASSWORD] = {0}; /* Local copy, wiped before returning */
     WCHAR wrong_hint[PASSWORD_HINT_CHARS] = {0}; /* What looked odd in a rejected password */
     BOOL have_password                   = session_get(repo->alias, password, _countof(password));
-    BOOL from_cache                      = have_password; /* Cached: keep its original timestamp */
+    BOOL from_cache                      = have_password; /* Cached: not stored again (see session_touch) */
     WIN32_FIND_DATAW* items              = NULL;
     size_t count                         = 0;
     WCHAR err_msg[512]                   = {0};
@@ -711,8 +728,12 @@ static HANDLE execute_repo_query(
         break;
     }
 
-    if (have_password && !from_cache && password_worth_caching(res)) {
-        session_put(repo->alias, password);
+    if (have_password && password_worth_caching(res)) {
+        if (from_cache) {
+            session_touch(repo->alias);
+        } else {
+            session_put(repo->alias, password);
+        }
     }
     SecureZeroMemory(password, sizeof(password));
 
@@ -1087,7 +1108,7 @@ int __stdcall FsGetFileW(WCHAR* RemoteName, WCHAR* LocalName, int CopyFlags, Rem
     WCHAR password[SESSION_MAX_PASSWORD] = {0};
     WCHAR wrong_hint[PASSWORD_HINT_CHARS] = {0}; /* What looked odd in a rejected password */
     BOOL have_password                   = session_get(repo->alias, password, _countof(password));
-    BOOL from_cache                      = have_password; /* Cached: keep its original timestamp */
+    BOOL from_cache                      = have_password; /* Cached: not stored again (see session_touch) */
     WCHAR err_msg[512]                   = {0};
     ResticResult res                     = RESTIC_ERR_WRONG_PASSWORD;
 
@@ -1129,8 +1150,12 @@ int __stdcall FsGetFileW(WCHAR* RemoteName, WCHAR* LocalName, int CopyFlags, Rem
         break;
     }
 
-    if (have_password && !from_cache && password_worth_caching(res)) {
-        session_put(repo->alias, password);
+    if (have_password && password_worth_caching(res)) {
+        if (from_cache) {
+            session_touch(repo->alias);
+        } else {
+            session_put(repo->alias, password);
+        }
     }
     SecureZeroMemory(password, sizeof(password));
 

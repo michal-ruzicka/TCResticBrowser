@@ -203,11 +203,17 @@ on the computer you run it on would take precedence.
 Passwords are kept in memory, encrypted, for 30 minutes from when restic
 first accepted them, then wiped; the next access asks again. Using a
 repository does not extend the time. `PasswordTimeoutSeconds=` under
-`[Settings]` changes it, `0` keeps passwords until Total Commander exits:
+`[Settings]` changes it, `0` keeps passwords until Total Commander exits.
+
+With `PasswordTimeoutResetOnUse=yes` every operation that uses a password
+starts the interval again: while you work with a repository you are not
+asked again, and once you leave it alone the password goes soon. A short
+timeout suits this best:
 
 ```ini
 [Settings]
-PasswordTimeoutSeconds=600
+PasswordTimeoutSeconds=300
+PasswordTimeoutResetOnUse=yes
 ```
 
 #### Root Folder Name

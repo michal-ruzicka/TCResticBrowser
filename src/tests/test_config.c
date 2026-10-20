@@ -806,8 +806,28 @@ static void test_password_timeout_setting(void) {
     ResticConfig cfg;
     DeleteFileW(ini_path);
     config_load(&cfg);
-    EXPECT_TRUE(cfg.password_timeout_s == 1800, "Default timeout without an INI is 30 minutes");
+    EXPECT_TRUE(cfg.password_timeout_s == 1800 && !cfg.password_timeout_reset_on_use,
+                "Default without an INI: 30 minutes, not reset on use");
     config_free(&cfg);
+
+    static const struct { const char* ini; BOOL expected; const char* what; } resets[] = {
+        {"[Settings]\r\nPasswordTimeoutResetOnUse=yes\r\n", TRUE, "yes"},
+        {"[Settings]\r\npasswordtimeoutresetonuse = TRUE \r\n", TRUE, "TRUE, trimmed, any case"},
+        {"[Settings]\r\nPasswordTimeoutResetOnUse=On\r\n", TRUE, "On"},
+        {"[Settings]\r\nPasswordTimeoutResetOnUse=1\r\n", TRUE, "1"},
+        {"[Settings]\r\nPasswordTimeoutResetOnUse=no\r\n", FALSE, "no"},
+        {"[Settings]\r\nPasswordTimeoutResetOnUse=0\r\n", FALSE, "0"},
+        {"[Settings]\r\nPasswordTimeoutResetOnUse=maybe\r\n", FALSE, "Unrecognised value: no"},
+        {"[Settings]\r\nPasswordTimeoutResetOnUse=no\r\nPasswordTimeoutResetOnUse=yes\r\n", FALSE, "First occurrence wins"},
+        {"[Logging]\r\nPasswordTimeoutResetOnUse=yes\r\n", FALSE, "Outside [Settings] ignored"},
+    };
+    for (size_t i = 0; i < _countof(resets); ++i) {
+        write_text_file(ini_path, resets[i].ini);
+        config_load(&cfg);
+        BOOL got = cfg.password_timeout_reset_on_use;
+        config_free(&cfg);
+        EXPECT_TRUE(got == resets[i].expected, resets[i].what);
+    }
 
     static const struct { const char* ini; DWORD expected; const char* what; } cases[] = {
         {"[Settings]\r\nResticPath=restic.exe\r\n", 1800, "Missing setting: default"},

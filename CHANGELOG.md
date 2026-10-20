@@ -22,7 +22,9 @@ upstream 1.x line.
   restic first accepted them, even while Total Commander sits idle, and
   asked for again on the next access. `PasswordTimeoutSeconds=` under
   `[Settings]` changes the time; `0` keeps them until Total Commander exits,
-  as before.
+  as before. With `PasswordTimeoutResetOnUse=yes` each use starts the
+  interval again, so a short timeout keeps a password only while the
+  repository is in use.
 - **`🗑 Forget N Passwords`** at the top of the plugin's root folder,
   shown while passwords are remembered and named after their number:
   pressing Enter on it wipes them all at once and re-reads the root

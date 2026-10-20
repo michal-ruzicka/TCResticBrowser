@@ -483,6 +483,12 @@ static BOOL parse_seconds(const WCHAR* text, DWORD* out) {
     return TRUE;
 }
 
+/* TRUE for yes/true/on/1 (case-insensitive); FALSE for no/false/off/0 and anything else */
+static BOOL parse_yes(const WCHAR* text) {
+    return text && (_wcsicmp(text, L"yes") == 0 || _wcsicmp(text, L"true") == 0 || _wcsicmp(text, L"on") == 0 ||
+                    wcscmp(text, L"1") == 0);
+}
+
 BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
     if (!out_config) return FALSE;
     memset(out_config, 0, sizeof(ResticConfig));
@@ -514,6 +520,7 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
     BOOL root_name_seen = FALSE;
     BOOL log_path_seen = FALSE;
     BOOL timeout_seen = FALSE;
+    BOOL reset_seen = FALSE;
     IniReader reader = {ini_text, NULL};
     WCHAR *alias = NULL, *target = NULL;
     while (ini_next_entry(&reader, &alias, &target)) {
@@ -532,6 +539,12 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
                 out_config->password_timeout_s = seconds;
             }
             timeout_seen = TRUE;
+            continue;
+        }
+        if (ini_in_section(&reader, L"Settings") && _wcsicmp(alias, L"PasswordTimeoutResetOnUse") == 0) {
+            /* First occurrence wins; anything but a recognised "yes" keeps the default (no) */
+            if (!reset_seen) out_config->password_timeout_reset_on_use = parse_yes(target);
+            reset_seen = TRUE;
             continue;
         }
         if (ini_in_section(&reader, L"Logging") && _wcsicmp(alias, L"LogPath") == 0) {

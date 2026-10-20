@@ -28,6 +28,7 @@ typedef struct {
     WCHAR root_name[MAX_PATH];           /* [Settings] RootName, or CONFIG_DEFAULT_ROOT_NAME */
     WCHAR log_path[CONFIG_MAX_PATH];     /* [Logging] LogPath as written (unexpanded); empty = off */
     DWORD password_timeout_s;            /* [Settings] PasswordTimeoutSeconds; 0 = keep until exit */
+    BOOL password_timeout_reset_on_use;  /* [Settings] PasswordTimeoutResetOnUse (default FALSE) */
     ResticRepoEntry* repos;              /* Heap-allocated array of repository entries */
     size_t repo_count;                   /* Number of repositories in repos */
 } ResticConfig;
@@ -78,7 +79,8 @@ BOOL config_resolve_restic_path(const WCHAR* ini_path, WCHAR* out_path, size_t o
  * filled: with a valid [Settings] RootName, otherwise (also when the file is missing) with
  * CONFIG_DEFAULT_ROOT_NAME. password_timeout_s is [Settings] PasswordTimeoutSeconds (a decimal
  * number of seconds, 0 = no timeout), or CONFIG_DEFAULT_PASSWORD_TIMEOUT_S when it is missing or
- * not such a number.
+ * not such a number. password_timeout_reset_on_use is [Settings] PasswordTimeoutResetOnUse
+ * (yes/no, true/false, on/off, 1/0; FALSE when missing or anything else).
  * Caller must release allocated resources via config_free().
  */
 BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config);
