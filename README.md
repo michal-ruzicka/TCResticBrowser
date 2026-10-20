@@ -55,8 +55,8 @@ to list and extract data and never modifies a repository.
   - Inspect files directly with Total Commander's **Lister (`F3`)** or **Quick View (`Ctrl+Q`)**.
   - Constant-memory streaming (`64 KB` chunks via `restic dump --no-lock`) into a temporary file with **atomic replacement** on completion: an interrupted or failed overwrite never corrupts or deletes your existing local file.
 - **Strictly Read-Only by Design:** Every Restic command runs with `--no-lock`. Repository modification entry points (`FsPutFile`, `FsDeleteFile`, `FsRemoveDir`, `FsMkDir`, `FsRenMovFile`) are intentionally not exported, and `F6` (Move) is rejected.
-- **Zero Passwords on Disk:** Repository passwords are requested interactively via Total Commander's native password dialog (`RequestProcW`), kept only in RAM per repository alias, passed to `restic.exe` via an isolated environment block (`RESTIC_PASSWORD`), and wiped with `SecureZeroMemory`. Cached passwords are encrypted in memory (`CryptProtectMemory`), in pages locked out of the page file and excluded from Windows Error Reporting crash dumps, so a memory dump or the hibernation file does not reveal them.
-- **Responsive Cancellation (`ESC`):** Long operations on remote backends can be aborted with `ESC` and use a 30-minute **inactivity** timeout (so slow multi-gigabyte transfers are never cut off as long as bytes keep flowing).
+- **Zero Passwords on Disk:** Repository passwords are requested interactively via Total Commander's native password dialog (`RequestProcW`), kept only in RAM per repository alias for 30 minutes by default (see [Password Timeout](#password-timeout)), passed to `restic.exe` via an isolated environment block (`RESTIC_PASSWORD`), and wiped with `SecureZeroMemory`. Cached passwords are encrypted in memory (`CryptProtectMemory`), in pages locked out of the page file and excluded from Windows Error Reporting crash dumps, so a memory dump or the hibernation file does not reveal them.
+- **Responsive Cancellation (`ESC`):** Long operations on remote backends can be aborted with `ESC`. Extraction uses a 30-minute **inactivity** timeout (so slow multi-gigabyte transfers are never cut off as long as bytes keep flowing); a folder listing is stopped after 30 minutes in total.
 
 **Project page:** <https://github.com/michal-ruzicka/TCResticBrowser> — source
 code, releases and issue tracker.
@@ -69,11 +69,11 @@ code, releases and issue tracker.
 
   [![GitHub Sponsors](https://img.shields.io/github/sponsors/michal-ruzicka)](https://github.com/sponsors/michal-ruzicka)
 
-- <https://ko-fi.com/michal_ruzicka> — Buy me a Coffee with no specific account needed, card payment is possible.
+- <https://ko-fi.com/michal_ruzicka> — Buy me a coffee with no specific account needed, card payment is possible.
 
   [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/michal_ruzicka)
 
-- <https://revolut.me/ruzicka_michal> — Donate me via Revolut, debet/credit card or Apple Pay.
+- <https://revolut.me/ruzicka_michal> — Donate via Revolut, debit/credit card or Apple Pay.
 
   [![Revolut.Me](Revolut.Me.png)](https://revolut.me/ruzicka_michal)
 
@@ -108,7 +108,7 @@ Options → Plugins → File system plugins → Configure → Add**.
 
 ### Getting Restic
 
-This plugin uses the official **Restic** command-line binary (`restic.exe`) under the hood to communicate with local, network, and cloud repositories.
+This plugin uses the official **Restic** command-line binary (`restic.exe`) under the hood to communicate with local, network, and cloud repositories. It needs **restic 0.17.1 or newer**: older versions report a wrong password and a missing repository with the same exit code and print `ls` output the plugin does not read.
 
 **[Restic](https://restic.net)** is a fast, secure, cross-platform backup program written in Go that uses authenticated encryption (AES-256 + Poly1305-AES) and content-defined deduplication.
 
@@ -156,10 +156,10 @@ documentation.
 
 | Action | How It Works |
 | --- | --- |
-| **List Repositories** | Open **Network Neighborhood** (`\`) -> **`TCResticBrowser`**. Changes to `TCResticBrowser.ini` take effect immediately on panel refresh (`Ctrl+R` / `F2`). |
+| **List Repositories** | Open **Network Neighborhood** (`\\\`) -> **`TCResticBrowser`**. Changes to `TCResticBrowser.ini` take effect immediately on panel refresh (`Ctrl+R` / `F2`). |
 | **Browse Snapshots** | Enter a repository folder (`\<Alias>`). Prompted once for the repository password; once restic accepts it, it is kept in RAM (encrypted) for that alias across both panels for 30 minutes (see [Password Timeout](#password-timeout)). Up to 3 password attempts are allowed. |
-| **Forget Passwords** | While passwords are remembered, the plugin's root folder starts with **`🗑 Forget N Passwords`** (N is their number). Press **Enter** on it to wipe them all at once; the root folder is then re-read without the entry, and the next access asks again. The entry is not removed by itself when the passwords expire; it disappears the next time the root folder is read (`Ctrl+R`). |
-| **Explore Files** | Enter any snapshot folder (`YYYY-MM-DD_HH-MM-SS_[short_id]`) and navigate the backed-up directory tree. |
+| **Forget Passwords** | While passwords are remembered, the plugin's root folder starts with **`🗑 Forget N Passwords`** (N is their number; `🗑 Forget 1 Password` for one). Press **Enter** on it to wipe them all at once; a message says how many were forgotten, the root folder is then re-read without the entry, and the next access asks again. The entry is not removed by itself when the passwords expire; it disappears the next time the root folder is read (`Ctrl+R`). |
+| **Explore Files** | Enter any snapshot folder (`YYYY-MM-DD_HH-MM-SS_[short_id]`; when two snapshots share a short ID, both folders show a longer unique prefix of the snapshot ID) and navigate the backed-up directory tree. |
 | **View File (`F3` / `Ctrl+Q`)** | Press **`F3`** (Lister) or **`Ctrl+Q`** (Quick View) on any file to stream it to a temporary location and view its contents. |
 | **Restore / Extract (`F5`)** | Select one or more files or directories and press **`F5`** to copy them to the target panel, preserving original `LastWriteTime` timestamps. Standard Total Commander overwrite prompts are supported. |
 | **Cancel Operation (`ESC`)** | Press **`ESC`** in Total Commander's progress dialog to terminate the underlying `restic.exe` child process and clean up any temporary file. |
@@ -247,7 +247,8 @@ end of a path is kept and does not continue the line, so
 
 Diagnostic logging is **off by default**. To find out why a repository does
 not open, set `LogPath` under `[Logging]` to a file; environment variables
-are expanded and missing folders are created:
+are expanded and missing folders are created. The path must be absolute
+(after expanding the variables); a relative one leaves logging off:
 
 ```ini
 [Logging]
@@ -310,8 +311,9 @@ GoogleDrive=rclone:gdrive:Backups/restic_repo
 
 The plugin depends on nothing but what it cannot do without:
 
-- **Windows** — the plugin imports only `KERNEL32.dll` and links the C
-  runtime statically, so no Visual C++ Redistributable is needed.
+- **Windows** — the plugin imports only `KERNEL32.dll` and `CRYPT32.dll`
+  (for `CryptProtectMemory`) and links the C runtime statically, so no
+  Visual C++ Redistributable is needed.
 - **[Restic](https://restic.net)** ([github.com/restic/restic](https://github.com/restic/restic),
   BSD 2-Clause License) — run as an external `restic.exe` process, never
   linked in.
@@ -402,6 +404,12 @@ Planned for versions after 2.0.0, in no particular order:
   `--password-file` / `--password-command` argument, so such repositories
   open without a password prompt. Total Commander and the plugin never see
   the password.
+- **Stop restic's helper processes on `ESC`.** Cancelling terminates
+  `restic.exe`, but an `rclone` or `ssh` process it started lives on until
+  it notices the closed pipe. A job object with `KILL_ON_JOB_CLOSE` would
+  end the whole process tree at once.
+- **Check the restic version.** Tell the user when `restic.exe` is older
+  than 0.17.1 instead of misreading its exit codes and output.
 
 ## Contributing
 

@@ -234,14 +234,14 @@ static void test_repositories_parsing_and_wfx_root(void) {
         "[Repositories]\r\n"
         "; Comment line with semicolon\r\n"
         "# Comment line with hash\r\n"
-        "BackupLocale=C:\\Backups\\OldPath\r\n"
+        "LocalBackup=C:\\Backups\\OldPath\r\n"
         "ServerLinux = rest:https://backup.lan:8000/\r\n"
         "CloudS3 = \"s3:s3.us-east-1.amazonaws.com/company-backup/restic\"\r\n"
         "NAS_SMB=\\\\nas\\share\\restic_repo\r\n"
         "Invalid/Alias=C:\\ShouldBeIgnored\r\n"
         "..=C:\\ShouldBeIgnoredToo\r\n"
         "EmptyTarget=\r\n"
-        "backuplocale = D:\\Backups\\ResticRepo\r\n";
+        "localbackup = D:\\Backups\\ResticRepo\r\n";
 
     write_text_file(ini_path, sample_ini);
     config_set_plugin_dir(plugin_dir);
@@ -251,8 +251,8 @@ static void test_repositories_parsing_and_wfx_root(void) {
     EXPECT_TRUE(ok, "config_load should succeed");
     EXPECT_TRUE(cfg.repo_count == 4, "Should parse 4 valid unique repositories");
 
-    const ResticRepoEntry* r0 = config_find_repo(&cfg, L"BackupLocale");
-    EXPECT_TRUE(r0 != NULL, "Find BackupLocale");
+    const ResticRepoEntry* r0 = config_find_repo(&cfg, L"LocalBackup");
+    EXPECT_TRUE(r0 != NULL, "Find LocalBackup");
     EXPECT_WSTR_EQ(r0->target, L"D:\\Backups\\ResticRepo", "Case-insensitive duplicate should update target");
 
     const ResticRepoEntry* r1 = config_find_repo(&cfg, L"serverlinux");
@@ -275,7 +275,7 @@ static void test_repositories_parsing_and_wfx_root(void) {
     HANDLE hFind = FsFindFirstW(L"\\", &find_data);
     EXPECT_TRUE(hFind != INVALID_HANDLE_VALUE, "FsFindFirstW on root '\\' should succeed");
     EXPECT_TRUE((find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0, "Root item 0 must be directory");
-    EXPECT_WSTR_EQ(find_data.cFileName, L"BackupLocale", "Root item 0 name");
+    EXPECT_WSTR_EQ(find_data.cFileName, L"LocalBackup", "Root item 0 name");
 
     EXPECT_TRUE(FsFindNextW(hFind, &find_data), "FsFindNextW item 1");
     EXPECT_WSTR_EQ(find_data.cFileName, L"ServerLinux", "Root item 1 name");

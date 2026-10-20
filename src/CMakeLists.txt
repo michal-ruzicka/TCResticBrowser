@@ -17,7 +17,7 @@ option(RESTIC_WFX_ASAN "Compile with AddressSanitizer; the plugin DLL itself is 
 
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS pluginst.inf)
 file(STRINGS pluginst.inf _version_line REGEX "^version=")
-# A pre-release suffix (1.1.0-devel between releases) is kept in the product
+# A pre-release suffix (X.Y.Z-devel between releases) is kept in the product
 # version string; the numeric FILEVERSION carries MAJOR.MINOR.PATCH.0 only.
 if(NOT _version_line MATCHES "^version=(([0-9]+)\\.([0-9]+)\\.([0-9]+)(-[0-9A-Za-z.]+)?)[\r]*$")
     message(FATAL_ERROR "pluginst.inf: no version=MAJOR.MINOR.PATCH[-suffix] line")
@@ -58,8 +58,8 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 if(MSVC)
-    # Drop CMake's default list of Win32 import libraries: the plugin must
-    # import nothing but KERNEL32.dll (AGENT.md, section 8.5), and every other
+    # Drop CMake's default list of Win32 import libraries: the plugin imports
+    # only KERNEL32.dll and CRYPT32.dll (AGENT.md, section 8.5), and every other
     # system library is named explicitly on the target that needs it.
     set(CMAKE_C_STANDARD_LIBRARIES "kernel32.lib")
 

@@ -152,8 +152,8 @@ compiler output":
 | Parameter | Pinned to | Files that must match |
 |---|---|---|
 | Exact `cl.exe` version | `19.51.36260` | `build.cmd` (`EXPECTED_CL`) |
-| MSVC toolset (major.minor) | `14.51` | `build.cmd` (`CMAKE_T`), `.vsconfig`, CI workflow |
-| Windows SDK | `10.0.26100.0` | `build.cmd` (`CMAKE_SDK`), `.vsconfig`, CI workflow |
+| MSVC toolset (major.minor) | `14.51` | `build.cmd` (`CMAKE_T`), `.vsconfig` (also used by the CI workflow) |
+| Windows SDK | `10.0.26100.0` | `build.cmd` (`CMAKE_SDK`), `.vsconfig` (also used by the CI workflow) |
 
 `build.cmd` checks `cl.exe` against `EXPECTED_CL` and prints a warning if
 they differ — the build continues regardless. The check exists so that when
@@ -200,7 +200,7 @@ download or extraction — but it is not an independent trust anchor.
 
 #### Upgrading the pinned toolchain
 
-When you adopt a new MSVC toolset or Windows SDK version, update **all three
+When you adopt a new MSVC toolset or Windows SDK version, update **both
 locations** listed below to keep them in sync. A mismatch causes either a
 build failure (CMake cannot find the requested toolset) or silent divergence
 between local and CI builds.
@@ -217,7 +217,7 @@ The path in the output contains the toolset directory, e.g.:
 `...\VC\Tools\MSVC\`**`14.51`**`.36231\bin\...`
 
 Use the first two numbers (`14.XX`) as the toolset token and the full
-four-part version (e.g. `19.51.36244`) as the exact compiler version.
+three-part `cl.exe` version (e.g. `19.51.36244`) as the exact compiler version.
 Update:
 
 1. **`build.cmd`** — the three pinned variables at the top of the file:
@@ -238,9 +238,10 @@ The SDK version is a five-digit build number, visible in VS Installer under
 the installed *Windows 11 SDK* component (e.g. `10.0.`**`26100`**`.0`).
 Update:
 
-1. **`build.cmd`** — both `cmake` configure lines:
+1. **`build.cmd`** — the `CMAKE_SDK` variable at the top of the file, which
+   every `cmake` configure line passes on:
    ```
-   -DCMAKE_SYSTEM_VERSION=10.0.NNNNN.0
+   set CMAKE_SDK=10.0.NNNNN.0
    ```
 2. **`.vsconfig`** — the SDK component entry (this also covers the
    CI workflow, which installs the toolchain from `.vsconfig`):
@@ -327,6 +328,7 @@ Total Commander process
 | `config.c` | `TCResticBrowser.ini` lookup and parsing, `restic.exe` resolution |
 | `restic_cli.c` | `CreateProcessW` with an explicit handle list and environment block, pipes, timeouts and cancellation, snapshot and `ls` parsing |
 | `json.c` | Strict read-only JSON reader (portable C11, no Win32) |
+| `log.c` | Optional diagnostic log (`[Logging] LogPath`), credential masking |
 
 **Read-only by omission:** a WFX plugin declares which operations it
 supports by which functions it exports. `FsPutFile`, `FsMkDir`,
@@ -406,7 +408,8 @@ developer's machine.
 
 1. On a feature branch, set `version=X.Y.Z` (dropping the `-devel` suffix)
    and `release-date=` in `src\pluginst.inf`, and turn the `[Unreleased]`
-   section of `CHANGELOG.md` into `## [vX.Y.Z] – YYYY-MM-DD`, in a final
+   section of `CHANGELOG.md` into `## [vX.Y.Z] – YYYY-MM-DD` (and update the
+   link references at its end), in a final
    "Bump plugin version to vX.Y.Z" commit. Development after a release
    continues as `X.Y.Z-devel` of the next version.
 2. Open a PR, get it reviewed, and merge into `main`.

@@ -15,7 +15,7 @@ REM Usage:
 REM   setup-build-environment-example.cmd
 REM
 REM To target a different branch, set BRANCH before running:
-REM   set BRANCH=main
+REM   set BRANCH=my-feature-branch
 REM   setup-build-environment-example.cmd
 REM ===========================================================================
 setlocal
