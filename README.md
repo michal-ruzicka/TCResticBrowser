@@ -222,7 +222,7 @@ Write paths with spaces as they are, without quotes: everything after `=` up
 to the end of the line is the value, with surrounding spaces trimmed.
 Quotes around the whole value are allowed and removed. A backslash at the
 end of a path is kept and does not continue the line, so
-`Firefox Profile=C:\My Backups\Firefox.restic-repo\` works as well.
+`Local Time Machine=C:\Users\me\AppData\Local\Time Machine.restic-repo\` works as well.
 
 #### Logging
 
@@ -265,7 +265,7 @@ RootName=Backups
 
 ; 1. Local disk repository (spaces in aliases and paths need no quotes)
 LocalDocs=D:\Backups\restic_docs
-Firefox Profile=C:\Users\me\AppData\Local\My Backups\Firefox Profile.restic-repo
+Local Time Machine=C:\Users\me\AppData\Local\Time Machine.restic-repo\
 
 ; 2. Network share (SMB / UNC path)
 NasBackup=\\NAS\Backups\workstation_repo
