@@ -118,6 +118,11 @@ static void test_iso8601_parsing(void) {
     EXPECT_TRUE(!restic_parse_iso8601_time("1601-01-01T00:00:00+02:00", &ft), "Offset pushing before epoch");
     EXPECT_TRUE(!restic_parse_iso8601_time("2026-10-18T10:00:00+24:00", &ft), "Offset hour 24");
     EXPECT_TRUE(!restic_parse_iso8601_time("2026-10-18T10:00:00+02:75", &ft), "Offset minute 75");
+    EXPECT_TRUE(!restic_parse_iso8601_time("2026-10-18T10:00:00+02:5", &ft), "Incomplete offset minutes");
+    EXPECT_TRUE(!restic_parse_iso8601_time("2026-10-18T10:00:00X", &ft), "Unknown zone designator");
+    EXPECT_TRUE(!restic_parse_iso8601_time("2026-10-18T10:00:00Zjunk", &ft), "Characters after Z");
+    EXPECT_TRUE(!restic_parse_iso8601_time("2026-10-18T10:00:00+02:00x", &ft), "Characters after the offset");
+    EXPECT_TRUE(!restic_parse_iso8601_time("2026-10-18T10:00:00.Z", &ft), "Fraction without digits");
 }
 
 /* Snapshot directory naming and ID extraction */

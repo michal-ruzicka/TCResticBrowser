@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #endif
 #include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 #include <wchar.h>
 #include "json.h"
@@ -116,6 +117,7 @@ BOOL restic_parse_iso8601_time(const char* iso_str, FILETIME* out_ft) {
     unsigned long long frac_ticks = 0;
     if (*p == '.') {
         ++p;
+        if (!is_ascii_digit(*p)) return FALSE; /* "." needs at least one digit */
         unsigned long long multiplier = 1000000ULL;
         while (is_ascii_digit(*p)) {
             if (multiplier > 0) {
@@ -126,22 +128,26 @@ BOOL restic_parse_iso8601_time(const char* iso_str, FILETIME* out_ft) {
         }
     }
 
-    /* Optional timezone designator: 'Z', '+HH:MM', '-HH:MM', '+HHMM', '-HHMM', '+HH' */
+    /* Optional timezone designator: 'Z', '+HH:MM', '-HH:MM', '+HHMM', '-HHMM', '+HH'; then the end */
     long long tz_offset_minutes = 0;
-    if (*p == '+' || *p == '-') {
+    if (*p == 'Z' || *p == 'z') {
+        ++p;
+    } else if (*p == '+' || *p == '-') {
         int sign = (*p == '+') ? 1 : -1;
         ++p;
         int tz_h = parse_fixed_digits(p, 2);
         if (tz_h < 0 || tz_h > 23) return FALSE;
         p += 2;
-        if (*p == ':') ++p;
         int tz_m = 0;
-        if (is_ascii_digit(p[0]) && is_ascii_digit(p[1])) {
+        if (*p != '\0') {
+            if (*p == ':') ++p;
             tz_m = parse_fixed_digits(p, 2);
             if (tz_m < 0 || tz_m > 59) return FALSE;
+            p += 2;
         }
         tz_offset_minutes = (long long)sign * ((long long)tz_h * 60LL + (long long)tz_m);
     }
+    if (*p != '\0') return FALSE; /* Trailing characters: not a timestamp restic writes */
 
     ULARGE_INTEGER uli;
     uli.LowPart  = ft.dwLowDateTime;
@@ -618,6 +624,7 @@ typedef struct {
 
 static BOOL bytebuf_append(ByteBuf* b, const char* src, size_t n) {
     if (b->len + n + 1 > b->cap) {
+        if (n > SIZE_MAX / 2 - b->len) return FALSE; /* The doubling below would wrap around */
         size_t new_cap = b->cap ? b->cap : 4096;
         while (b->len + n + 1 > new_cap) new_cap *= 2;
         char* p = (char*)realloc(b->data, new_cap);
@@ -631,10 +638,15 @@ static BOOL bytebuf_append(ByteBuf* b, const char* src, size_t n) {
     return TRUE;
 }
 
-/* Moves every byte currently available in a pipe into buf. Sets *eof once the pipe is closed. */
+/*
+ * Moves the bytes currently available in a pipe into buf, at most DRAIN_SLICE_BYTES per call so that
+ * the caller still checks the timeout and ESC while a child floods its output. Sets *eof once the
+ * pipe is closed.
+ */
+#define DRAIN_SLICE_BYTES (1024u * 1024u)
 static BOOL drain_pipe(HANDLE pipe, ByteBuf* buf, BOOL* eof) {
     char chunk[4096];
-    while (!*eof) {
+    for (size_t taken = 0; !*eof && taken < DRAIN_SLICE_BYTES; taken += sizeof(chunk)) {
         DWORD avail = 0;
         DWORD got = 0;
         if (!PeekNamedPipe(pipe, NULL, 0, NULL, &avail, NULL)) {
@@ -783,9 +795,11 @@ static void log_restic_end(ResticResult result, BOOL exited, DWORD exit_code, UL
 
 /*
  * Starts cmd_line hidden with stdin=NUL and stdout/stderr redirected to two anonymous pipes.
- * Only these three handles are inherited (PROC_THREAD_ATTRIBUTE_HANDLE_LIST): other threads of the
- * host process spawning children concurrently can therefore neither keep our pipes open nor leak
- * unrelated inheritable handles into Restic.
+ * Restic inherits only these three handles (PROC_THREAD_ATTRIBUTE_HANDLE_LIST), never unrelated
+ * inheritable handles of Total Commander. The list does not protect the other direction: a child
+ * another thread of the host starts with bInheritHandles in the meantime can inherit the write
+ * ends and keep them open. That is harmless only because collect_output() and the dump loop end
+ * when Restic exits, not at EOF; keep it that way.
  */
 static BOOL spawn_hidden(
     WCHAR* cmd_line,
@@ -1132,7 +1146,7 @@ ResticResult restic_list_directory(
 /* State of one streaming extraction: data goes to a temporary file that replaces the target on success */
 typedef struct {
     const WCHAR* final_path;
-    WCHAR* part_path;        /* Heap copy: <target dir>\~rp<thread id>.tmp (short, to stay below MAX_PATH) */
+    WCHAR* part_path;        /* Heap: <target dir>\~rp<thread id>[-<n>].tmp (short, to stay below MAX_PATH) */
     BOOL overwrite;
     HANDLE hLocal;           /* Handle of the temporary file (INVALID_HANDLE_VALUE until the first byte) */
     BOOL part_created;       /* TRUE while the temporary file exists on disk and must be cleaned up */
@@ -1149,33 +1163,54 @@ static BOOL is_unknown_time(const FILETIME* ft) {
     return ft->dwHighDateTime == 0xFFFFFFFF && ft->dwLowDateTime == 0xFFFFFFFE;
 }
 
+#define PARTIAL_NAME_CHARS 32 /* "~rp" + thread id + "-" + attempt + ".tmp" + NUL, rounded up */
+#define PARTIAL_ATTEMPTS   100
+
+/* Length of the directory part of path, including its trailing separator */
+static size_t dir_part_length(const WCHAR* path) {
+    size_t dir_len = 0;
+    for (size_t i = 0; path[i] != L'\0'; ++i) {
+        if (path[i] == L'\\' || path[i] == L'/') dir_len = i + 1;
+    }
+    return dir_len;
+}
+
+/* Writes the name of temporary file `attempt` ("~rp<tid>.tmp", then "~rp<tid>-<n>.tmp") into part */
+static void set_partial_name(WCHAR* part, size_t dir_len, unsigned attempt) {
+    if (attempt == 0) {
+        swprintf_s(part + dir_len, PARTIAL_NAME_CHARS, L"~rp%lx.tmp", GetCurrentThreadId());
+    } else {
+        swprintf_s(part + dir_len, PARTIAL_NAME_CHARS, L"~rp%lx-%x.tmp", GetCurrentThreadId(), attempt);
+    }
+}
+
 /* Builds "<dir of final_path>\~rp<tid>.tmp" on the heap. Returns NULL on failure. */
 static WCHAR* make_partial_path(const WCHAR* final_path) {
-    size_t len     = wcslen(final_path);
-    size_t dir_len = 0;
-    for (size_t i = 0; i < len; ++i) {
-        if (final_path[i] == L'\\' || final_path[i] == L'/') dir_len = i + 1;
-    }
-    size_t cap  = dir_len + 32;
-    WCHAR* part = (WCHAR*)malloc(cap * sizeof(WCHAR));
+    size_t dir_len = dir_part_length(final_path);
+    WCHAR* part    = (WCHAR*)malloc((dir_len + PARTIAL_NAME_CHARS) * sizeof(WCHAR));
     if (!part) return NULL;
     wmemcpy(part, final_path, dir_len);
-    swprintf_s(part + dir_len, cap - dir_len, L"~rp%lx.tmp", GetCurrentThreadId());
+    set_partial_name(part, dir_len, 0);
     return part;
 }
 
-/* Returns the open temporary file, creating it on first use. INVALID_HANDLE_VALUE on failure. */
+/*
+ * Returns the open temporary file, creating it on first use. INVALID_HANDLE_VALUE on failure.
+ * CREATE_NEW never truncates or follows anything already there (a user's file of that name, or a
+ * link planted in a shared target folder); the next name is tried instead.
+ */
 static HANDLE dump_get_partial(DumpState* st) {
     if (st->hLocal != INVALID_HANDLE_VALUE) return st->hLocal;
-    HANDLE h = CreateFileW(
-        st->part_path,
-        GENERIC_WRITE,
-        FILE_SHARE_READ,
-        NULL,
-        CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL,
-        NULL
-    );
+    size_t dir_len = dir_part_length(st->final_path);
+    HANDLE h       = INVALID_HANDLE_VALUE;
+    for (unsigned attempt = 0; attempt < PARTIAL_ATTEMPTS; ++attempt) {
+        set_partial_name(st->part_path, dir_len, attempt);
+        h = CreateFileW(st->part_path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
+                        NULL);
+        if (h != INVALID_HANDLE_VALUE) break;
+        DWORD err = GetLastError();
+        if (err != ERROR_FILE_EXISTS && err != ERROR_ALREADY_EXISTS) break;
+    }
     if (h == INVALID_HANDLE_VALUE) return INVALID_HANDLE_VALUE;
     st->hLocal       = h;
     st->part_created = TRUE;
@@ -1238,16 +1273,19 @@ static ResticResult dump_commit(DumpState* st, const FILETIME* mtime) {
     CloseHandle(hf);
     st->hLocal = INVALID_HANDLE_VALUE;
 
-    DWORD flags = 0;
+    DWORD flags          = 0;
+    DWORD read_only_attr = 0; /* Attributes of a read-only target, restored if it cannot be replaced */
     if (st->overwrite) {
         DWORD attr = GetFileAttributesW(st->final_path);
         if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_READONLY) != 0 &&
-            (attr & FILE_ATTRIBUTE_DIRECTORY) == 0) {
-            SetFileAttributesW(st->final_path, attr & ~FILE_ATTRIBUTE_READONLY);
+            (attr & FILE_ATTRIBUTE_DIRECTORY) == 0 &&
+            SetFileAttributesW(st->final_path, attr & ~FILE_ATTRIBUTE_READONLY)) {
+            read_only_attr = attr;
         }
         flags = MOVEFILE_REPLACE_EXISTING;
     }
     if (!MoveFileExW(st->part_path, st->final_path, flags)) {
+        if (read_only_attr != 0) SetFileAttributesW(st->final_path, read_only_attr);
         return RESTIC_ERR_LOCAL_WRITE;
     }
     st->part_created = FALSE;
