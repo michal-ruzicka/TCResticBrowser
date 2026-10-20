@@ -171,17 +171,17 @@ static void test_ini_path_resolution_priority(void) {
 
 /* Test 3: Restic executable resolution priority */
 static void test_restic_binary_resolution(void) {
-    WCHAR plugin_dir[CONFIG_MAX_PATH] = {0};
-    WCHAR custom_dir[CONFIG_MAX_PATH] = {0};
-    make_temp_dir(L"restic_bin_plug", plugin_dir, CONFIG_MAX_PATH);
-    make_temp_dir(L"restic_bin_cust", custom_dir, CONFIG_MAX_PATH);
+    WCHAR plugin_dir[MAX_PATH] = {0};
+    WCHAR custom_dir[MAX_PATH] = {0};
+    make_temp_dir(L"restic_bin_plug", plugin_dir, MAX_PATH);
+    make_temp_dir(L"restic_bin_cust", custom_dir, MAX_PATH);
 
-    WCHAR ini_path[CONFIG_MAX_PATH]       = {0};
-    WCHAR local_restic[CONFIG_MAX_PATH]   = {0};
-    WCHAR custom_restic[CONFIG_MAX_PATH]  = {0};
-    swprintf_s(ini_path, CONFIG_MAX_PATH, L"%ls\\%ls", plugin_dir, CONFIG_INI_FILENAME);
-    swprintf_s(local_restic, CONFIG_MAX_PATH, L"%ls\\restic.exe", plugin_dir);
-    swprintf_s(custom_restic, CONFIG_MAX_PATH, L"%ls\\my_restic.exe", custom_dir);
+    WCHAR ini_path[MAX_PATH]       = {0};
+    WCHAR local_restic[MAX_PATH]   = {0};
+    WCHAR custom_restic[MAX_PATH]  = {0};
+    swprintf_s(ini_path, MAX_PATH, L"%ls\\%ls", plugin_dir, CONFIG_INI_FILENAME);
+    swprintf_s(local_restic, MAX_PATH, L"%ls\\restic.exe", plugin_dir);
+    swprintf_s(custom_restic, MAX_PATH, L"%ls\\my_restic.exe", custom_dir);
 
     /* Create dummy binaries */
     write_text_file(local_restic, "MZ_DUMMY_LOCAL");
@@ -195,20 +195,20 @@ static void test_restic_binary_resolution(void) {
              "[Settings]\r\nResticPath=\"%ls\"\r\n", custom_restic);
     write_text_file(ini_path, ini_content);
 
-    WCHAR resolved_bin[CONFIG_MAX_PATH] = {0};
-    BOOL ok = config_resolve_restic_path(ini_path, resolved_bin, CONFIG_MAX_PATH);
+    WCHAR resolved_bin[MAX_PATH] = {0};
+    BOOL ok = config_resolve_restic_path(ini_path, resolved_bin, MAX_PATH);
     EXPECT_TRUE(ok, "Custom ResticPath should resolve");
     EXPECT_WSTR_EQ(resolved_bin, custom_restic, "Explicit ResticPath takes highest priority");
 
     /* Priority 2: ResticPath is default/empty -> picks <plugin_dir>\restic.exe */
     write_text_file(ini_path, "[Settings]\r\nResticPath=restic.exe\r\n");
-    ok = config_resolve_restic_path(ini_path, resolved_bin, CONFIG_MAX_PATH);
+    ok = config_resolve_restic_path(ini_path, resolved_bin, MAX_PATH);
     EXPECT_TRUE(ok, "Local plugin_dir restic.exe should resolve");
     EXPECT_WSTR_EQ(resolved_bin, local_restic, "Should pick <plugin_dir>\\restic.exe");
 
     /* Priority 3: Remove <plugin_dir>\restic.exe -> falls back to PATH or bare restic.exe */
     DeleteFileW(local_restic);
-    config_resolve_restic_path(ini_path, resolved_bin, CONFIG_MAX_PATH);
+    config_resolve_restic_path(ini_path, resolved_bin, MAX_PATH);
     EXPECT_TRUE(resolved_bin[0] != L'\0', "Fallback restic binary string must not be empty");
 
     DeleteFileW(custom_restic);
@@ -333,12 +333,12 @@ static BOOL write_encoded(const WCHAR* path, const WCHAR* text, TestEncoding enc
 
 /* Test 5: INI encodings (UTF-8 default, BOMs, ANSI fallback) and the line syntax of the own reader */
 static void test_ini_encodings_and_syntax(void) {
-    WCHAR plugin_dir[CONFIG_MAX_PATH] = {0}, tools_dir[CONFIG_MAX_PATH] = {0};
-    WCHAR ini_path[CONFIG_MAX_PATH] = {0}, custom_restic[CONFIG_MAX_PATH] = {0};
-    make_temp_dir(L"restic_enc_plug", plugin_dir, CONFIG_MAX_PATH);
-    make_temp_dir(L"restic_enc_N\u00e1stroje_\u65e5\u672c", tools_dir, CONFIG_MAX_PATH);
-    swprintf_s(ini_path, CONFIG_MAX_PATH, L"%ls\\%ls", plugin_dir, CONFIG_INI_FILENAME);
-    swprintf_s(custom_restic, CONFIG_MAX_PATH, L"%ls\\restic.exe", tools_dir);
+    WCHAR plugin_dir[MAX_PATH] = {0}, tools_dir[MAX_PATH] = {0};
+    WCHAR ini_path[MAX_PATH] = {0}, custom_restic[MAX_PATH] = {0};
+    make_temp_dir(L"restic_enc_plug", plugin_dir, MAX_PATH);
+    make_temp_dir(L"restic_enc_N\u00e1stroje_\u65e5\u672c", tools_dir, MAX_PATH);
+    swprintf_s(ini_path, MAX_PATH, L"%ls\\%ls", plugin_dir, CONFIG_INI_FILENAME);
+    swprintf_s(custom_restic, MAX_PATH, L"%ls\\restic.exe", tools_dir);
     write_text_file(custom_restic, "MZ_DUMMY");
     config_set_plugin_dir(plugin_dir);
 
@@ -357,10 +357,10 @@ static void test_ini_encodings_and_syntax(void) {
                L"NoNewlineAtEnd=E:\\last",
                custom_restic);
 
+    ResticConfig cfg; /* One instance per test: /analyze (C6262) caps a frame at 16 KB */
     const TestEncoding encodings[] = {ENC_UTF8, ENC_UTF8_BOM, ENC_UTF16LE, ENC_UTF16BE};
     for (size_t i = 0; i < _countof(encodings); ++i) {
         EXPECT_TRUE(write_encoded(ini_path, body, encodings[i]), "Write encoded INI");
-        ResticConfig cfg;
         EXPECT_TRUE(config_load_from_file(ini_path, &cfg), "Encoded INI loads");
         EXPECT_TRUE(cfg.repo_count == 3, "Three repositories, the [Other] section is not mixed in");
         const ResticRepoEntry* r = config_find_repo(&cfg, L"Z\u00e1lohy");
@@ -381,7 +381,6 @@ static void test_ini_encodings_and_syntax(void) {
     WCHAR expected[64] = {0};
     MultiByteToWideChar(CP_ACP, 0, "D:\\Z\xE1lohy", -1, expected, _countof(expected));
     EXPECT_TRUE(write_bytes(ini_path, ansi_ini, (DWORD)strlen(ansi_ini)), "Write ANSI INI");
-    ResticConfig cfg;
     EXPECT_TRUE(config_load_from_file(ini_path, &cfg) && cfg.repo_count == 1, "ANSI INI loads");
     EXPECT_WSTR_EQ(cfg.repos[0].target, expected, "Invalid UTF-8 falls back to the ANSI code page");
     config_free(&cfg);
@@ -389,7 +388,9 @@ static void test_ini_encodings_and_syntax(void) {
     /* Over-long entries are skipped, never truncated into a different repository */
     static char long_ini[4096];
     int pos = snprintf(long_ini, sizeof(long_ini), "[Repositories]\r\nTooLong=D:\\");
-    for (int i = 0; i < CONFIG_MAX_PATH; ++i) long_ini[pos++] = 'x';
+    for (int i = 0; i < CONFIG_MAX_PATH && pos >= 0 && pos < (int)sizeof(long_ini) - 64; ++i) {
+        long_ini[pos++] = 'x';
+    }
     snprintf(long_ini + pos, sizeof(long_ini) - (size_t)pos, "\r\nShort=D:\\ok\r\n");
     EXPECT_TRUE(write_text_file(ini_path, long_ini), "Write INI with an over-long target");
     EXPECT_TRUE(config_load_from_file(ini_path, &cfg) && cfg.repo_count == 1 &&
@@ -698,11 +699,10 @@ static void test_missing_ini_is_harmless(void) {
     EXPECT_TRUE(slash != NULL, "Directory of the test executable is known");
     *slash = L'\0';
     wcscat_s(sample_ini, MAX_PATH, L"\\TCResticBrowser.ini");
-    ResticConfig sample_cfg;
-    EXPECT_TRUE(config_load_from_file(sample_ini, &sample_cfg) && sample_cfg.repo_count == 0,
+    EXPECT_TRUE(config_load_from_file(sample_ini, &cfg) && cfg.repo_count == 0,
                 "Staged TCResticBrowser.ini template exists and has all repositories commented out");
-    EXPECT_WSTR_EQ(sample_cfg.root_name, CONFIG_DEFAULT_ROOT_NAME, "Sample INI leaves RootName commented out");
-    config_free(&sample_cfg);
+    EXPECT_WSTR_EQ(cfg.root_name, CONFIG_DEFAULT_ROOT_NAME, "Sample INI leaves RootName commented out");
+    config_free(&cfg);
 
     FsInitW(0, NULL, NULL, NULL);
 }
@@ -798,12 +798,12 @@ static char* read_all(const WCHAR* path) {
 
 /* Optional diagnostic log: [Logging] LogPath parsing, expansion, file creation, redaction */
 static void test_logging(void) {
-    WCHAR plugin_dir[CONFIG_MAX_PATH] = {0}, ini_path[CONFIG_MAX_PATH] = {0};
-    WCHAR log_root[CONFIG_MAX_PATH] = {0}, log_file[CONFIG_MAX_PATH] = {0}, got[CONFIG_MAX_PATH];
-    make_temp_dir(L"restic_log_plug", plugin_dir, CONFIG_MAX_PATH);
-    make_temp_dir(L"restic_log_out", log_root, CONFIG_MAX_PATH);
-    swprintf_s(ini_path, CONFIG_MAX_PATH, L"%ls\\%ls", plugin_dir, CONFIG_INI_FILENAME);
-    swprintf_s(log_file, CONFIG_MAX_PATH, L"%ls\\new dir\\sub\\TCResticBrowser.log", log_root);
+    WCHAR plugin_dir[MAX_PATH] = {0}, ini_path[MAX_PATH] = {0};
+    WCHAR log_root[MAX_PATH] = {0}, log_file[MAX_PATH] = {0}, got[MAX_PATH];
+    make_temp_dir(L"restic_log_plug", plugin_dir, MAX_PATH);
+    make_temp_dir(L"restic_log_out", log_root, MAX_PATH);
+    swprintf_s(ini_path, MAX_PATH, L"%ls\\%ls", plugin_dir, CONFIG_INI_FILENAME);
+    swprintf_s(log_file, MAX_PATH, L"%ls\\new dir\\sub\\TCResticBrowser.log", log_root);
     config_set_plugin_dir(plugin_dir);
     SetEnvironmentVariableW(L"TCRB_TEST_LOG_ROOT", log_root);
 
@@ -881,9 +881,9 @@ static void test_logging(void) {
     log_redact_target(L"C:\\Backups\\repo", red, _countof(red));
     EXPECT_WSTR_EQ(red, L"C:\\Backups\\repo", "Local path kept");
 
-    WCHAR dir1[CONFIG_MAX_PATH], dir2[CONFIG_MAX_PATH];
-    swprintf_s(dir2, CONFIG_MAX_PATH, L"%ls\\new dir\\sub", log_root);
-    swprintf_s(dir1, CONFIG_MAX_PATH, L"%ls\\new dir", log_root);
+    WCHAR dir1[MAX_PATH], dir2[MAX_PATH];
+    swprintf_s(dir2, MAX_PATH, L"%ls\\new dir\\sub", log_root);
+    swprintf_s(dir1, MAX_PATH, L"%ls\\new dir", log_root);
     DeleteFileW(log_file);
     RemoveDirectoryW(dir2);
     RemoveDirectoryW(dir1);

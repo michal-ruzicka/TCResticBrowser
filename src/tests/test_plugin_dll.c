@@ -828,7 +828,8 @@ static void test_live_end_to_end_navigation(void) {
     EXPECT_TRUE(make_unique_dir(L"restic_dll_e2e", dir, MAX_PATH), "Create E2E plugin directory");
     swprintf_s(ini, MAX_PATH, L"%ls\\TCResticBrowser.ini", dir);
 
-    char restic_a[MAX_PATH] = {0}, repo_a[MAX_PATH] = {0}, dir_a[MAX_PATH] = {0}, ini_text[6144] = {0};
+    char restic_a[MAX_PATH] = {0}, repo_a[MAX_PATH] = {0}, dir_a[MAX_PATH] = {0};
+    static char ini_text[6144]; /* Static: /analyze (C6262) caps a frame at 16 KB */
     WideCharToMultiByte(CP_ACP, 0, restic_abs, -1, restic_a, sizeof(restic_a), NULL, NULL);
     WideCharToMultiByte(CP_ACP, 0, dir, -1, dir_a, sizeof(dir_a), NULL, NULL);
     WideCharToMultiByte(CP_ACP, 0, repo_abs, -1, repo_a, sizeof(repo_a), NULL, NULL);
@@ -886,7 +887,7 @@ static void test_live_end_to_end_navigation(void) {
 
     /* 2. Level 2+ (\MainRepo\<snap>\...): session password cached in RAM (0 additional prompts) */
     g_e2e_pwd_prompts = 0;
-    WCHAR snap_root[MAX_PATH * 2], data_path[MAX_PATH * 2];
+    static WCHAR snap_root[MAX_PATH * 2], data_path[MAX_PATH * 2]; /* Static: /analyze (C6262) caps a frame at 16 KB */
     swprintf_s(snap_root, _countof(snap_root), L"\\MainRepo\\%ls", latest_snap);
     EXPECT_TRUE(descend_to_fixture_data(&p, snap_root, 0, data_path, _countof(data_path)),
                 "Descend snapshot directory tree down to fixture data folder");
@@ -904,7 +905,7 @@ static void test_live_end_to_end_navigation(void) {
     EXPECT_TRUE(saw_readme && saw_empty_dir, "data folder contains readme.txt (5 B) and empty_dir");
 
     /* Empty directory inside snapshot -> ERROR_NO_MORE_FILES, no error popup */
-    WCHAR empty_path[MAX_PATH * 2];
+    static WCHAR empty_path[MAX_PATH * 2];
     swprintf_s(empty_path, _countof(empty_path), L"%ls\\empty_dir", data_path);
     SetLastError(0);
     EXPECT_TRUE(p.find_first_w(empty_path, &fd) == INVALID_HANDLE_VALUE &&
@@ -915,7 +916,7 @@ static void test_live_end_to_end_navigation(void) {
     test_e2e_extraction_edge_cases(&p, dir, data_path);
 
     /* Non-existent directory inside snapshot -> ERROR_PATH_NOT_FOUND, no error popup */
-    WCHAR missing_sub[MAX_PATH * 2];
+    static WCHAR missing_sub[MAX_PATH * 2];
     swprintf_s(missing_sub, _countof(missing_sub), L"%ls\\does_not_exist", data_path);
     SetLastError(0);
     EXPECT_TRUE(p.find_first_w(missing_sub, &fd) == INVALID_HANDLE_VALUE &&
