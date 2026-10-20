@@ -79,7 +79,10 @@ build.cmd check
 runs the additional x64 checks, each in its own build directory and without
 producing a ZIP: a Debug build whose tests run with the CRT debug heap and
 leak checker, a build with the MSVC static analyzer (`/analyze`, warnings are
-errors), and the unit tests under AddressSanitizer.
+errors), and the unit tests under AddressSanitizer. It needs the
+AddressSanitizer component from `.vsconfig` (`C++ AddressSanitizer` in the
+Visual Studio Installer), which a Visual Studio installed by other means may
+lack; `build.cmd check` stops right away with that hint when it is missing.
 
 To set up a build environment from scratch on a fresh Windows installation
 (VM, [Windows Sandbox](https://learn.microsoft.com/windows/security/application-security/application-isolation/windows-sandbox/),

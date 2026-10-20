@@ -227,6 +227,19 @@ REM Extra checks (x64 only). Each variant gets its own build directory, so
 REM switching between them never needs a clean.
 REM ---------------------------------------------------------------------------
 
+REM The AddressSanitizer libraries come with their own Visual Studio component,
+REM which a Visual Studio install not made from .vsconfig often lacks; the
+REM linker would only report LNK1104 for a clang_rt.asan*.lib at the very end.
+REM !...! (delayed expansion) keeps a ")" in the path from closing the block.
+if not exist "%VCToolsInstallDir%lib\x64\clang_rt.asan_dynamic-x86_64.lib" (
+    echo ERROR: AddressSanitizer is not installed for the MSVC toolset in
+    echo   !VCToolsInstallDir!
+    echo Add the "C++ AddressSanitizer" component
+    echo ^(Microsoft.VisualStudio.Component.VC.ASAN^) in the Visual Studio Installer:
+    echo Modify, Individual components - or import .vsconfig from this repository.
+    goto :error
+)
+
 echo.
 echo === Check: Debug build + tests (CRT heap and leak checks) ===
 cmake -S "%SRC%" -B "%BUILD%\check-debug" -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_SYSTEM_VERSION=%CMAKE_SDK%
