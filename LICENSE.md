@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2026 pietro partescano
+Copyright (c) 2026 pietro partescano  
 Copyright (c) 2026 Michal Růžička <ruzicka.mich@gmail.com>
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
