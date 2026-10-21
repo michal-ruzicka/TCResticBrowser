@@ -570,9 +570,84 @@ static void test_exec_large_output_and_long_args(void) {
     restic_free_command_output(&out);
 }
 
+/* Counts the lines a line consumer receives, checking that they arrive whole and in order */
+typedef struct {
+    int lines;
+    int in_order;
+    int stop_after;   /* Stop the child after this many lines (0: never) */
+} LineCount;
+
+static ResticResult count_line(const char* line, size_t len, void* ctx) {
+    LineCount* c = (LineCount*)ctx;
+    char expected[64];
+    int n = snprintf(expected, sizeof(expected), "line_%d_0123456789_0123456789 ", c->lines + 1);
+    if (len < (size_t)n - 1 || memcmp(line, expected, (size_t)n - 1) != 0 || memchr(line, '\n', len) != NULL) {
+        c->in_order = 0;
+    }
+    c->lines++;
+    return c->stop_after && c->lines >= c->stop_after ? RESTIC_ERR_JSON_PARSE : RESTIC_OK;
+}
+
+/* ResticExecOptions.line_proc: stdout arrives line by line and is not kept */
+static void test_exec_line_streaming(void) {
+    ResticCommandOutput out;
+    LineCount count = {0, 1, 0};
+    ResticExecOptions opts = {0, NULL, NULL, count_line, &count};
+    /*
+     * 40 000 lines (~1.3 MB, more than one 1 MiB read slice), the last one without a line break.
+     * `set /p` without input leaves ERRORLEVEL 1 in cmd.exe (not under Wine), hence `exit 0`.
+     */
+    ResticResult res = run_cmd(L"/c \"(for /L %i in (1,1,39999) do @echo line_%i_0123456789_0123456789 ) & "
+                               L"(<nul set /p=line_40000_0123456789_0123456789 ) & exit 0\"", &opts, &out);
+    size_t kept = out.length;
+    restic_free_command_output(&out); /* Before the checks, which return early on failure */
+    EXPECT_TRUE(res == RESTIC_OK, "Streamed command succeeds");
+    EXPECT_TRUE(count.lines == 40000 && count.in_order, "Every line whole and in order, the last one too");
+    EXPECT_TRUE(kept < 4096, "stdout was not accumulated");
+
+    LineCount stop = {0, 1, 100};
+    opts.line_ctx = &stop;
+    res = run_cmd(L"/c \"for /L %i in (1,1,200000) do @echo line_%i_0123456789_0123456789 \"", &opts, &out);
+    restic_free_command_output(&out);
+    EXPECT_TRUE(res == RESTIC_ERR_JSON_PARSE && stop.lines == 100, "A consumer error stops the child at once");
+}
+
 /* ============================================================================================ */
 /* Live integration test against a real restic.exe and a self-built repository                  */
 /* ============================================================================================ */
+
+/*
+ * Lists `subpath` both with restic and from the whole-snapshot index and requires identical
+ * entries, then does the same for every subfolder. Returns the number of folders compared, or -1
+ * on the first difference.
+ */
+static int compare_index_with_restic(const WCHAR* restic_bin, const WCHAR* repo, const WCHAR* password,
+                                     const char* snap, const SnapshotIndex* index, const WCHAR* subpath) {
+    WIN32_FIND_DATAW *a = NULL, *b = NULL;
+    size_t na = 0, nb = 0;
+    WCHAR err[512];
+    ResticResult ra = restic_list_directory(restic_bin, repo, password, snap, subpath, NULL, &a, &na, err, _countof(err));
+    ResticResult rb = restic_list_index_directory(index, subpath, &b, &nb);
+    int folders = 1;
+    if (ra != RESTIC_OK || rb != RESTIC_OK || na != nb || (na && memcmp(a, b, na * sizeof(*a)) != 0)) {
+        printf("       differs: %ls (%d/%d, %u/%u entries)\n", subpath, (int)ra, (int)rb, (unsigned)na, (unsigned)nb);
+        folders = -1;
+    }
+    for (size_t i = 0; folders > 0 && i < na; ++i) {
+        if (!is_dir_entry(&a[i])) continue;
+        static WCHAR child[64][1024]; /* One per depth level: static, /analyze caps a frame at 16 KB */
+        static int depth = 0;
+        if (depth >= 64) break;
+        swprintf_s(child[depth], 1024, L"%ls\\%ls", subpath, a[i].cFileName);
+        depth++;
+        int sub = compare_index_with_restic(restic_bin, repo, password, snap, index, child[depth - 1]);
+        depth--;
+        folders = sub < 0 ? -1 : folders + sub;
+    }
+    free(a);
+    free(b);
+    return folders;
+}
 
 static void remove_tree(const WCHAR* dir) {
     WCHAR pattern[MAX_PATH];
@@ -833,6 +908,35 @@ static void test_live_restic_cli(void) {
     EXPECT_TRUE(e && file_size_of(e) == 5, "Snapshot 1 keeps the original size");
     free(items);
 
+    /* The whole snapshot read at once (restic ls without a path) lists every folder as restic does */
+    SnapshotIndex* index = snapshot_index_new(0);
+    SnapshotIndexStatus index_status = SNAPSHOT_INDEX_BAD_JSON;
+    res = restic_list_snapshot_index(restic_bin, repo, password, snap2, NULL, index, &index_status, err, _countof(err));
+    EXPECT_TRUE(res == RESTIC_OK && index_status == SNAPSHOT_INDEX_OK && snapshot_index_entry_count(index) > 300,
+                "Whole snapshot read into an index");
+    int compared = compare_index_with_restic(restic_bin, repo, password, snap2, index, L"\\");
+    EXPECT_TRUE(compared > 8, "Every folder of the snapshot lists identically from the index and from restic");
+    WIN32_FIND_DATAW* none = NULL;
+    size_t none_count = 0;
+    to_wfx_path(data, L"readme.txt", wfx, _countof(wfx));
+    EXPECT_TRUE(restic_list_index_directory(index, wfx, &none, &none_count) == RESTIC_ERR_PATH_NOT_FOUND &&
+                restic_list_index_directory(index, L"\\no\\such", &none, &none_count) == RESTIC_ERR_PATH_NOT_FOUND &&
+                none == NULL, "A file or a missing path is not a folder of the index either");
+    snapshot_index_free(index);
+
+    index = snapshot_index_new(4096);
+    res = restic_list_snapshot_index(restic_bin, repo, password, snap2, NULL, index, &index_status, err, _countof(err));
+    EXPECT_TRUE(res == RESTIC_ERR_OUT_OF_MEMORY && index_status == SNAPSHOT_INDEX_TOO_LARGE,
+                "An index over its memory limit stops restic and says so");
+    snapshot_index_free(index);
+    index = snapshot_index_new(0);
+    res = restic_list_snapshot_index(restic_bin, repo, L"wrong password", snap2, NULL, index, &index_status, err,
+                                     _countof(err));
+    EXPECT_TRUE(res == RESTIC_ERR_WRONG_PASSWORD, "Wrong password reported as for any other command");
+    EXPECT_TRUE(restic_list_snapshot_index(restic_bin, repo, password, "--help", NULL, index, &index_status, err,
+                                           _countof(err)) == RESTIC_ERR_INVALID_ARG, "Non-hex snapshot ID refused");
+    snapshot_index_free(index);
+
     /* Output larger than the initial 4 KB / typical buffers: 300 NDJSON lines */
     to_wfx_path(data, L"many", wfx, _countof(wfx));
     res = restic_list_directory(restic_bin, repo, password, snap2, wfx, NULL, &items, &count, err, _countof(err));
@@ -1089,6 +1193,7 @@ int main(void) {
     test_exec_environment();
     test_exec_limits_and_failures();
     test_exec_large_output_and_long_args();
+    test_exec_line_streaming();
     test_dump_with_fake_restic();
     test_live_restic_cli();
 

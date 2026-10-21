@@ -1,6 +1,7 @@
 #pragma once
 #include <windows.h>
 #include <stddef.h>
+#include "snapshot_index.h"
 #include "snapshot_tree.h"
 
 /**
@@ -37,12 +38,21 @@ typedef BOOL (*ResticCancelProc)(void* user_data);
 typedef BOOL (*ResticDumpProgressProc)(ULONGLONG bytes_written, void* user_data);
 
 /**
+ * Optional consumer of the child's stdout, called with each complete line (without its line
+ * break, not NUL-terminated) as soon as it arrives, and with the last line once the child has
+ * exited. Anything but RESTIC_OK stops the child and becomes the command's result.
+ */
+typedef ResticResult (*ResticLineProc)(const char* line, size_t len, void* user_data);
+
+/**
  * Optional execution controls. Pass NULL to use defaults (no timeout, not cancellable).
  */
 typedef struct {
     DWORD timeout_ms;            /* Maximum run time in milliseconds (0 = unlimited) */
     ResticCancelProc cancel_proc;/* Optional cancellation poll callback */
     void* cancel_ctx;            /* Opaque pointer forwarded to cancel_proc */
+    ResticLineProc line_proc;    /* Optional: stdout goes here line by line and is not kept */
+    void* line_ctx;              /* Opaque pointer forwarded to line_proc */
 } ResticExecOptions;
 
 /**
@@ -106,6 +116,18 @@ ResticResult restic_parse_ls_ndjson(
 );
 
 /**
+ * Lists folder `subpath_w` (a WFX subpath as for restic_list_directory) of a whole-snapshot index
+ * (snapshot_index.h) into directory entries exactly as restic_list_directory() would report them.
+ * RESTIC_ERR_PATH_NOT_FOUND when it is not a folder of the snapshot. Caller must free `*out_items`.
+ */
+ResticResult restic_list_index_directory(
+    const SnapshotIndex* index,
+    const WCHAR* subpath_w,
+    WIN32_FIND_DATAW** out_items,
+    size_t* out_count
+);
+
+/**
  * Runs `restic_exe args` as a hidden child process (CREATE_NO_WINDOW) with RESTIC_REPOSITORY and
  * RESTIC_PASSWORD injected into its environment. `restic_exe` must contain a path separator
  * (bare names are refused so the current directory is never searched). `args` is passed verbatim
@@ -154,6 +176,25 @@ ResticResult restic_list_directory(
     const ResticExecOptions* options,
     WIN32_FIND_DATAW** out_items,
     size_t* out_count,
+    WCHAR* out_error_msg,
+    size_t err_capacity
+);
+
+/**
+ * Lists a whole snapshot (`restic ls --json --no-lock <snapshot_id>`) into `index`, line by line as
+ * restic prints it, and finishes the index. `snapshot_id` must be hexadecimal. Fails with
+ * RESTIC_ERR_JSON_PARSE on unexpected output and RESTIC_ERR_OUT_OF_MEMORY when the index runs out
+ * of memory or over its limit (`*out_index_status` tells which). On failure `out_error_msg`
+ * (optional) receives the reason reported by Restic.
+ */
+ResticResult restic_list_snapshot_index(
+    const WCHAR* restic_exe,
+    const WCHAR* repo_target,
+    const WCHAR* password,
+    const char* snapshot_id,
+    const ResticExecOptions* options,
+    SnapshotIndex* index,
+    SnapshotIndexStatus* out_index_status,
     WCHAR* out_error_msg,
     size_t err_capacity
 );

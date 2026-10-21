@@ -1,10 +1,11 @@
 /*
- * Unit tests for the RFC 3339 parser (src/timestamp.c) and the restic-mount folder tree
- * (src/snapshot_tree.c).
+ * Unit tests for the RFC 3339 parser (src/timestamp.c), the restic-mount folder tree
+ * (src/snapshot_tree.c) and the index of a whole snapshot (src/snapshot_index.c).
  *
  * Portable C11 with no Win32 dependency, like the code under test: it builds with MSVC as part of
  * build.cmd and equally with any hosted C compiler, e.g. from src/:
- *   gcc -std=c11 -I. -fsanitize=address,undefined tests/test_snapshot_tree.c snapshot_tree.c timestamp.c json.c
+ *   gcc -std=c11 -I. -fsanitize=address,undefined tests/test_snapshot_tree.c snapshot_tree.c snapshot_index.c \
+ *       timestamp.c json.c
  */
 #if defined(_MSC_VER) && defined(_DEBUG) && !defined(__SANITIZE_ADDRESS__)
 #define _CRTDBG_MAP_ALLOC
@@ -14,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "snapshot_index.h"
 #include "snapshot_tree.h"
 #include "timestamp.h"
 
@@ -328,6 +330,145 @@ static void test_many_snapshots(void) {
     snapshot_tree_free(tree);
 }
 
+/* ------------------------------------------------------------------------------------------ */
+
+static SnapshotIndexStatus add(SnapshotIndex* x, const char* line) {
+    return snapshot_index_add_line(x, line, strlen(line));
+}
+
+/* Names of a folder's entries joined by '|', folders marked with a trailing '/' */
+static const char* index_names(const SnapshotIndex* x, const char* path) {
+    static char buf[2048];
+    buf[0] = '\0';
+    long long dir = snapshot_index_find_dir(x, path);
+    if (dir < 0) return "<none>";
+    for (size_t i = 0; i < snapshot_index_child_count(x, dir); ++i) {
+        SnapshotIndexEntry e = snapshot_index_child(x, dir, i);
+        if (i) append(buf, sizeof(buf), "|");
+        append(buf, sizeof(buf), e.name);
+        if (e.is_dir) append(buf, sizeof(buf), "/");
+    }
+    return buf;
+}
+
+#define NODE(path, name, type, extra) \
+    "{\"name\":\"" name "\",\"type\":\"" type "\",\"path\":\"" path "\"" extra ",\"message_type\":\"node\"}"
+
+/* restic's depth-first order: every folder is followed by its whole subtree */
+static void test_index_listing(void) {
+    SnapshotIndex* x = snapshot_index_new(0);
+    EXPECT_TRUE(x != NULL, "Created");
+    static const char* const lines[] = {
+        "{\"time\":\"2026-10-18T10:00:00Z\",\"id\":\"abcd\",\"message_type\":\"snapshot\"}\r\n",
+        "",
+        "   \r",
+        NODE("/home", "home", "dir", ",\"mtime\":\"2026-01-02T03:04:05+01:00\""),
+        NODE("/home/alice", "alice", "dir", ""),
+        NODE("/home/alice/a.txt", "a.txt", "file", ",\"size\":5,\"mtime\":\"2020-02-29T12:34:56Z\",\"atime\":\"bad\""),
+        NODE("/home/alice/big.bin", "big.bin", "file", ",\"size\":18446744073709551615"),
+        NODE("/home/alice/link", "link", "symlink", ",\"linktarget\":\"a.txt\""),
+        NODE("/home/alice/sub", "sub", "dir", ""),
+        NODE("/home/alice/sub/deep.txt", "deep.txt", "file", ",\"size\":1"),
+        NODE("/home/alice/z", "z", "dir", ""),
+        NODE("/home/bob", "bob", "dir", ""),
+        NODE("/home/bob/..\\\\..\\\\x", "..\\\\..\\\\x", "file", ""), /* JSON "..\\..\\x" */
+        NODE("/tmp", "tmp", "dir", ""),
+        NODE("/zz.txt", "zz.txt", "file", ",\"size\":0"),
+        "{\"message_type\":\"summary\",\"total_files\":5}",
+    };
+    for (size_t i = 0; i < sizeof(lines) / sizeof(lines[0]); ++i) {
+        EXPECT_TRUE(add(x, lines[i]) == SNAPSHOT_INDEX_OK, "Line added");
+    }
+    EXPECT_TRUE(snapshot_index_find_dir(x, "/") == -1, "Not usable before it is finished");
+    EXPECT_TRUE(snapshot_index_finish(x) == SNAPSHOT_INDEX_OK, "Finished");
+    EXPECT_TRUE(snapshot_index_entry_count(x) == 12, "Twelve entries");
+    EXPECT_TRUE(strcmp(index_names(x, "/"), "home/|tmp/|zz.txt") == 0, "Root");
+    EXPECT_TRUE(strcmp(index_names(x, "/home/alice"), "a.txt|big.bin|link|sub/|z/") == 0,
+                "Direct children only, in restic's order");
+    EXPECT_TRUE(strcmp(index_names(x, "/home/alice/sub"), "deep.txt") == 0, "Nested folder");
+    EXPECT_TRUE(strcmp(index_names(x, "/home/alice/z"), "") == 0, "Empty folder exists");
+    EXPECT_TRUE(strcmp(index_names(x, "/home/bob"), "..\\..\\x") == 0, "Names kept as restic reports them");
+    EXPECT_TRUE(snapshot_index_find_dir(x, "/home/alice/a.txt") == -1, "A file is not a folder");
+    EXPECT_TRUE(snapshot_index_find_dir(x, "/home/carol") == -1 && snapshot_index_find_dir(x, "/hom") == -1 &&
+                snapshot_index_find_dir(x, "/home/alice/") == -1 && snapshot_index_find_dir(x, "home") == -1 &&
+                snapshot_index_find_dir(x, "//home") == -1, "Missing or malformed paths");
+
+    long long alice = snapshot_index_find_dir(x, "/home/alice");
+    SnapshotIndexEntry a = snapshot_index_child(x, alice, 0);
+    EXPECT_TRUE(!a.is_dir && a.size == 5 && a.mtime == ticks_utc(2020, 2, 29, 12, 34, 56) &&
+                a.atime == SNAPSHOT_INDEX_NO_TIME && a.ctime == SNAPSHOT_INDEX_NO_TIME, "File fields, bad and missing times");
+    EXPECT_TRUE(snapshot_index_child(x, alice, 1).size == 18446744073709551615ULL, "64-bit size kept exactly");
+    EXPECT_TRUE(snapshot_index_child(x, snapshot_index_find_dir(x, "/"), 0).mtime == ticks_utc(2026, 1, 2, 2, 4, 5),
+                "Folder time in UTC");
+    EXPECT_TRUE(snapshot_index_child(x, alice, 99).name == NULL && snapshot_index_child_count(x, -1) == 0,
+                "Out of range");
+    EXPECT_TRUE(add(x, NODE("/late", "late", "file", "")) == SNAPSHOT_INDEX_BAD_JSON, "No lines after finishing");
+    snapshot_index_free(x);
+    snapshot_index_free(NULL);
+}
+
+static void test_index_errors(void) {
+    SnapshotIndex* x = snapshot_index_new(0);
+    EXPECT_TRUE(add(x, "not json") == SNAPSHOT_INDEX_BAD_JSON, "Malformed line");
+    EXPECT_TRUE(add(x, NODE("/a", "a", "file", "")) == SNAPSHOT_INDEX_BAD_JSON, "The error sticks");
+    EXPECT_TRUE(snapshot_index_finish(x) == SNAPSHOT_INDEX_BAD_JSON, "And finishing reports it");
+    snapshot_index_free(x);
+
+    static const char* const bad[] = {
+        "[1]", NODE("relative", "x", "file", ""), NODE("/", "x", "dir", ""), NODE("/a/", "a", "dir", ""),
+        "{\"message_type\":\"node\",\"name\":\"x\"}",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
+        x = snapshot_index_new(0);
+        EXPECT_TRUE(add(x, bad[i]) == SNAPSHOT_INDEX_BAD_JSON, "Unusable node refused");
+        snapshot_index_free(x);
+    }
+
+    /* A node whose folder restic never listed is skipped; so is one below a file */
+    x = snapshot_index_new(0);
+    EXPECT_TRUE(add(x, NODE("/a/b", "b", "file", "")) == SNAPSHOT_INDEX_OK &&
+                add(x, NODE("/f", "f", "file", "")) == SNAPSHOT_INDEX_OK &&
+                add(x, NODE("/f/x", "x", "file", "")) == SNAPSHOT_INDEX_OK &&
+                add(x, NODE("/d", "d", "dir", "")) == SNAPSHOT_INDEX_OK &&
+                add(x, NODE("/e/y", "y", "file", "")) == SNAPSHOT_INDEX_OK &&
+                add(x, NODE("/d/z", "z", "file", "")) == SNAPSHOT_INDEX_OK, "Orphans ignored");
+    EXPECT_TRUE(snapshot_index_finish(x) == SNAPSHOT_INDEX_OK && snapshot_index_entry_count(x) == 3 &&
+                strcmp(index_names(x, "/"), "f|d/") == 0 && strcmp(index_names(x, "/d"), "z") == 0,
+                "Only entries below listed folders, unsorted names still found");
+    snapshot_index_free(x);
+
+    /* The memory limit */
+    x = snapshot_index_new(16 * 1024);
+    SnapshotIndexStatus st = SNAPSHOT_INDEX_OK;
+    char line[256];
+    for (int i = 0; i < 10000 && st == SNAPSHOT_INDEX_OK; ++i) {
+        snprintf(line, sizeof(line), "{\"name\":\"f%05d\",\"type\":\"file\",\"path\":\"/f%05d\",\"message_type\":\"node\"}", i, i);
+        st = add(x, line);
+    }
+    EXPECT_TRUE(st == SNAPSHOT_INDEX_TOO_LARGE && snapshot_index_memory(x) <= 16 * 1024, "Growth stops at the limit");
+    EXPECT_TRUE(snapshot_index_finish(x) == SNAPSHOT_INDEX_TOO_LARGE, "And stays failed");
+    snapshot_index_free(x);
+}
+
+/* 100 000 entries in one folder: binary search finds every one of them */
+static void test_index_large_folder(void) {
+    SnapshotIndex* x = snapshot_index_new(0);
+    char line[256];
+    EXPECT_TRUE(add(x, NODE("/d", "d", "dir", "")) == SNAPSHOT_INDEX_OK, "Folder");
+    for (int i = 0; i < 100000; ++i) {
+        snprintf(line, sizeof(line), "{\"name\":\"%06d\",\"type\":\"dir\",\"path\":\"/d/%06d\",\"message_type\":\"node\"}", i, i);
+        if (add(x, line) != SNAPSHOT_INDEX_OK) break;
+    }
+    EXPECT_TRUE(snapshot_index_finish(x) == SNAPSHOT_INDEX_OK && snapshot_index_entry_count(x) == 100001, "Built");
+    int found = 1;
+    for (int i = 0; i < 100000; i += 7) {
+        snprintf(line, sizeof(line), "/d/%06d", i);
+        found &= snapshot_index_find_dir(x, line) > 0;
+    }
+    EXPECT_TRUE(found && snapshot_index_find_dir(x, "/d/100000") == -1, "Every folder found, a missing one not");
+    snapshot_index_free(x);
+}
+
 int main(void) {
 #if defined(_MSC_VER) && defined(_DEBUG) && !defined(__SANITIZE_ADDRESS__)
     _CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
@@ -341,6 +482,9 @@ int main(void) {
     test_sanitized_names();
     test_skipped_entries();
     test_many_snapshots();
+    test_index_listing();
+    test_index_errors();
+    test_index_large_folder();
     printf("[SNAPSHOT TREE] %d checks, %d failed\n", g_tests_run, g_tests_failed);
     return g_tests_failed == 0 ? 0 : 1;
 }

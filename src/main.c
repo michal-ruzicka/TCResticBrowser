@@ -456,11 +456,19 @@ static void release_password_session(BOOL process_exit) {
     ReleaseSRWLockExclusive(&g_SessionLock);
 }
 
-/* config_load() plus the settings the plugin applies globally (PasswordTimeoutSeconds) */
+/* config_load() plus the settings the plugin applies globally (PasswordTimeoutSeconds, SnapshotCacheMB) */
 static BOOL load_config(ResticConfig* cfg) {
     BOOL ok = config_load(cfg);
     apply_password_timeout(cfg->password_timeout_s, cfg->password_timeout_reset_on_use);
+    ULONGLONG bytes = (ULONGLONG)cfg->snapshot_cache_mb * 1024ull * 1024ull;
+    repo_cache_set_index_limit(bytes > SIZE_MAX / 2 ? SIZE_MAX / 2 : (size_t)bytes); /* 32-bit: capped */
     return ok;
+}
+
+/* RepoPasswordSource for the background listings: the cached password, never a prompt */
+static BOOL cached_password(const WCHAR* alias, WCHAR* out, size_t cap) {
+    ULONGLONG generation = 0;
+    return session_get(alias, out, cap, &generation);
 }
 
 /* The Network Neighborhood root name: [Settings] RootName, or CONFIG_DEFAULT_ROOT_NAME */
@@ -886,7 +894,7 @@ static ResticResult resolve_repo_path(const RepoCall* call, const WCHAR* rest, B
         const SnapshotTree* cached = repo_cache_lock_tree(call->repo->alias, call->repo->target, &age);
         if (cached) {
             ResticResult res = walk_tree(cached, rest, want_items, out);
-            repo_cache_unlock_tree();
+            repo_cache_unlock();
             if (res != RESTIC_OK || out->kind == REPO_PATH_SNAPSHOT ||
                 (out->kind == REPO_PATH_FOLDER && age < REPO_CACHE_TREE_TTL_MS)) {
                 return res;
@@ -912,6 +920,7 @@ typedef struct {
     const WCHAR* rest;
     WIN32_FIND_DATAW* items;
     size_t count;
+    char snapshot_id[SNAPSHOT_TREE_ID_CHARS + 1]; /* Set when the folder is inside a snapshot */
 } ListContext;
 
 static ResticResult list_operation(const RepoCall* call, void* ctx_ptr) {
@@ -924,10 +933,21 @@ static ResticResult list_operation(const RepoCall* call, void* ctx_ptr) {
             ctx->items = where.items;
             ctx->count = where.count;
             return RESTIC_OK;
-        case REPO_PATH_SNAPSHOT:
+        case REPO_PATH_SNAPSHOT: {
+            strcpy_s(ctx->snapshot_id, sizeof(ctx->snapshot_id), where.snapshot_id);
+            /* The whole snapshot read before: no restic at all */
+            const SnapshotIndex* index =
+                call->trusted ? repo_cache_lock_index(call->repo->alias, call->repo->target, where.snapshot_id) : NULL;
+            if (index) {
+                res = restic_list_index_directory(index, where.subpath, &ctx->items, &ctx->count);
+                repo_cache_unlock();
+                return res;
+            }
+            /* Until then one `restic ls` per folder, as before */
             return restic_list_directory(call->cfg->restic_path, call->repo->target, call->password,
                                          where.snapshot_id, where.subpath, call->exec, &ctx->items, &ctx->count,
                                          call->err, call->err_cap);
+        }
         default:
             return RESTIC_ERR_PATH_NOT_FOUND;
     }
@@ -949,10 +969,16 @@ static HANDLE execute_repo_query(
 
     WfxCancelContext cancel_ctx = {virtual_path, repo->alias};
     ResticExecOptions exec_opts = {WFX_RESTIC_TIMEOUT_MS, wfx_cancel_callback, &cancel_ctx};
-    ListContext ctx             = {parsed->rest, NULL, 0};
-    WCHAR err_msg[512]          = {0};
+    ListContext ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.rest           = parsed->rest;
+    WCHAR err_msg[512] = {0};
 
     ResticResult res = run_with_password(cfg, repo, &exec_opts, list_operation, &ctx, err_msg, _countof(err_msg));
+    if (ctx.snapshot_id[0] != '\0' && (res == RESTIC_OK || res == RESTIC_ERR_PATH_NOT_FOUND)) {
+        /* Inside a snapshot, wherever: read all of it in the background (the password is cached by now) */
+        repo_cache_load_index(repo->alias, repo->target, cfg->restic_path, ctx.snapshot_id, cached_password);
+    }
     if (res != RESTIC_OK) {
         free(ctx.items);
         handle_restic_failure(res, repo->alias, err_msg);

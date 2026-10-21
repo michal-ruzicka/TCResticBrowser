@@ -78,7 +78,7 @@ be recreated.
 
 ### Key Features
 
-- **Lazy On-Demand Directory Loading (WFX Architecture):** Unlike packer plugins (`.wcx`), which must enumerate every file in an archive upon opening, the plugin queries **only the single directory level you are currently viewing** (`restic ls --json --no-lock <snapshot> <path>`). Even repositories containing millions of files open responsively.
+- **Fast Browsing of Large and Remote Repositories:** Every `restic` run costs about a second before it prints anything (deriving the key from the password and loading the repository index), more for big or remote (e.g. S3) repositories. The plugin therefore reads each repository's snapshot list once and reuses it for a minute, as `restic mount` does, and when you enter a snapshot it reads the list of *all* its files and folders in the background with a single `restic ls`. Until that is done, each folder is listed on its own (`restic ls <snapshot> <path>`), as fast as before; afterwards every folder of the snapshot opens instantly and `restic` runs only to copy or view files. See [Snapshot Cache](#snapshot-cache).
 - **Native File & Folder Extraction (`F5`, `F3`, `Ctrl+Q`):**
   - Copy individual files or entire directory trees out of any snapshot using **`F5`** (preserving original modification timestamps and 64-bit file sizes).
   - Inspect files directly with Total Commander's **Lister (`F3`)** or **Quick View (`Ctrl+Q`)**.
@@ -265,6 +265,26 @@ timeout suits this best:
 PasswordTimeoutSeconds=300
 PasswordTimeoutResetOnUse=yes
 ```
+
+#### Snapshot Cache
+
+Measured with a local repository whose snapshot holds 200,000 files, a
+`restic ls` of one folder took 1.0 s (1.3 s through a REST server with a
+40 ms round trip), almost all of it spent before restic lists anything: a
+`restic ls` of a folder and all ten of its subfolders together took the
+same. Listing the whole snapshot took 8 s and printed 87 MB of JSON. So
+the plugin lists the whole snapshot once, in the background, the first
+time you enter it (directly or through a folder deep inside it), and
+answers every later folder of that snapshot from memory - about 100 bytes
+per file, 18 MB for those 200,000 files.
+
+`SnapshotCacheMB=` under `[Settings]` sets how much memory these lists may
+take (default 512 MiB, about five million files); the least recently used
+snapshots make room for new ones, a snapshot larger than the whole limit is
+simply not cached, and `0` turns the cache off. Nothing is written to disk.
+The lists are dropped together with the repository's password (timeout,
+`🗑 Forget N Passwords`, a wrong password), so what was read with a password
+is never shown without it.
 
 #### Root Folder Name
 
@@ -455,14 +475,6 @@ Planned for versions after 2.0.0, in no particular order:
 - **Verified rclone backends.** Check (and add tests) that `rclone:`
   repositories work through the plugin; restic handles them itself, so no
   problems are expected.
-- **Directory structure matching `restic mount`.** Browse snapshots by
-  `ids`, `hosts`, `tags` and `snapshots`, ideally exactly like the folder
-  tree `restic mount` presents.
-- **Faster browsing of large and remote repositories.** Every folder opened
-  starts a new `restic ls`, and restic reloads the repository index each
-  time, so big or remote (e.g. S3) repositories can take seconds per folder.
-  Measure first, then cache listings, preferably together with the new
-  directory structure above.
 - **`--password-file` and `--password-command` per repository.** An INI
   setting whose value the plugin passes to `restic` as the ordinary
   `--password-file` / `--password-command` argument, so such repositories

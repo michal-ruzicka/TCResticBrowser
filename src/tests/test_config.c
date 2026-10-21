@@ -992,6 +992,22 @@ static void test_password_timeout_setting(void) {
         EXPECT_TRUE(got == cases[i].expected, cases[i].what);
     }
 
+    /* [Settings] SnapshotCacheMB follows the same rules */
+    static const struct { const char* ini; DWORD expected; const char* what; } cache[] = {
+        {"[Settings]\r\nResticPath=restic.exe\r\n", CONFIG_DEFAULT_SNAPSHOT_CACHE_MB, "SnapshotCacheMB default 512"},
+        {"[Settings]\r\nSnapshotCacheMB=0\r\n", 0, "SnapshotCacheMB=0 turns it off"},
+        {"[settings]\r\n snapshotcachemb = 2048 \r\nSnapshotCacheMB=1\r\n", 2048, "SnapshotCacheMB first occurrence"},
+        {"[Settings]\r\nSnapshotCacheMB=1 GB\r\n", CONFIG_DEFAULT_SNAPSHOT_CACHE_MB, "SnapshotCacheMB not a number"},
+        {"[Logging]\r\nSnapshotCacheMB=7\r\n", CONFIG_DEFAULT_SNAPSHOT_CACHE_MB, "SnapshotCacheMB outside [Settings]"},
+    };
+    for (size_t i = 0; i < _countof(cache); ++i) {
+        write_text_file(ini_path, cache[i].ini);
+        config_load(&cfg);
+        DWORD got = cfg.snapshot_cache_mb;
+        config_free(&cfg);
+        EXPECT_TRUE(got == cache[i].expected, cache[i].what);
+    }
+
     DeleteFileW(ini_path);
     RemoveDirectoryW(plugin_dir);
 }

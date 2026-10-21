@@ -103,6 +103,7 @@ add_library(restic_core OBJECT
     json.c
     log.c
     repo_cache.c
+    snapshot_index.c
     snapshot_tree.c
     timestamp.c
 )
@@ -134,8 +135,8 @@ endif()
 
 # The JSON reader is portable C: its tests link nothing but the reader itself.
 add_executable(test_json tests/test_json.c json.c)
-# So are the timestamp parser and the restic mount folder tree built on it.
-add_executable(test_snapshot_tree tests/test_snapshot_tree.c snapshot_tree.c timestamp.c json.c)
+# So are the timestamp parser and the snapshot tree and index built on it.
+add_executable(test_snapshot_tree tests/test_snapshot_tree.c snapshot_tree.c snapshot_index.c timestamp.c json.c)
 
 add_executable(test_config tests/test_config.c $<TARGET_OBJECTS:restic_core>)
 target_link_libraries(test_config PRIVATE crypt32)

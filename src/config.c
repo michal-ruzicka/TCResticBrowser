@@ -557,8 +557,8 @@ static BOOL upsert_repo_entry(
     return TRUE;
 }
 
-/* Parses a plain decimal number of seconds (digits only, at most 4294967295) */
-static BOOL parse_seconds(const WCHAR* text, DWORD* out) {
+/* Parses a plain decimal number (digits only, at most 4294967295) */
+static BOOL parse_decimal(const WCHAR* text, DWORD* out) {
     if (!text || text[0] == L'\0') return FALSE;
     unsigned long long value = 0;
     for (const WCHAR* p = text; *p; ++p) {
@@ -581,6 +581,7 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
     memset(out_config, 0, sizeof(ResticConfig));
     wcsncpy_s(out_config->root_name, MAX_PATH, CONFIG_DEFAULT_ROOT_NAME, _TRUNCATE);
     out_config->password_timeout_s = CONFIG_DEFAULT_PASSWORD_TIMEOUT_S;
+    out_config->snapshot_cache_mb  = CONFIG_DEFAULT_SNAPSHOT_CACHE_MB;
 
     if (!ini_path || ini_path[0] == L'\0') {
         config_resolve_restic_path(NULL, out_config->restic_path, CONFIG_MAX_PATH, out_config->restic_path_error,
@@ -610,6 +611,7 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
     BOOL log_path_seen = FALSE;
     BOOL timeout_seen = FALSE;
     BOOL reset_seen = FALSE;
+    BOOL cache_seen = FALSE;
     IniReader reader = {ini_text, NULL};
     WCHAR *alias = NULL, *target = NULL;
     while (ini_next_entry(&reader, &alias, &target)) {
@@ -624,10 +626,17 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
         if (ini_in_section(&reader, L"Settings") && _wcsicmp(alias, L"PasswordTimeoutSeconds") == 0) {
             /* First occurrence wins; anything but a plain decimal number keeps the default */
             DWORD seconds = 0;
-            if (!timeout_seen && parse_seconds(target, &seconds)) {
+            if (!timeout_seen && parse_decimal(target, &seconds)) {
                 out_config->password_timeout_s = seconds;
             }
             timeout_seen = TRUE;
+            continue;
+        }
+        if (ini_in_section(&reader, L"Settings") && _wcsicmp(alias, L"SnapshotCacheMB") == 0) {
+            /* First occurrence wins; anything but a plain decimal number keeps the default */
+            DWORD mb = 0;
+            if (!cache_seen && parse_decimal(target, &mb)) out_config->snapshot_cache_mb = mb;
+            cache_seen = TRUE;
             continue;
         }
         if (ini_in_section(&reader, L"Settings") && _wcsicmp(alias, L"PasswordTimeoutResetOnUse") == 0) {

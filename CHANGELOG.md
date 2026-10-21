@@ -20,6 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   folders runs restic only once. The snapshot folders of version 2.0
   (`<time>_[<short id>]`) are gone, so history and hotlist entries that
   point into them need to be recreated.
+- **Folders of a snapshot open instantly once it has been read.** Every
+  `restic` run spends about a second (more on big or remote repositories)
+  before it lists anything, so entering a snapshot now also starts one
+  `restic ls` of the whole snapshot in the background; when it is done,
+  every folder of that snapshot is listed from memory without running
+  restic. Until then folders are listed one by one as before. The new
+  `SnapshotCacheMB=` setting limits the memory (default 512 MiB, about
+  five million files, `0` turns it off); the lists are dropped with the
+  repository's password.
 
 - **A `ResticPath=` that does not work is now an error.** When the
   configured `restic.exe` did not exist, the plugin silently fell back to

@@ -262,16 +262,18 @@ static BOOL is_safe_component(const WCHAR* name) {
     return FALSE; /* Empty, or nothing but dots and spaces */
 }
 
-/* Fills a WIN32_FIND_DATAW from one `restic ls --json` node object. Returns FALSE to skip it. */
-static BOOL node_to_find_data(const JsonValue* obj, WIN32_FIND_DATAW* fd) {
-    const char* name  = json_string(json_object_get(obj, "name"));
-    const char* type  = json_string(json_object_get(obj, "type"));
-    const char* mtime = json_string(json_object_get(obj, "mtime"));
-    const char* ctime = json_string(json_object_get(obj, "ctime"));
-    const char* atime = json_string(json_object_get(obj, "atime"));
+static void ticks_to_filetime(uint64_t ticks, FILETIME* ft) {
+    ft->dwLowDateTime  = (DWORD)(ticks & 0xFFFFFFFFULL);
+    ft->dwHighDateTime = (DWORD)(ticks >> 32);
+}
 
+/*
+ * Fills a WIN32_FIND_DATAW from one snapshot entry, whether it came from a `restic ls` of the
+ * folder or from the index of the whole snapshot. Returns FALSE to skip it.
+ */
+static BOOL entry_to_find_data(const SnapshotIndexEntry* e, WIN32_FIND_DATAW* fd) {
     memset(fd, 0, sizeof(*fd));
-    if (!name || MultiByteToWideChar(CP_UTF8, 0, name, -1, fd->cFileName, MAX_PATH) <= 0) {
+    if (!e->name || MultiByteToWideChar(CP_UTF8, 0, e->name, -1, fd->cFileName, MAX_PATH) <= 0) {
         return FALSE;
     }
     /* Empty names, "."/"..", and anything that is not a single path component: never report them */
@@ -279,31 +281,73 @@ static BOOL node_to_find_data(const JsonValue* obj, WIN32_FIND_DATAW* fd) {
         return FALSE;
     }
 
-    if (type && strcmp(type, "dir") == 0) {
+    if (e->is_dir) {
         fd->dwFileAttributes = FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY;
     } else { /* Files, symlinks, devices... (the WFX API wants links reported as plain files) */
         fd->dwFileAttributes = FILE_ATTRIBUTE_READONLY;
-        unsigned long long sz = 0;
-        if (json_u64(json_object_get(obj, "size"), &sz)) {
-            fd->nFileSizeLow  = (DWORD)(sz & 0xFFFFFFFFULL);
-            fd->nFileSizeHigh = (DWORD)(sz >> 32);
-        }
+        fd->nFileSizeLow     = (DWORD)(e->size & 0xFFFFFFFFULL);
+        fd->nFileSizeHigh    = (DWORD)(e->size >> 32);
     }
 
-    FILETIME ft;
     FS_SET_TIME_UNKNOWN(fd->ftLastWriteTime);
-    if (mtime && restic_parse_iso8601_time(mtime, &ft)) {
-        fd->ftLastWriteTime  = ft;
-        fd->ftCreationTime   = ft;
-        fd->ftLastAccessTime = ft;
+    if (e->mtime != SNAPSHOT_INDEX_NO_TIME) {
+        ticks_to_filetime(e->mtime, &fd->ftLastWriteTime);
+        fd->ftCreationTime   = fd->ftLastWriteTime;
+        fd->ftLastAccessTime = fd->ftLastWriteTime;
     }
-    if (ctime && restic_parse_iso8601_time(ctime, &ft)) {
-        fd->ftCreationTime = ft;
-    }
-    if (atime && restic_parse_iso8601_time(atime, &ft)) {
-        fd->ftLastAccessTime = ft;
-    }
+    if (e->ctime != SNAPSHOT_INDEX_NO_TIME) ticks_to_filetime(e->ctime, &fd->ftCreationTime);
+    if (e->atime != SNAPSHOT_INDEX_NO_TIME) ticks_to_filetime(e->atime, &fd->ftLastAccessTime);
     return TRUE;
+}
+
+static uint64_t node_time(const JsonValue* obj, const char* key) {
+    Timestamp t;
+    return timestamp_parse(json_string(json_object_get(obj, key)), &t) ? t.utc_ticks : SNAPSHOT_INDEX_NO_TIME;
+}
+
+/* Fills a WIN32_FIND_DATAW from one `restic ls --json` node object. Returns FALSE to skip it. */
+static BOOL node_to_find_data(const JsonValue* obj, WIN32_FIND_DATAW* fd) {
+    const char* type = json_string(json_object_get(obj, "type"));
+    SnapshotIndexEntry e;
+    memset(&e, 0, sizeof(e));
+    e.name   = json_string(json_object_get(obj, "name"));
+    e.is_dir = type && strcmp(type, "dir") == 0;
+    unsigned long long size = 0;
+    if (!e.is_dir && json_u64(json_object_get(obj, "size"), &size)) e.size = size;
+    e.mtime = node_time(obj, "mtime");
+    e.atime = node_time(obj, "atime");
+    e.ctime = node_time(obj, "ctime");
+    return entry_to_find_data(&e, fd);
+}
+
+ResticResult restic_list_index_directory(
+    const SnapshotIndex* index,
+    const WCHAR* subpath_w,
+    WIN32_FIND_DATAW** out_items,
+    size_t* out_count
+) {
+    if (!index || !out_items || !out_count) return RESTIC_ERR_INVALID_ARG;
+    *out_items = NULL;
+    *out_count = 0;
+    char filter_utf8[MAX_UTF8_PATH] = {0};
+    if (!restic_normalize_filter_path(subpath_w, filter_utf8, sizeof(filter_utf8))) {
+        return RESTIC_ERR_INVALID_ARG;
+    }
+    long long dir = snapshot_index_find_dir(index, filter_utf8);
+    if (dir < 0) return RESTIC_ERR_PATH_NOT_FOUND;
+
+    size_t n = snapshot_index_child_count(index, dir), capacity = 0;
+    for (size_t i = 0; i < n; ++i) {
+        SnapshotIndexEntry e = snapshot_index_child(index, dir, i);
+        WIN32_FIND_DATAW fd;
+        if (entry_to_find_data(&e, &fd) && !append_find_data(out_items, out_count, &capacity, &fd)) {
+            free(*out_items);
+            *out_items = NULL;
+            *out_count = 0;
+            return RESTIC_ERR_OUT_OF_MEMORY;
+        }
+    }
+    return RESTIC_OK;
 }
 
 ResticResult restic_parse_ls_ndjson(
@@ -601,7 +645,7 @@ static BOOL spawn_hidden(
     BOOL attrs_ready = FALSE;
     BOOL ok = FALSE;
 
-    /* A large stdout pipe lets restic write a big listing without waiting on every 4 KB */
+    /* A large stdout pipe lets restic write a whole snapshot listing without waiting on every 4 KB */
     if (!CreatePipe(&out_r, &out_w, &sa, STDOUT_PIPE_BYTES) || !CreatePipe(&err_r, &err_w, &sa, 0)) goto done;
     SetHandleInformation(out_r, HANDLE_FLAG_INHERIT, 0);
     SetHandleInformation(err_r, HANDLE_FLAG_INHERIT, 0);
@@ -658,6 +702,34 @@ done:
  * Reads both pipes until the child exits (no deadlock if one stream fills up), honouring the
  * optional timeout and cancellation callback. The child is NOT terminated here.
  */
+/*
+ * Passes the complete lines in `buf` to `proc` and drops them from the buffer (all of it when the
+ * child has exited, `last`), so a streamed stdout never grows beyond one line
+ */
+static ResticResult deliver_lines(ByteBuf* buf, ResticLineProc proc, void* ctx, BOOL last, size_t* delivered) {
+    size_t start = 0;
+    for (;;) {
+        const char* nl = (const char*)memchr(buf->data + start, '\n', buf->len - start);
+        if (!nl) break;
+        size_t len = (size_t)(nl - (buf->data + start));
+        ResticResult r = proc(buf->data + start, len, ctx);
+        if (r != RESTIC_OK) return r;
+        start += len + 1;
+    }
+    if (last && start < buf->len) {
+        ResticResult r = proc(buf->data + start, buf->len - start, ctx);
+        if (r != RESTIC_OK) return r;
+        start = buf->len;
+    }
+    if (start > 0) {
+        memmove(buf->data, buf->data + start, buf->len - start);
+        buf->len -= start;
+        buf->data[buf->len] = '\0';
+        *delivered += start;
+    }
+    return RESTIC_OK;
+}
+
 static ResticResult collect_output(
     HANDLE process,
     HANDLE out_pipe,
@@ -669,19 +741,26 @@ static ResticResult collect_output(
     ULONGLONG start = GetTickCount64();
     ULONGLONG last_poll = start;
     BOOL out_eof = FALSE, err_eof = FALSE;
+    ResticLineProc line_proc = options ? options->line_proc : NULL;
+    size_t delivered = 0; /* Bytes of stdout passed to line_proc and no longer kept */
 
     for (;;) {
-        size_t before = out->len + err->len;
+        size_t before = delivered + out->len + err->len;
         if (!drain_pipe(out_pipe, out, &out_eof) || !drain_pipe(err_pipe, err, &err_eof)) {
             return RESTIC_ERR_OUT_OF_MEMORY;
         }
+        BOOL got_data = delivered + out->len + err->len != before;
+        if (line_proc) {
+            ResticResult r = deliver_lines(out, line_proc, options->line_ctx, FALSE, &delivered);
+            if (r != RESTIC_OK) return r;
+        }
 
         /* Only sleep when idle; wake immediately when the child exits */
-        if (out->len + err->len == before && WaitForSingleObject(process, 20) == WAIT_OBJECT_0) {
+        if (!got_data && WaitForSingleObject(process, 20) == WAIT_OBJECT_0) {
             if (!drain_pipe(out_pipe, out, &out_eof) || !drain_pipe(err_pipe, err, &err_eof)) {
                 return RESTIC_ERR_OUT_OF_MEMORY;
             }
-            return RESTIC_OK;
+            return line_proc ? deliver_lines(out, line_proc, options->line_ctx, TRUE, &delivered) : RESTIC_OK;
         }
 
         if (options) {
@@ -988,6 +1067,61 @@ ResticResult restic_list_directory(
 
     res = restic_parse_ls_ndjson(cmd_out.output, filter_utf8, out_items, out_count);
     restic_free_command_output(&cmd_out);
+    return res;
+}
+
+typedef struct {
+    SnapshotIndex* index;
+    SnapshotIndexStatus status;
+} IndexFeed;
+
+static ResticResult feed_index_line(const char* line, size_t len, void* ctx) {
+    IndexFeed* feed = (IndexFeed*)ctx;
+    feed->status = snapshot_index_add_line(feed->index, line, len);
+    switch (feed->status) {
+        case SNAPSHOT_INDEX_OK: return RESTIC_OK;
+        case SNAPSHOT_INDEX_BAD_JSON: return RESTIC_ERR_JSON_PARSE;
+        default: return RESTIC_ERR_OUT_OF_MEMORY;
+    }
+}
+
+ResticResult restic_list_snapshot_index(
+    const WCHAR* restic_exe,
+    const WCHAR* repo_target,
+    const WCHAR* password,
+    const char* snapshot_id,
+    const ResticExecOptions* options,
+    SnapshotIndex* index,
+    SnapshotIndexStatus* out_index_status,
+    WCHAR* out_error_msg,
+    size_t err_capacity
+) {
+    if (out_error_msg && err_capacity > 0) out_error_msg[0] = L'\0';
+    if (out_index_status) *out_index_status = SNAPSHOT_INDEX_OK;
+    /* The snapshot ID goes on the command line unquoted: only hexadecimal IDs are accepted */
+    if (!restic_exe || !repo_target || !password || !index || !is_hex_string(snapshot_id) ||
+        strlen(snapshot_id) > 64) {
+        return RESTIC_ERR_INVALID_ARG;
+    }
+    WCHAR args[96];
+    swprintf_s(args, _countof(args), L"ls --json --no-lock %hs", snapshot_id);
+
+    IndexFeed feed = {index, SNAPSHOT_INDEX_OK};
+    ResticExecOptions opts;
+    memset(&opts, 0, sizeof(opts));
+    if (options) opts = *options;
+    opts.line_proc = feed_index_line;
+    opts.line_ctx  = &feed;
+
+    ResticCommandOutput cmd_out;
+    ResticResult res = run_and_check(restic_exe, repo_target, password, args, &opts, &cmd_out, out_error_msg,
+                                     err_capacity);
+    if (res == RESTIC_OK) {
+        restic_free_command_output(&cmd_out);
+        feed.status = snapshot_index_finish(index);
+        res = feed.status == SNAPSHOT_INDEX_OK ? RESTIC_OK : RESTIC_ERR_OUT_OF_MEMORY;
+    }
+    if (out_index_status) *out_index_status = feed.status;
     return res;
 }
 

@@ -852,6 +852,65 @@ static BOOL descend_to_fixture_data(
     return descend_to_fixture_data(p, next_path, depth + 1, out_data_path, out_cap);
 }
 
+/* Number of restic processes the plugin started so far, as its diagnostic log records them */
+static int count_restic_runs(const WCHAR* log_file) {
+    char* text = read_text_file(log_file);
+    int n = 0;
+    for (const char* p = text; p && (p = strstr(p, "restic run: ")) != NULL; p++) n++;
+    free(text);
+    return n;
+}
+
+/*
+ * Entering a snapshot starts reading all of it in the background; once that is done, its folders
+ * are listed without running restic, and forgetting the password drops what was read
+ */
+static void test_e2e_snapshot_cache(const Plugin* p, const WCHAR* dir, const WCHAR* data_path) {
+    static WCHAR log_file[MAX_PATH], sub[MAX_PATH * 2], names[4096], names_again[4096];
+    swprintf_s(log_file, _countof(log_file), L"%ls\\log dir\\e2e.log", dir);
+    BOOL read = FALSE;
+    for (int i = 0; i < 600 && !read; ++i) { /* Up to two minutes */
+        char* text = read_text_file(log_file);
+        read = text && strstr(text, "Listing of snapshot ") && strstr(text, " read: ");
+        free(text);
+        if (!read) Sleep(200);
+    }
+    EXPECT_TRUE(read, "The whole snapshot was read in the background after entering it");
+
+    int runs = count_restic_runs(log_file);
+    g_e2e_pwd_prompts = 0;
+    WIN32_FIND_DATAW fd;
+    EXPECT_TRUE(list_names(p, data_path, names, _countof(names)) && wcsstr(names, L"readme.txt") != NULL,
+                "Fixture folder listed from memory");
+    swprintf_s(sub, _countof(sub), L"%ls\\many", data_path);
+    EXPECT_TRUE(list_names(p, sub, names_again, _countof(names_again)) && wcsstr(names_again, L"|") != NULL,
+                "Its subfolder too");
+    swprintf_s(sub, _countof(sub), L"%ls\\empty_dir", data_path);
+    SetLastError(0);
+    EXPECT_TRUE(p->find_first_w(sub, &fd) == INVALID_HANDLE_VALUE && GetLastError() == ERROR_NO_MORE_FILES,
+                "An empty folder is still empty");
+    swprintf_s(sub, _countof(sub), L"%ls\\readme.txt", data_path);
+    SetLastError(0);
+    EXPECT_TRUE(p->find_first_w(sub, &fd) == INVALID_HANDLE_VALUE && GetLastError() == ERROR_PATH_NOT_FOUND,
+                "A file is not a folder");
+    swprintf_s(sub, _countof(sub), L"%ls\\no_such_folder", data_path);
+    SetLastError(0);
+    EXPECT_TRUE(p->find_first_w(sub, &fd) == INVALID_HANDLE_VALUE && GetLastError() == ERROR_PATH_NOT_FOUND,
+                "A missing folder is missing");
+    EXPECT_TRUE(count_restic_runs(log_file) == runs && g_e2e_pwd_prompts == 0, "None of it ran restic");
+
+    /* Forgetting the passwords drops the listing with them: the next visit asks and runs restic */
+    WCHAR forget[] = L"\\\U0001F5D1 Forget 1 Password", open_verb[] = L"open";
+    g_e2e_msg_dialogs = 0;
+    EXPECT_TRUE(p->execute_w(NULL, forget, open_verb) == FS_EXEC_SYMLINK, "Forget the passwords");
+    g_e2e_pwd_mode = 1;
+    EXPECT_TRUE(list_names(p, data_path, names_again, _countof(names_again)) && wcscmp(names, names_again) == 0,
+                "Listed again after a password prompt, with the same entries");
+    EXPECT_TRUE(g_e2e_pwd_prompts == 1 && count_restic_runs(log_file) > runs, "Asked for the password and ran restic");
+    g_e2e_pwd_prompts = 0;
+    g_e2e_msg_dialogs = 0;
+}
+
 /* Scenario C: full end-to-end navigation (Level 0 -> Level 1 -> Level 2+, password retry & session) */
 static void test_live_end_to_end_navigation(void) {
     if (GetFileAttributesW(L"tmp\\restic.exe") == INVALID_FILE_ATTRIBUTES ||
@@ -1006,6 +1065,7 @@ static void test_live_end_to_end_navigation(void) {
                 GetLastError() == ERROR_PATH_NOT_FOUND, "Missing snapshot path returns ERROR_PATH_NOT_FOUND");
     EXPECT_TRUE(g_e2e_pwd_prompts == 0 && g_e2e_msg_dialogs == 0,
                 "All navigations within MainRepo reused the cached RAM password with no popups");
+    test_e2e_snapshot_cache(&p, dir, data_path);
 
     /* 3. Repositories keep independent sessions: SecondRepo prompts once, MainRepo is NOT asked again */
     g_e2e_pwd_mode = 1;

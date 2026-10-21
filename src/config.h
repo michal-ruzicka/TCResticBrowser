@@ -8,6 +8,7 @@
 #define CONFIG_DEFAULT_RESTIC_EXE L"restic.exe"
 #define CONFIG_DEFAULT_ROOT_NAME  L"TCResticBrowser"  /* Network Neighborhood name without [Settings] RootName */
 #define CONFIG_DEFAULT_PASSWORD_TIMEOUT_S 1800u  /* [Settings] PasswordTimeoutSeconds default: 30 min */
+#define CONFIG_DEFAULT_SNAPSHOT_CACHE_MB  512u   /* [Settings] SnapshotCacheMB default */
 #define CONFIG_MAX_PATH           1024
 #define CONFIG_ERROR_CHARS        512   /* ResticConfig.restic_path_error */
 #define CONFIG_MAX_INI_BYTES      (4 * 1024 * 1024)  /* A larger TCResticBrowser.ini is not read */
@@ -31,6 +32,7 @@ typedef struct {
     WCHAR log_path[CONFIG_MAX_PATH];     /* [Logging] LogPath as written (unexpanded); empty = off */
     DWORD password_timeout_s;            /* [Settings] PasswordTimeoutSeconds; 0 = keep until exit */
     BOOL password_timeout_reset_on_use;  /* [Settings] PasswordTimeoutResetOnUse (default FALSE) */
+    DWORD snapshot_cache_mb;             /* [Settings] SnapshotCacheMB: whole-snapshot listings; 0 = off */
     ResticRepoEntry* repos;              /* Heap-allocated array of repository entries */
     size_t repo_count;                   /* Number of repositories in repos */
 } ResticConfig;
@@ -112,7 +114,9 @@ BOOL config_is_plain_file_name(const WCHAR* path);
  * CONFIG_DEFAULT_ROOT_NAME. password_timeout_s is [Settings] PasswordTimeoutSeconds (a decimal
  * number of seconds, 0 = no timeout), or CONFIG_DEFAULT_PASSWORD_TIMEOUT_S when it is missing or
  * not such a number. password_timeout_reset_on_use is [Settings] PasswordTimeoutResetOnUse
- * (yes/no, true/false, on/off, 1/0; FALSE when missing or anything else).
+ * (yes/no, true/false, on/off, 1/0; FALSE when missing or anything else). snapshot_cache_mb is
+ * [Settings] SnapshotCacheMB (a decimal number of MiB, 0 = no whole-snapshot listings), or
+ * CONFIG_DEFAULT_SNAPSHOT_CACHE_MB when it is missing or not such a number.
  * Caller must release allocated resources via config_free().
  */
 BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config);
