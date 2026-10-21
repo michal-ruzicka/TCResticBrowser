@@ -1018,6 +1018,17 @@ static void test_live_restic_cli(void) {
     if (two) repo_cache_unlock();
     EXPECT_TRUE(one == NULL && two != NULL, "Reading snapshot 2 dropped snapshot 1 to stay within the limit");
     repo_cache_clear();
+    /* Two repositories (here two aliases of the same one) are read side by side */
+    repo_cache_set_index_limit(64u * 1024u * 1024u);
+    repo_cache_load_index(L"Live", live_repo, restic_bin, snap1, fixture_password);
+    repo_cache_load_index(L"Live2", live_repo, restic_bin, snap2, fixture_password);
+    EXPECT_TRUE(repo_cache_wait_idle(120000), "Both background loads finish");
+    one = repo_cache_lock_index(L"Live", live_repo, snap1);
+    if (one) repo_cache_unlock();
+    two = repo_cache_lock_index(L"Live2", live_repo, snap2);
+    if (two) repo_cache_unlock();
+    EXPECT_TRUE(one != NULL && two != NULL, "Different repositories are read side by side");
+    repo_cache_clear();
     repo_cache_set_index_limit(512u * 1024u * 1024u);
 
     /* Output larger than the initial 4 KB / typical buffers: 300 NDJSON lines */

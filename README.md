@@ -370,9 +370,12 @@ per file, 18 MB for those 200,000 files.
 
 `SnapshotCacheMB=` under `[Settings]` sets how much memory these lists may
 take (default 512 MiB, about five million files; in 32-bit Total Commander
-at most 512 MiB). One snapshot is read at a time, and the least recently
-used snapshots make room while it is read; a snapshot larger than the
-whole limit is not cached at all - its folders are then simply listed one
+at most 512 MiB). One snapshot of a repository is read at a time - a
+second would only share its line and storage - and up to three different
+repositories side by side; the least recently used snapshots make room
+while they are read, and if the ones being read need more than the limit
+together, one of them is set aside and read later. A snapshot larger than
+the whole limit is not cached at all - its folders are then simply listed one
 by one, as before, and the logs say so - and `0` turns the cache off.
 Nothing is written to disk; unlike passwords, the lists (names, sizes and
 times of files) are not encrypted in memory. They are dropped together with

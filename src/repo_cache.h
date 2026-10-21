@@ -38,12 +38,14 @@ typedef BOOL (*RepoPasswordSource)(const WCHAR* alias, WCHAR* out, size_t cap);
 
 /*
  * Starts reading the complete listing of a snapshot in the background with the repository's
- * cached password, unless it is already there or being read, one snapshot at a time. The
+ * cached password, unless it is already there or being read: one snapshot of a repository at a
+ * time, up to three repositories side by side. The
  * worker gives up when the repository is forgotten (its password wiped) and its result is
  * discarded then. A snapshot whose listing needs more than the memory limit is not tried again;
  * one that failed otherwise not before a minute has passed. Listings of other snapshots make room
  * for a new one, least recently used first, while it is being read, so the listings kept and the
- * one being read stay within the limit together.
+ * ones being read stay within the limit together; when the ones being read alone need more, the
+ * one growing at that moment gives up and is tried again later.
  */
 void repo_cache_load_index(
     const WCHAR* alias,

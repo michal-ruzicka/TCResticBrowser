@@ -21,7 +21,9 @@
 #include <stdarg.h>
 #include <stdio.h>
 
-#define MAX_CONCURRENT_LOADS 1 /* With the listings kept, a second load could double the memory in use */
+/* Snapshots read at the same time: one per repository (a second one would only share its line and
+   storage), different repositories side by side, all within SnapshotCacheMB together */
+#define MAX_CONCURRENT_LOADS 3
 #define PROGRESS_REPORT_MS (5u * 1000u) /* How often a running snapshot listing reports progress */
 /* A background restic that hangs (a stalled share or server) is given up after this long: a
    snapshot listing when no new entry arrived for so long, a snapshot list re-read in total */
@@ -90,6 +92,7 @@ static ULONGLONG   g_ClearedAt       = 0;
 static ForgetMark* g_ForgottenAt     = NULL;
 static size_t     g_IndexLimit      = (size_t)CONFIG_DEFAULT_SNAPSHOT_CACHE_MB * 1024u * 1024u;
 static size_t     g_IndexBytes      = 0; /* Memory of all ready listings */
+static size_t     g_LoadingBytes    = 0; /* Memory of the listings being read, as their workers last saw it */
 static volatile LONG g_LoadsRunning = 0; /* Only through Interlocked*: workers change it without the lock */
 
 /* Interlocked reads, so /analyze (C28112) sees every access to these variables go the same way */
@@ -240,20 +243,31 @@ typedef struct {
     ULONGLONG started, reported;
     size_t entries;              /* Entries at the last progress (inactivity timeout) */
     ULONGLONG progressed;
+    size_t accounted;            /* This load's share of g_LoadingBytes */
+    BOOL crowded;                /* Given up: the loads running side by side need more than the limit */
 } LoadCancel;
 
 static BOOL load_cancelled(void* ctx) {
     LoadCancel* c = (LoadCancel*)ctx;
-    size_t growing = c->index ? snapshot_index_memory(c->index) : 0;
-    AcquireSRWLockShared(&g_CacheLock);
-    BOOL gone = !generation_valid_locked(c->alias, c->generation);
-    BOOL full = growing && g_IndexBytes + growing > g_IndexLimit;
-    ReleaseSRWLockShared(&g_CacheLock);
-    if (!gone && full) {
-        /* The listings kept and the one being read stay within SnapshotCacheMB together */
+    BOOL gone;
+    if (c->index) {
+        /* The listings kept and the ones being read stay within SnapshotCacheMB together: kept ones
+           make room, least recently used first; if the loads alone are too much, this one gives up */
+        size_t growing = snapshot_index_memory(c->index);
         AcquireSRWLockExclusive(&g_CacheLock);
-        make_room_locked(growing, NULL);
+        gone = !generation_valid_locked(c->alias, c->generation);
+        g_LoadingBytes += growing - c->accounted;
+        c->accounted = growing;
+        if (!gone && g_IndexBytes + g_LoadingBytes > g_IndexLimit) {
+            make_room_locked(g_LoadingBytes, NULL);
+            if (g_LoadingBytes > g_IndexLimit && g_LoadingBytes > growing) c->crowded = TRUE;
+        }
         ReleaseSRWLockExclusive(&g_CacheLock);
+        if (c->crowded) return TRUE;
+    } else {
+        AcquireSRWLockShared(&g_CacheLock);
+        gone = !generation_valid_locked(c->alias, c->generation);
+        ReleaseSRWLockShared(&g_CacheLock);
     }
     ULONGLONG now = GetTickCount64();
     if (c->index) {
@@ -342,15 +356,20 @@ static VOID CALLBACK load_index_worker(PTP_CALLBACK_INSTANCE instance, PVOID con
     size_t limit = g_IndexLimit;
     ReleaseSRWLockShared(&g_CacheLock);
 
+    BOOL crowded = FALSE;
     if (job->password_source(job->alias, password, _countof(password)) &&
         (index = snapshot_index_new(limit)) != NULL) {
-        LoadCancel cancel = {job->generation, job->alias, job, index, started, started, 0, started};
+        LoadCancel cancel = {job->generation, job->alias, job, index, started, started, 0, started, 0, FALSE};
         ResticExecOptions opts;
         memset(&opts, 0, sizeof(opts));
         opts.cancel_proc = load_cancelled;
         opts.cancel_ctx  = &cancel;
         res = restic_list_snapshot_index(job->restic_exe, job->target, password, job->snapshot_id, &opts, index,
                                          &index_status, err, _countof(err));
+        AcquireSRWLockExclusive(&g_CacheLock);
+        g_LoadingBytes -= cancel.accounted; /* From now on counted as kept, or not at all */
+        ReleaseSRWLockExclusive(&g_CacheLock);
+        crowded = cancel.crowded;
         if (res == RESTIC_OK) {
             state = INDEX_READY;
         } else if (index_status == SNAPSHOT_INDEX_TOO_LARGE) {
@@ -384,6 +403,13 @@ static VOID CALLBACK load_index_worker(PTP_CALLBACK_INSTANCE instance, PVOID con
                       job->snapshot_id, job->alias);
             break;
         default:
+            if (crowded) {
+                log_write(L"Listing of snapshot %hs of '%ls' set aside: the snapshots read at the same time need the "
+                          L"memory", job->snapshot_id, job->alias);
+                report(job->alias, L"Snapshot %.8hs set aside: the snapshots read at the same time need the memory "
+                                   L"SnapshotCacheMB allows; it is read again later", job->snapshot_id);
+                break;
+            }
             log_write(L"Listing of snapshot %hs of '%ls' not kept: %ls", job->snapshot_id, job->alias,
                       err[0] ? err : L"restic failed, was cancelled or had no password");
             report(job->alias, L"Snapshot %.8hs not read: %ls", job->snapshot_id,
@@ -414,7 +440,11 @@ void repo_cache_load_index(
     RepoEntry* r = g_IndexLimit > 0 ? get_repo_locked(alias, target) : NULL;
     IndexEntry* e = find_index_locked(r, snapshot_id);
     ULONGLONG now = GetTickCount64();
-    if (r && loads_running() < MAX_CONCURRENT_LOADS &&
+    BOOL repo_busy = FALSE; /* One snapshot of a repository at a time */
+    for (const IndexEntry* other = r ? r->indexes : NULL; other; other = other->next) {
+        if (other->state == INDEX_LOADING) repo_busy = TRUE;
+    }
+    if (r && !repo_busy && loads_running() < MAX_CONCURRENT_LOADS &&
         (!e || (e->state == INDEX_FAILED && now - e->failed_at >= LOAD_RETRY_MS))) {
         if (!e && (e = (IndexEntry*)calloc(1, sizeof(IndexEntry))) != NULL) {
             strcpy_s(e->snapshot_id, sizeof(e->snapshot_id), snapshot_id);
@@ -479,7 +509,7 @@ static VOID CALLBACK refresh_tree_worker(PTP_CALLBACK_INSTANCE instance, PVOID c
     ULONGLONG started = GetTickCount64();
 
     if (job->password_source(job->alias, password, _countof(password))) {
-        LoadCancel cancel = {job->generation, job->alias, NULL, NULL, started, started, 0, started};
+        LoadCancel cancel = {job->generation, job->alias, NULL, NULL, started, started, 0, started, 0, FALSE};
         ResticExecOptions opts;
         memset(&opts, 0, sizeof(opts));
         opts.timeout_ms  = BACKGROUND_TIMEOUT_MS;
