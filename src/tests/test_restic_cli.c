@@ -561,6 +561,54 @@ static void test_exec_limits_and_failures(void) {
     res = restic_exec_command(L"C:\\no\\such\\dir\\restic.exe", L"r", L"p", L"version", NULL, &out);
     EXPECT_TRUE(res == RESTIC_ERR_SPAWN_FAILED, "Missing executable");
     EXPECT_TRUE(out.output == NULL, "No buffers allocated on spawn failure");
+    EXPECT_TRUE(wcsstr(out.error_message, L"Cannot start C:\\no\\such\\dir\\restic.exe") != NULL &&
+                wcsstr(out.error_message, L"(Windows error ") != NULL,
+                "A spawn failure names the binary and the Windows error");
+
+    /*
+     * Files that exist but are no Windows program (text, a DOS "MZ" stub without "PE\0\0") are
+     * refused before CreateProcessW: on 64-bit Windows it would show the modal "Unsupported 16-Bit
+     * Application" dialog and stop the test run until someone clicks it
+     */
+    static const struct {
+        const char* bytes;
+        DWORD size;
+    } not_programs[] = {
+        {"not a program", 13},
+        {"MZ" "\x90\0\x03\0\0\0\x04\0\0\0\xff\xff\0\0\xb8\0\0\0\0\0\0\0\x40\0\0\0\0\0\0\0"
+         "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x40\0\0\0" "NE\0\0", 68},
+    };
+    WCHAR not_exe[MAX_PATH], dest[MAX_PATH], err_text[512];
+    GetTempPathW(MAX_PATH, not_exe);
+    wcscat_s(not_exe, MAX_PATH, L"restic_test_not_a_program.exe");
+    swprintf_s(dest, MAX_PATH, L"%ls.out", not_exe);
+    for (size_t i = 0; i < _countof(not_programs); ++i) {
+        HANDLE h = CreateFileW(not_exe, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        DWORD written = 0;
+        EXPECT_TRUE(h != INVALID_HANDLE_VALUE &&
+                    WriteFile(h, not_programs[i].bytes, not_programs[i].size, &written, NULL),
+                    "Create a fake restic.exe");
+        CloseHandle(h);
+        res = restic_exec_command(not_exe, L"r", L"p", L"version", NULL, &out);
+        EXPECT_TRUE(res == RESTIC_ERR_SPAWN_FAILED && wcsstr(out.error_message, not_exe) != NULL &&
+                    wcsstr(out.error_message, L"not a Windows program") != NULL,
+                    "A file that is no Windows program is refused with its path");
+        DeleteFileW(dest);
+        res = restic_dump_file(not_exe, L"r", L"p", "deadbeef", L"/f.txt", dest, FALSE, NULL, 0, NULL, NULL,
+                               err_text, _countof(err_text));
+        EXPECT_TRUE(res == RESTIC_ERR_SPAWN_FAILED && wcsstr(err_text, L"not a Windows program") != NULL &&
+                    GetFileAttributesW(dest) == INVALID_FILE_ATTRIBUTES,
+                    "restic_dump_file refuses it too and writes nothing");
+    }
+    DeleteFileW(not_exe);
+
+    /* A folder named like the binary passes the check and fails in CreateProcessW, with the reason */
+    CreateDirectoryW(not_exe, NULL);
+    res = restic_exec_command(not_exe, L"r", L"p", L"version", NULL, &out);
+    EXPECT_TRUE(res == RESTIC_ERR_SPAWN_FAILED && wcsstr(out.error_message, not_exe) != NULL &&
+                wcsstr(out.error_message, L"(Windows error ") != NULL && wcsstr(out.error_message, L"%1") == NULL,
+                "A spawn failure names the binary and the Windows reason, with inserts filled in");
+    RemoveDirectoryW(not_exe);
     res = restic_exec_command(L"restic.exe", L"r", L"p", L"version", NULL, &out);
     EXPECT_TRUE(res == RESTIC_ERR_SPAWN_FAILED, "Bare executable names are refused (no cwd search)");
     res = restic_exec_command(L"", L"r", L"p", L"version", NULL, &out);
@@ -1019,45 +1067,28 @@ static void test_live_restic_cli(void) {
 }
 
 /*
- * restic_dump_file against a fake "restic" batch file: deterministic coverage of exit codes, stderr
- * classification, partial output followed by failure, environment injection and the INACTIVITY
- * timeout, none of which can be provoked reliably with the real binary.
- * The scenario is selected by the 4th command-line argument (the snapshot path).
+ * restic_dump_file against fake_restic.exe (src/tests/fake_restic.c, built next to this test):
+ * deterministic coverage of exit codes, stderr classification, partial output followed by failure,
+ * environment injection and the INACTIVITY timeout, none of which can be provoked reliably with the
+ * real binary. The scenario is selected by the last command-line argument (the snapshot path).
  */
 static void test_dump_with_fake_restic(void) {
-    WCHAR dir[MAX_PATH], bat[MAX_PATH], dest[MAX_PATH];
+    WCHAR dir[MAX_PATH], fake[MAX_PATH], dest[MAX_PATH];
+    DWORD len = GetModuleFileNameW(NULL, fake, MAX_PATH);
+    WCHAR* slash = (len > 0 && len < MAX_PATH) ? wcsrchr(fake, L'\\') : NULL;
+    EXPECT_TRUE(slash != NULL, "Locate the test's own folder");
+    wcscpy_s(slash + 1, MAX_PATH - (size_t)(slash + 1 - fake), L"fake_restic.exe");
+    EXPECT_TRUE(GetFileAttributesW(fake) != INVALID_FILE_ATTRIBUTES, "fake_restic.exe is built next to the test");
     GetTempPathW(MAX_PATH, dir);
     swprintf_s(dir + wcslen(dir), MAX_PATH - wcslen(dir), L"restic_fake_%lu", GetCurrentProcessId());
     CreateDirectoryW(dir, NULL);
-    swprintf_s(bat, MAX_PATH, L"%ls\\fake_restic.bat", dir);
     swprintf_s(dest, MAX_PATH, L"%ls\\out.bin", dir);
-
-    const char* script =
-        "@echo off\r\n"
-        "if \"%~4\"==\"/ok\"      (<nul set /p \"=hello\" & exit /b 0)\r\n"
-        "if \"%~4\"==\"/env\"     (<nul set /p \"=%RESTIC_REPOSITORY%|%RESTIC_PASSWORD%\" & exit /b 0)\r\n"
-        "if \"%~4\"==\"/empty\"   exit /b 0\r\n"
-        "if \"%~4\"==\"/partial\" (<nul set /p \"=partial-data\" & echo Fatal: boom 1>&2 & exit /b 1)\r\n"
-        "if \"%~4\"==\"/missing\" (echo Fatal: cannot dump file: path not found in snapshot 1>&2 & exit /b 1)\r\n"
-        "if \"%~4\"==\"/silent\"  exit /b 1\r\n"
-        "if \"%~4\"==\"/norepo\"  (echo Fatal: repository does not exist 1>&2 & exit /b 10)\r\n"
-        "if \"%~4\"==\"/locked\"  exit /b 11\r\n"
-        "if \"%~4\"==\"/badpw\"   exit /b 12\r\n"
-        "if \"%~4\"==\"/hang\"    (ping -n 8 127.0.0.1 >nul & exit /b 0)\r\n"
-        "if \"%~4\"==\"/slow\"    (<nul set /p \"=a\" & ping -n 2 127.0.0.1 >nul & <nul set /p \"=b\" & ping -n 2 127.0.0.1 >nul & <nul set /p \"=c\" & ping -n 2 127.0.0.1 >nul & exit /b 0)\r\n"
-        "exit /b 99\r\n";
-    HANDLE hb = CreateFileW(bat, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    EXPECT_TRUE(hb != INVALID_HANDLE_VALUE, "Create fake restic batch file");
-    DWORD w = 0;
-    BOOL wrote = WriteFile(hb, script, (DWORD)strlen(script), &w, NULL);
-    CloseHandle(hb);
-    EXPECT_TRUE(wrote, "Write fake restic batch file");
 
     WCHAR err[512];
     ResticResult res;
     DeleteFileW(dest);
 #define FAKE_DUMP(path, overwrite, timeout) \
-    restic_dump_file(bat, L"repo-url", L"s3cret", "abcd1234", path, dest, overwrite, NULL, timeout, NULL, NULL, err, _countof(err))
+    restic_dump_file(fake, L"repo-url", L"s3cret", "abcd1234", path, dest, overwrite, NULL, timeout, NULL, NULL, err, _countof(err))
 
     res = FAKE_DUMP(L"\\ok", FALSE, 0);
     EXPECT_TRUE(res == RESTIC_OK && file_equals(dest, "hello"), "Fake restic: stdout bytes are stored verbatim");
@@ -1111,11 +1142,12 @@ static void test_dump_with_fake_restic(void) {
 #undef FAKE_DUMP
 
     DeleteFileW(dest);
-    DeleteFileW(bat);
     RemoveDirectoryW(dir);
 }
 
 int main(void) {
+    /* No modal system dialog (crash, missing disk, failed start) may stop an unattended CI run */
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
 #if defined(_DEBUG) && !defined(__SANITIZE_ADDRESS__)
     _CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
     _CrtSetReportMode(_CRT_WARN, _CRTDBG_MODE_FILE);

@@ -137,6 +137,9 @@ target_link_libraries(test_config PRIVATE crypt32)
 
 add_executable(test_restic_cli tests/test_restic_cli.c $<TARGET_OBJECTS:restic_core>)
 target_link_libraries(test_restic_cli PRIVATE shell32 crypt32)  # CommandLineToArgvW, CryptProtectMemory
+# Stand-in for restic.exe, started by test_restic_cli from its own folder
+add_executable(fake_restic tests/fake_restic.c)
+add_dependencies(test_restic_cli fake_restic)
 
 # Black-box smoke test: loads the plugin like Total Commander does and links
 # no plugin code.

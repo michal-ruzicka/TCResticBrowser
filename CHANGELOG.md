@@ -19,6 +19,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ignored before. A bare name without an extension is now also found in the
   plugin folder (`ResticPath=restic-custom` -> `restic-custom.exe`), not
   only in `PATH`.
+- **A `restic.exe` that cannot be started is named in the error.** Instead
+  of "Failed to execute restic.exe.", the message gives the path of the
+  binary and the reason Windows reported. A file that is not a Windows
+  program at all (a truncated download, an HTML page saved as
+  `restic.exe`) is refused before it is started, instead of Windows
+  stopping Total Commander with its "Unsupported 16-Bit Application"
+  dialog.
+
+### Security
+
+- **`ResticPath=` can no longer name a batch file.** Windows runs `.bat`
+  and `.cmd` files through `cmd.exe`, which does not honour the quoting the
+  plugin applies to file names taken from a snapshot, so a crafted file
+  name in a backup could have run commands. Only Windows programs are
+  started now.
 
 ## [v2.0.0] – 2026-10-21
 

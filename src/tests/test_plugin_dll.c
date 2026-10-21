@@ -1359,6 +1359,8 @@ static BOOL path_next_to_exe(const WCHAR* name, WCHAR* out, size_t cap) {
 }
 
 int main(void) {
+    /* No modal system dialog (crash, missing disk, failed start) may stop an unattended CI run */
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
     printf("Running Restic WFX plugin DLL smoke tests...\n");
     if (!path_next_to_exe(L"" RESTIC_WFX_FILE_NAME, g_plugin_dll, MAX_PATH) ||
         !path_next_to_exe(L"pluginst.inf", g_pluginst_inf, MAX_PATH)) {

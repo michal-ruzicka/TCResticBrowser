@@ -1022,6 +1022,68 @@ static BOOL find_json_message(const char* text, WCHAR* dst, size_t cap) {
     return FALSE;
 }
 
+/*
+ * Says which binary could not be started and why ("Cannot start C:\x\restic.exe: The specified
+ * executable is not a valid application for this OS platform. (Windows error 193)"), so a configured
+ * binary that exists but does not run is reported as such; the reason is in the system language
+ */
+static void describe_spawn_failure(const WCHAR* restic_exe, DWORD error, WCHAR* dst, size_t cap) {
+    if (!dst || cap == 0) return;
+    WCHAR reason[256] = {0};
+    /* Some texts name the file as %1 ("%1 is not a valid Win32 application."): fill in the path */
+    DWORD_PTR inserts[9];
+    for (size_t i = 0; i < _countof(inserts); ++i) inserts[i] = (DWORD_PTR)restic_exe;
+    DWORD n = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_ARGUMENT_ARRAY, NULL, error, 0, reason,
+                             _countof(reason), (va_list*)inserts);
+    while (n > 0 && (reason[n - 1] == L'\r' || reason[n - 1] == L'\n' || reason[n - 1] == L' ')) {
+        reason[--n] = L'\0';
+    }
+    if (n > 0) {
+        _snwprintf_s(dst, cap, _TRUNCATE, L"Cannot start %ls: %ls (Windows error %lu)", restic_exe, reason, error);
+    } else {
+        _snwprintf_s(dst, cap, _TRUNCATE, L"Cannot start %ls (Windows error %lu).", restic_exe, error);
+    }
+    log_write(L"  %ls", dst);
+}
+
+/*
+ * TRUE when restic_exe may be handed to CreateProcessW; otherwise `err` says why. A path that is
+ * not absolute would make CreateProcess search the current directory. A file without a PE header
+ * (the "MZ" stub pointing at "PE\0\0") is not a Windows program: 64-bit Windows would take it for a
+ * 16-bit DOS program and show its modal "Unsupported 16-Bit Application" dialog, which stops the
+ * calling thread - Total Commander's, or a CI test run - until someone clicks it. A truncated
+ * download or an HTML page saved as restic.exe looks like that. A file that cannot be opened is
+ * left to CreateProcessW, which reports why.
+ */
+static BOOL restic_exe_startable(const WCHAR* restic_exe, WCHAR* err, size_t err_capacity) {
+    if (!config_is_absolute_path(restic_exe)) {
+        describe_spawn_failure(restic_exe, ERROR_BAD_PATHNAME, err, err_capacity);
+        return FALSE;
+    }
+    HANDLE h = CreateFileW(restic_exe, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return TRUE;
+    BYTE dos[64];
+    BYTE signature[4];
+    DWORD got = 0;
+    BOOL is_pe = FALSE;
+    if (ReadFile(h, dos, sizeof(dos), &got, NULL) && got == sizeof(dos) && dos[0] == 'M' && dos[1] == 'Z') {
+        LONG pe_offset = 0;
+        memcpy(&pe_offset, dos + 0x3C, sizeof(pe_offset));
+        LARGE_INTEGER at;
+        at.QuadPart = pe_offset;
+        is_pe = pe_offset > 0 && SetFilePointerEx(h, at, NULL, FILE_BEGIN) &&
+                ReadFile(h, signature, sizeof(signature), &got, NULL) && got == sizeof(signature) &&
+                memcmp(signature, "PE\0\0", sizeof(signature)) == 0;
+    }
+    CloseHandle(h);
+    if (!is_pe && err && err_capacity > 0) {
+        _snwprintf_s(err, err_capacity, _TRUNCATE, L"Cannot start %ls: it is not a Windows program.", restic_exe);
+        log_write(L"  %ls", err);
+    }
+    return is_pe;
+}
+
 /* Builds a human-readable failure reason from Restic's streams (JSON message preferred) */
 static void build_error_message(const ByteBuf* out, const ByteBuf* err, WCHAR* dst, size_t cap) {
     if (find_json_message(err->data, dst, cap) || find_json_message(out->data, dst, cap)) return;
@@ -1044,8 +1106,8 @@ ResticResult restic_exec_command(
     }
     memset(out_result, 0, sizeof(ResticCommandOutput));
 
-    /* A bare or relative name would make CreateProcess search the current directory: refuse it */
-    if (!config_is_absolute_path(restic_exe)) {
+    /* Neither a relative name (current directory search) nor a file that is no Windows program */
+    if (!restic_exe_startable(restic_exe, out_result->error_message, _countof(out_result->error_message))) {
         return RESTIC_ERR_SPAWN_FAILED;
     }
 
@@ -1078,7 +1140,8 @@ ResticResult restic_exec_command(
     free(env_block);
     free(cmd_line);
     if (!spawned) {
-        log_write(L"  could not start restic.exe (Windows error %lu)", spawn_error);
+        describe_spawn_failure(restic_exe, spawn_error, out_result->error_message,
+                               _countof(out_result->error_message));
         return RESTIC_ERR_SPAWN_FAILED;
     }
     CloseHandle(pi.hThread);
@@ -1401,7 +1464,7 @@ ResticResult restic_dump_file(
         strlen(snapshot_id) > 64) {
         return RESTIC_ERR_INVALID_ARG;
     }
-    if (!config_is_absolute_path(restic_exe)) {
+    if (!restic_exe_startable(restic_exe, out_error_msg, err_capacity)) {
         return RESTIC_ERR_SPAWN_FAILED;
     }
 
@@ -1470,7 +1533,7 @@ ResticResult restic_dump_file(
     free(env_block);
     free(cmd_line);
     if (!spawned) {
-        log_write(L"  could not start restic.exe (Windows error %lu)", spawn_error);
+        describe_spawn_failure(restic_exe, spawn_error, out_error_msg, err_capacity);
         free(st.part_path);
         free(st.chunk);
         return RESTIC_ERR_SPAWN_FAILED;
