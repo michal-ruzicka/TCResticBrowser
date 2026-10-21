@@ -23,6 +23,9 @@
 
 #define MAX_CONCURRENT_LOADS 1 /* With the listings kept, a second load could double the memory in use */
 #define PROGRESS_REPORT_MS (5u * 1000u) /* How often a running snapshot listing reports progress */
+/* A background restic that hangs (a stalled share or server) is given up after this long: a
+   snapshot listing when no new entry arrived for so long, a snapshot list re-read in total */
+#define BACKGROUND_TIMEOUT_MS (30u * 60u * 1000u)
 #define LOAD_RETRY_MS (60u * 1000u)   /* A listing that failed is not tried again sooner */
 #define SESSION_PASSWORD_CHARS 512    /* main.c SESSION_MAX_PASSWORD */
 
@@ -235,6 +238,8 @@ typedef struct {
     const LoadJob* job;          /* NULL for a snapshot-list re-read */
     const SnapshotIndex* index;
     ULONGLONG started, reported;
+    size_t entries;              /* Entries at the last progress (inactivity timeout) */
+    ULONGLONG progressed;
 } LoadCancel;
 
 static BOOL load_cancelled(void* ctx) {
@@ -251,6 +256,17 @@ static BOOL load_cancelled(void* ctx) {
         ReleaseSRWLockExclusive(&g_CacheLock);
     }
     ULONGLONG now = GetTickCount64();
+    if (c->index) {
+        size_t entries = snapshot_index_entry_count(c->index);
+        if (entries != c->entries) {
+            c->entries    = entries;
+            c->progressed = now;
+        } else if (now - c->progressed >= BACKGROUND_TIMEOUT_MS) {
+            log_write(L"Background listing of '%ls' given up: no new entry for %u minutes", c->alias,
+                      BACKGROUND_TIMEOUT_MS / 60000u);
+            return TRUE;
+        }
+    }
     if (!gone && c->job && c->index && now - c->reported >= PROGRESS_REPORT_MS) {
         c->reported = now;
         report(c->job->alias, L"Snapshot %.8hs: %u files and folders read so far (%llu s)", c->job->snapshot_id,
@@ -328,7 +344,7 @@ static VOID CALLBACK load_index_worker(PTP_CALLBACK_INSTANCE instance, PVOID con
 
     if (job->password_source(job->alias, password, _countof(password)) &&
         (index = snapshot_index_new(limit)) != NULL) {
-        LoadCancel cancel = {job->generation, job->alias, job, index, started, started};
+        LoadCancel cancel = {job->generation, job->alias, job, index, started, started, 0, started};
         ResticExecOptions opts;
         memset(&opts, 0, sizeof(opts));
         opts.cancel_proc = load_cancelled;
@@ -463,9 +479,10 @@ static VOID CALLBACK refresh_tree_worker(PTP_CALLBACK_INSTANCE instance, PVOID c
     ULONGLONG started = GetTickCount64();
 
     if (job->password_source(job->alias, password, _countof(password))) {
-        LoadCancel cancel = {job->generation, job->alias, NULL, NULL, started, started};
+        LoadCancel cancel = {job->generation, job->alias, NULL, NULL, started, started, 0, started};
         ResticExecOptions opts;
         memset(&opts, 0, sizeof(opts));
+        opts.timeout_ms  = BACKGROUND_TIMEOUT_MS;
         opts.cancel_proc = load_cancelled;
         opts.cancel_ctx  = &cancel;
         res = restic_list_snapshots(job->restic_exe, job->target, password, job->time_format, &opts, &tree, err,
