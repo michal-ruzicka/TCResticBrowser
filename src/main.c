@@ -545,6 +545,13 @@ static BOOL prompt_repository_password(
                      repo_alias);
     }
 
+    /*
+     * The alias in the window title lets password managers that pick an entry by the title of the
+     * active window (KeePassXC Auto-Type, KeePass) offer the right password
+     */
+    WCHAR title[MAX_PATH + 64];
+    _snwprintf_s(title, _countof(title), _TRUNCATE, L"%ls - Restic repository password", repo_alias);
+
     out_pwd[0] = L'\0'; /* RequestProc shows ReturnedText as the default value */
     BOOL accepted = g_RequestProc(
         g_PluginNr,

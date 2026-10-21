@@ -382,6 +382,7 @@ static int   g_e2e_pwd_mode         = 0; /* 0 = wrong once then correct, 1 = alw
                                            3 = user submits an empty password, 4 = user cancels the dialog,
                                            5 = correct password with a trailing space once, then correct */
 static WCHAR g_e2e_last_prompt[256] = {0};
+static WCHAR g_e2e_last_title[512] = {0};
 static WCHAR g_e2e_last_msg[256]    = {0};
 static WCHAR g_e2e_progress_target[512] = {0};
 static int   g_e2e_progress_percent = -1;
@@ -415,9 +416,9 @@ static BOOL __stdcall e2e_request_proc(
     int maxlen
 ) {
     (void)PluginNr;
-    (void)CustomTitle;
     if (RequestType == RT_Password) {
         g_e2e_pwd_prompts++;
+        wcsncpy_s(g_e2e_last_title, _countof(g_e2e_last_title), CustomTitle ? CustomTitle : L"", _TRUNCATE);
         if (CustomText) {
             wcsncpy_s(g_e2e_last_prompt, _countof(g_e2e_last_prompt), CustomText, _TRUNCATE);
         }
@@ -1006,6 +1007,8 @@ static void test_live_end_to_end_navigation(void) {
                 "Level 1 shows restic mount's folders after a password retry");
     EXPECT_TRUE(g_e2e_pwd_prompts == 2, "Prompted twice (initial + 1 retry after wrong password)");
     EXPECT_TRUE(wcsstr(g_e2e_last_prompt, L"Wrong password") != NULL, "Retry prompt tells the user the password was wrong");
+    EXPECT_TRUE(wcscmp(g_e2e_last_title, L"MainRepo - Restic repository password") == 0,
+                "The dialog title names the repository (for password managers matching window titles)");
     EXPECT_TRUE(g_e2e_msg_dialogs == 0, "No error dialog when retry succeeds");
 
     /* The levels above the snapshots come from the one snapshot list cached for this repository */
