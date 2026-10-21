@@ -379,7 +379,7 @@ How the reader is tested:
   sanitizer finding or a violated invariant; code coverage stopped growing
   within the first minute.
 
-## Expected Future Works
+## Expected Future Work
 
 Planned for versions after 2.0.0, in no particular order:
 
