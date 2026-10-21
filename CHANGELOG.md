@@ -1,0 +1,177 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [v2.0.0] – 2026-10-21
+
+First release of the fork. Version 2.0.0 keeps its releases apart from the
+upstream 1.x line.
+
+### Added
+
+- **32-bit plugin.** The release ZIP now contains `TCResticBrowser.wfx` for
+  32-bit Total Commander next to `TCResticBrowser.wfx64`; the auto-installer
+  picks the right one.
+- **Configurable root folder name.** `RootName=` under `[Settings]` names the
+  plugin's folder in Network Neighborhood. Total Commander reads it only
+  while installing the plugin.
+- **Password timeout.** Cached passwords are wiped 30 minutes after
+  restic first accepted them, even while Total Commander sits idle, and
+  asked for again on the next access. `PasswordTimeoutSeconds=` under
+  `[Settings]` changes the time; `0` keeps them until Total Commander exits,
+  as before. With `PasswordTimeoutResetOnUse=yes` each use starts the
+  interval again, so a short timeout keeps a password only while the
+  repository is in use.
+- **`🗑 Forget N Passwords`** at the top of the plugin's root folder,
+  shown while passwords are remembered and named after their number:
+  pressing Enter on it wipes them all at once and re-reads the root
+  folder, so the entry goes away.
+- **Optional diagnostic log**, like in the author's other Total Commander
+  plugins: `LogPath=` under `[Logging]` (off by default) records every
+  `restic` command line with its exit code, duration and error output, the
+  configuration in use, password prompts and error messages. Passwords are
+  never logged, only their length, and credentials in repository URLs are
+  masked.
+- **Hint about invisible characters in a rejected password.** When restic
+  rejects a password that starts or ends with a space, tab or line break,
+  or contains a line break, tab, non-breaking space, zero-width or other
+  invisible character, the next password prompt says so (for example
+  "the password you entered ends with a space"), and the diagnostic log
+  notes it as well. Inner ordinary spaces of a passphrase are not reported,
+  and the password itself is never shown or logged.
+- **Reproducible builds.** The same sources and pinned toolchain produce a
+  byte-identical ZIP (`/Brepro`, `/BREPRO`, `/pathmap`, pinned MSVC toolset
+  and Windows SDK, ZIP timestamps from `release-date=` in `pluginst.inf`).
+  The ZIP carries `sha256sums.sha256` for its files.
+- **Continuous integration.** Every push is built and tested on GitHub
+  Actions for both bitnesses, including the Debug/CRT leak checks, MSVC
+  static analysis, AddressSanitizer and the live tests against a real
+  `restic.exe` (pinned by SHA-256).
+
+### Changed
+
+- **Windows-native build.** `build.cmd` drives CMake and MSVC; the Bash
+  wrapper, NMake Makefile and Python packaging step are gone. All build
+  inputs live under `src\`, and `version=` in `src\pluginst.inf` is the only
+  place the version is written.
+- **Own JSON reader instead of cJSON.** The cJSON submodule is replaced by a
+  strict, read-only reader of about 370 lines (`src\json.c`), so the plugin
+  contains no third-party code. File sizes are now read as exact 64-bit
+  integers. See [*Why the Plugin Has Its Own JSON Reader*](README.md#why-the-plugin-has-its-own-json-reader)
+  in the README.
+- **Configuration file renamed and looked up like in the author's other
+  Total Commander plugins.** `restic_plugin.ini` became `TCResticBrowser.ini`,
+  and `%APPDATA%\GHISLER\TCResticBrowser.ini` (per-user override) wins over
+  the file next to the plugin, which is only the shipped sample. Previously
+  the plugin-folder file won and the folder of Total Commander's
+  `wincmd.ini` was the fallback. **Upgrading from 1.x:** move the
+  `restic_plugin.ini` you edited to `%APPDATA%\GHISLER\TCResticBrowser.ini`;
+  the new version does not read the old name.
+- **`TCResticBrowser.ini` is read as UTF-8**, like in the author's other
+  Total Commander plugins, so repository aliases and paths may contain any
+  characters. A UTF-8 or UTF-16 byte-order mark is honoured, and a file that
+  is not valid UTF-8 is still read in the ANSI code page, as before.
+  Entries too long for the plugin's buffers are now skipped instead of
+  being silently truncated.
+- **New plugin icon.** The goals were a vector source, a design simple
+  enough to stay legible at the small sizes Total Commander shows it in, and
+  content that refers to both Total Commander and versioned backups. It is a
+  floppy disk, Total Commander's symbol, whose label carries a "history"
+  arrow around a clock, the time-machine sign for going back to earlier
+  versions. The sources are SVG files in `logo\`, including a separate
+  version fitted to the 16 px pixel grid; the detailed raster illustration
+  they replace was illegible at 16 px and had no editable source.
+- **Plugin files renamed after the project**, like the author's other
+  Total Commander plugins: `restic.wfx`/`restic.wfx64` became
+  `TCResticBrowser.wfx`/`TCResticBrowser.wfx64`, and the auto-installer's
+  default folder is `plugins\wfx\TCResticBrowser` instead of
+  `plugins\wfx\restic`. **Upgrading from 1.x** therefore installs the plugin
+  next to the old one: after moving your configuration (see above), remove
+  the old `restic` entry under *Configuration → Options → Plugins → File
+  system plugins* and delete its folder.
+- **Default root folder name is *TCResticBrowser*** instead of
+  *Restic Backups*, matching the plugin, its files and its configuration
+  file. To keep the old name, set `RootName=Restic Backups` before
+  installing the new version.
+- **Release ZIP** is named `TCResticBrowser.vX.Y.Z.zip` and, like the
+  author's other Total Commander plugins, ships all the Markdown
+  documentation (README, CHANGELOG, CONTRIBUTING, AGENT, CLAUDE) and the
+  license, now `LICENSE.md` instead of `LICENSE`.
+- **Documentation** restructured (README, CONTRIBUTING, this changelog), and
+  the Python project template and the Pi coding-agent tooling (scripts and
+  instructions in Italian) were removed.
+
+### Fixed
+
+- **A password is cached only once restic has accepted it.** After a
+  local write error, `ESC` or a timeout an unverified password was kept;
+  now the next attempt asks again. A password that worked before is not
+  affected, and "repository locked" no longer drops a correct one.
+- **Remembered passwords of more than eight repositories.** The least
+  recently used one now makes room for a new one, instead of the next slot
+  in turn, which could be the password just entered. A wrong password
+  rejected on one panel no longer wipes a correct one that the other panel
+  stored in the meantime.
+- **Snapshots in repositories with many snapshots.** Folder names carried
+  the 8-character short ID, which restic refuses once two snapshots share
+  it (likely from tens of thousands of snapshots on), so such snapshots
+  could not be opened. Their names now carry a longer, unique prefix.
+- **Total Commander no longer closes** when `ResticPath` or a `PATH` entry
+  is longer than the plugin's path buffers; such a value is ignored.
+- **`ESC` also works while restic prints a very long listing.**
+- **A read-only target file stays read-only** when replacing it fails.
+- **Documentation of a relative `ResticPath`.** It is resolved against the
+  plugin folder, not the folder of the configuration file as documented
+  before. The minimum restic version, 0.17.1, is now documented.
+
+### Security
+
+- **Snapshot entries whose name is not a single path component are no
+  longer listed.** Restic stores names from non-Windows systems verbatim, so
+  a snapshot could contain a file named, for example, `..\..\evil.exe`;
+  copying its folder with `F5` could then write outside the chosen target
+  directory. Names containing `\` or `/`, or consisting only of dots and
+  spaces, are now skipped.
+- **A file is never restored under a name Windows would store as something
+  else.** Names from other systems such as `a:b`, `CON`, `nul.txt` or
+  `notes.` would have been written to an alternate data stream of `a`, to a
+  device, or over the file `notes`. Such files are still listed under their
+  original names, but copying them now fails with a write error; see
+  [File Names from Other Systems](README.md#file-names-from-other-systems).
+- **`restic.exe` is never taken from the current directory**, which
+  follows the Total Commander panel. Relative `PATH` entries (such as `.`)
+  and drive- or root-relative `ResticPath` values (`C:restic.exe`,
+  `\tools\restic.exe`) could resolve to a `restic.exe` in the folder being
+  browsed; they are now ignored.
+- **Cached passwords are protected in memory.** They are encrypted with
+  `CryptProtectMemory`, kept in pages locked out of the page file and
+  excluded from Windows Error Reporting crash dumps, so a memory dump or
+  the hibernation file no longer contains them in plain text.
+- **Extraction never overwrites or follows an existing temporary file.**
+  The temporary file next to the target (`~rp<number>.tmp`) is created
+  only if no file or link of that name exists; otherwise another name is
+  used.
+
+
+## [v1.0.0] – 2026-10-18
+
+Upstream release of [Restic WFX Plugin](https://github.com/goldfix/Restic_WFX_Plugin)
+by Pietro Partescano, the base of this fork was commit [c8481b43c9ab2867eee824719e3a9c6785db6c61](https://github.com/goldfix/Restic_WFX_Plugin/commit/c8481b43c9ab2867eee824719e3a9c6785db6c61).
+
+### Added
+
+- **Read-only browsing of Restic repositories** in Total Commander's
+  Network Neighborhood: repositories from `restic_plugin.ini`, their
+  snapshots, and the snapshot directory trees, loaded one level at a time.
+- **Extraction** of files and folders with `F5`, `F3` and `Ctrl+Q`, streamed
+  through `restic dump` with atomic replacement of the target file.
+- **Passwords kept in memory only**, asked for through Total Commander's
+  password dialog and passed to `restic.exe` in an isolated environment
+  block.
+
+
+[v2.0.0]: https://github.com/michal-ruzicka/TCResticBrowser/compare/c8481b43c9ab2867eee824719e3a9c6785db6c61...v2.0.0
+[v1.0.0]: https://github.com/goldfix/Restic_WFX_Plugin/tree/1.0.0

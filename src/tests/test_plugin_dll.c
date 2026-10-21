@@ -1,0 +1,1398 @@
+/*
+ * Black-box smoke test of the built plugin DLL: it is loaded the way Total Commander loads it
+ * (LoadLibrary + GetProcAddress) and driven through the exported WFX entry points only.
+ * Expects the plugin (TCResticBrowser.wfx64 or TCResticBrowser.wfx, matching this test's bitness) and the staged
+ * pluginst.inf in the directory of this executable, where the build puts them; skipped when the
+ * plugin is absent, e.g. in AddressSanitizer test runs. The live tests read tmp\ relative to the
+ * current directory, which the build sets to the repository root.
+ */
+#ifndef UNICODE
+#define UNICODE
+#endif
+#ifndef _UNICODE
+#define _UNICODE
+#endif
+#include <windows.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <wchar.h>
+#include "version.h"
+
+/* Full paths of the built plugin and the staged pluginst.inf next to this executable */
+static WCHAR g_plugin_dll[MAX_PATH];
+static WCHAR g_pluginst_inf[MAX_PATH];
+
+static int g_tests_run    = 0;
+static int g_tests_failed = 0;
+
+#define EXPECT_TRUE(cond, msg) do { \
+    g_tests_run++; \
+    if (!(cond)) { \
+        printf("[FAIL] %s:%d: %s\n", __FUNCTION__, __LINE__, (msg)); \
+        g_tests_failed++; \
+        return; \
+    } \
+} while (0)
+
+#define EXPECT_WSTR_EQ(actual, expected, msg) do { \
+    g_tests_run++; \
+    if (wcscmp((actual), (expected)) != 0) { \
+        printf("[FAIL] %s:%d: %s (expected '%ls', got '%ls')\n", \
+               __FUNCTION__, __LINE__, (msg), (expected), (actual)); \
+        g_tests_failed++; \
+        return; \
+    } \
+} while (0)
+
+/* Local copies of the WFX constants and prototypes (the plugin is only reachable through GetProcAddress) */
+#define RT_Password            2
+#define RT_MsgOK               8
+#define MSGTYPE_IMPORTANTERROR 6
+
+#define FS_FILE_OK             0
+#define FS_FILE_EXISTS         1
+#define FS_FILE_NOTFOUND       2
+#define FS_FILE_READERROR      3
+#define FS_FILE_WRITEERROR     4
+#define FS_FILE_USERABORT      5
+#define FS_FILE_NOTSUPPORTED   6
+#define FS_EXEC_OK             0
+#define FS_EXEC_ERROR          1
+#define FS_EXEC_YOURSELF       (-1)
+#define FS_EXEC_SYMLINK        (-2)
+
+#define FS_COPYFLAGS_OVERWRITE 1
+#define FS_COPYFLAGS_RESUME    2
+#define FS_COPYFLAGS_MOVE      4
+
+typedef struct {
+    int size;
+    DWORD PluginInterfaceVersionLow;
+    DWORD PluginInterfaceVersionHi;
+    char DefaultIniName[MAX_PATH];
+} DefaultParams;
+
+typedef struct {
+    DWORD SizeLow;
+    DWORD SizeHigh;
+    FILETIME LastWriteTime;
+    int Attr;
+} RemoteInfo;
+
+typedef int    (__stdcall *PFN_InitW)(int, void*, void*, void*);
+typedef void   (__stdcall *PFN_GetDefRootName)(char*, int);
+typedef void   (__stdcall *PFN_SetDefaultParams)(DefaultParams*);
+typedef HANDLE (__stdcall *PFN_FindFirstW)(WCHAR*, WIN32_FIND_DATAW*);
+typedef HANDLE (__stdcall *PFN_FindFirst)(char*, WIN32_FIND_DATAA*);
+typedef BOOL   (__stdcall *PFN_FindNextW)(HANDLE, WIN32_FIND_DATAW*);
+typedef int    (__stdcall *PFN_FindClose)(HANDLE);
+typedef int    (__stdcall *PFN_GetFile)(char*, char*, int, RemoteInfo*);
+typedef int    (__stdcall *PFN_GetFileW)(WCHAR*, WCHAR*, int, RemoteInfo*);
+typedef int    (__stdcall *PFN_ExecuteFileW)(HWND, WCHAR*, WCHAR*);
+
+typedef struct {
+    HMODULE module;
+    PFN_InitW init_w;
+    PFN_GetDefRootName get_root_name;
+    PFN_SetDefaultParams set_default_params;
+    PFN_FindFirstW find_first_w;
+    PFN_FindFirst find_first;
+    PFN_FindNextW find_next_w;
+    PFN_FindClose find_close;
+    PFN_GetFile get_file;
+    PFN_GetFileW get_file_w;
+    PFN_ExecuteFileW execute_w;
+} Plugin;
+
+static BOOL make_unique_dir(const WCHAR* tag, WCHAR* out, size_t cap) {
+    WCHAR tmp[MAX_PATH];
+    GetTempPathW(MAX_PATH, tmp);
+    swprintf_s(out, cap, L"%ls%ls_%lu", tmp, tag, GetCurrentProcessId());
+    return CreateDirectoryW(out, NULL) || GetLastError() == ERROR_ALREADY_EXISTS;
+}
+
+static BOOL write_file(const WCHAR* path, const char* text) {
+    HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    DWORD written = 0, len = (DWORD)strlen(text);
+    BOOL ok = (h != INVALID_HANDLE_VALUE) && WriteFile(h, text, len, &written, NULL) && written == len;
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    return ok;
+}
+
+/* Reads a whole file as a NUL-terminated byte string (caller frees); NULL when missing */
+static char* read_text_file(const WCHAR* path) {
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+    DWORD size = GetFileSize(h, NULL), got = 0;
+    char* buf = (char*)malloc((size_t)size + 1);
+    if (buf && ReadFile(h, buf, size, &got, NULL)) {
+        buf[got] = '\0';
+    } else {
+        free(buf);
+        buf = NULL;
+    }
+    CloseHandle(h);
+    return buf;
+}
+
+/* Copies the DLL into dir (so DllMain resolves that directory as the plugin directory) and loads it */
+static BOOL load_plugin_copy(const WCHAR* dir, Plugin* p) {
+    WCHAR dest[MAX_PATH];
+    memset(p, 0, sizeof(*p));
+    swprintf_s(dest, MAX_PATH, L"%ls\\" RESTIC_WFX_FILE_NAME, dir);
+    if (!CopyFileW(g_plugin_dll, dest, FALSE)) return FALSE;
+    p->module = LoadLibraryW(dest);
+    if (!p->module) return FALSE;
+    p->init_w            = (PFN_InitW)(void*)GetProcAddress(p->module, "FsInitW");
+    p->get_root_name     = (PFN_GetDefRootName)(void*)GetProcAddress(p->module, "FsGetDefRootName");
+    p->set_default_params = (PFN_SetDefaultParams)(void*)GetProcAddress(p->module, "FsSetDefaultParams");
+    p->find_first_w      = (PFN_FindFirstW)(void*)GetProcAddress(p->module, "FsFindFirstW");
+    p->find_first        = (PFN_FindFirst)(void*)GetProcAddress(p->module, "FsFindFirst");
+    p->find_next_w       = (PFN_FindNextW)(void*)GetProcAddress(p->module, "FsFindNextW");
+    p->find_close        = (PFN_FindClose)(void*)GetProcAddress(p->module, "FsFindClose");
+    p->get_file          = (PFN_GetFile)(void*)GetProcAddress(p->module, "FsGetFile");
+    p->get_file_w        = (PFN_GetFileW)(void*)GetProcAddress(p->module, "FsGetFileW");
+    p->execute_w         = (PFN_ExecuteFileW)(void*)GetProcAddress(p->module, "FsExecuteFileW");
+    return TRUE;
+}
+
+static void unload_plugin_copy(Plugin* p, const WCHAR* dir) {
+    WCHAR dest[MAX_PATH];
+    if (p->module) FreeLibrary(p->module);
+    p->module = NULL;
+    swprintf_s(dest, MAX_PATH, L"%ls\\" RESTIC_WFX_FILE_NAME, dir);
+    DeleteFileW(dest);
+}
+
+/* Exact export surface: read-only + file extraction entry points present, write/delete/move absent */
+static void test_export_surface(void) {
+    HMODULE m = LoadLibraryW(g_plugin_dll);
+    EXPECT_TRUE(m != NULL, "Plugin DLL loads");
+
+    const char* required[] = {"FsInit", "FsInitW", "FsFindFirst", "FsFindFirstW", "FsFindNext",
+                              "FsFindNextW", "FsFindClose", "FsGetDefRootName", "FsSetDefaultParams",
+                              "FsGetFile", "FsGetFileW", "FsExecuteFile", "FsExecuteFileW"};
+    for (size_t i = 0; i < _countof(required); ++i) {
+        FARPROC fn = GetProcAddress(m, required[i]);
+        g_tests_run++;
+        if (!fn) {
+            printf("[FAIL] test_export_surface: missing export %s\n", required[i]);
+            g_tests_failed++;
+        }
+    }
+
+    /* Modification/deletion/move functions must NOT be exported: Total Commander would call them */
+    const char* forbidden[] = {"FsPutFile", "FsPutFileW", "FsDeleteFile", "FsDeleteFileW",
+                               "FsMkDir", "FsMkDirW", "FsRemoveDir", "FsRemoveDirW",
+                               "FsRenMovFile", "FsRenMovFileW", "FsSetAttr", "FsSetTime",
+                               "json_parse", "json_free", "DllMain"};
+    for (size_t i = 0; i < _countof(forbidden); ++i) {
+        FARPROC fn = GetProcAddress(m, forbidden[i]);
+        g_tests_run++;
+        if (fn) {
+            printf("[FAIL] test_export_surface: unexpected export %s\n", forbidden[i]);
+            g_tests_failed++;
+        }
+    }
+
+    /* Verify embedded plugin icon resource (ID 1, 5 frames: 16x16, 24x24, 32x32, 48x48, 256x256) */
+    HRSRC hGroup = FindResourceW(m, MAKEINTRESOURCEW(1), (LPCWSTR)RT_GROUP_ICON);
+    EXPECT_TRUE(hGroup != NULL && SizeofResource(m, hGroup) >= 6 + 5 * 14,
+                "Embedded RT_GROUP_ICON #1 present with 5 icon frames");
+    for (WORD id = 1; id <= 5; ++id) {
+        HRSRC hIcon = FindResourceW(m, MAKEINTRESOURCEW(id), (LPCWSTR)RT_ICON);
+        EXPECT_TRUE(hIcon != NULL && SizeofResource(m, hIcon) > 0, "Embedded RT_ICON frame present");
+    }
+
+    /* Verify embedded VS_VERSION_INFO resource (FileVersion, ProductName, VS_FIXEDFILEINFO signature) */
+    HRSRC hVer = FindResourceW(m, MAKEINTRESOURCEW(VS_VERSION_INFO), (LPCWSTR)RT_VERSION);
+    DWORD verSize = hVer ? SizeofResource(m, hVer) : 0;
+    HGLOBAL hVerMem = hVer ? LoadResource(m, hVer) : NULL;
+    const BYTE* verBytes = hVerMem ? (const BYTE*)LockResource(hVerMem) : NULL;
+    EXPECT_TRUE(verBytes != NULL && verSize >= 92, "Embedded RT_VERSION (VS_VERSION_INFO) resource present");
+    BOOL foundFixed = FALSE;
+    DWORD expectedMS = ((DWORD)RESTIC_WFX_VER_MAJOR << 16) | (DWORD)RESTIC_WFX_VER_MINOR;
+    DWORD expectedLS = ((DWORD)RESTIC_WFX_VER_PATCH << 16) | (DWORD)RESTIC_WFX_VER_BUILD;
+    for (DWORD off = 0; verBytes && off + sizeof(VS_FIXEDFILEINFO) <= verSize; off += 4) {
+        const VS_FIXEDFILEINFO* ffi = (const VS_FIXEDFILEINFO*)(verBytes + off);
+        if (ffi->dwSignature == 0xFEEF04BDu) {
+            foundFixed = (ffi->dwFileVersionMS == expectedMS && ffi->dwFileVersionLS == expectedLS &&
+                          ffi->dwProductVersionMS == expectedMS && ffi->dwProductVersionLS == expectedLS &&
+                          ffi->dwFileType == VFT_DLL);
+            break;
+        }
+    }
+    EXPECT_TRUE(foundFixed, "VS_FIXEDFILEINFO matches RESTIC_WFX_VERSION_CSV and VFT_DLL");
+
+    /* Verify the staged pluginst.inf manifest matches Total Commander auto-install specification */
+    WCHAR infType[32] = {0}, infFile[64] = {0}, infVer[32] = {0};
+    GetPrivateProfileStringW(L"plugininstall", L"type", L"", infType, _countof(infType), g_pluginst_inf);
+    GetPrivateProfileStringW(L"plugininstall", L"file", L"", infFile, _countof(infFile), g_pluginst_inf);
+    GetPrivateProfileStringW(L"plugininstall", L"version", L"", infVer, _countof(infVer), g_pluginst_inf);
+    /* Checked one by one so a failure shows the value actually read (empty: no [plugininstall]) */
+    EXPECT_WSTR_EQ(infType, L"wfx", "Staged pluginst.inf: type=");
+    EXPECT_WSTR_EQ(infFile, L"TCResticBrowser.wfx", "Staged pluginst.inf: file= names the 32-bit plugin DLL");
+    EXPECT_WSTR_EQ(infVer, L"" RESTIC_WFX_PRODUCT_VER, "Staged pluginst.inf: version= matches version.h");
+
+    FreeLibrary(m);
+}
+
+/* Scenario A: TCResticBrowser.ini sits next to the DLL (no per-user INI) */
+static void test_primary_ini_next_to_dll(void) {
+    WCHAR dir[MAX_PATH], ini[MAX_PATH];
+    EXPECT_TRUE(make_unique_dir(L"restic_dll_primary", dir, MAX_PATH), "Create plugin directory");
+    swprintf_s(ini, MAX_PATH, L"%ls\\TCResticBrowser.ini", dir);
+    EXPECT_TRUE(write_file(ini, "[Repositories]\r\nAlpha=D:\\r1\r\nBeta=D:\\r2\r\n"), "Write INI");
+
+    Plugin p;
+    EXPECT_TRUE(load_plugin_copy(dir, &p), "Load plugin copy");
+    EXPECT_TRUE(p.init_w && p.get_root_name && p.set_default_params && p.find_first_w && p.find_next_w &&
+                p.find_close && p.find_first, "Entry points resolved");
+
+    char root_name[64] = {0};
+    p.get_root_name(root_name, (int)sizeof(root_name));
+    EXPECT_TRUE(strcmp(root_name, "TCResticBrowser") == 0, "Default root name");
+    char tiny[5] = {'x', 'x', 'x', 'x', 'x'};
+    p.get_root_name(tiny, (int)sizeof(tiny));
+    EXPECT_TRUE(strcmp(tiny, "TCRe") == 0, "Root name truncated and terminated for small buffers");
+
+    EXPECT_TRUE(p.init_w(1, NULL, NULL, NULL) == 0, "FsInitW returns 0");
+
+    WIN32_FIND_DATAW fd;
+    HANDLE h = p.find_first_w(L"\\", &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE, "Root enumeration starts");
+    EXPECT_TRUE(wcsncmp(fd.cFileName, L"\U0001F5D1", 2) != 0, "No forget entry while no password is cached");
+    EXPECT_WSTR_EQ(fd.cFileName, L"Alpha", "First alias");
+    EXPECT_TRUE((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0, "Alias is a directory");
+    EXPECT_TRUE(p.find_next_w(h, &fd), "Second alias available");
+    EXPECT_WSTR_EQ(fd.cFileName, L"Beta", "Second alias");
+    EXPECT_TRUE(!p.find_next_w(h, &fd), "End of list");
+    EXPECT_TRUE(p.find_close(h) == 0, "FsFindClose returns 0");
+
+    /* Two simultaneous enumerations (both panels) keep independent state */
+    WIN32_FIND_DATAW fd2;
+    HANDLE h1 = p.find_first_w(L"\\", &fd);
+    HANDLE h2 = p.find_first_w(L"\\", &fd2);
+    EXPECT_TRUE(h1 != INVALID_HANDLE_VALUE && h2 != INVALID_HANDLE_VALUE && h1 != h2, "Two live handles");
+    EXPECT_TRUE(p.find_next_w(h1, &fd), "Advance first handle");
+    EXPECT_WSTR_EQ(fd.cFileName, L"Beta", "First handle advanced");
+    EXPECT_TRUE(p.find_next_w(h2, &fd2), "Advance second handle");
+    EXPECT_WSTR_EQ(fd2.cFileName, L"Beta", "Second handle independent");
+    p.find_close(h1);
+    p.find_close(h2);
+
+    /* Unknown alias and the ANSI stub fail cleanly instead of crashing */
+    SetLastError(0);
+    EXPECT_TRUE(p.find_first_w(L"\\NoSuchAlias", &fd) == INVALID_HANDLE_VALUE, "Unknown alias refused");
+    EXPECT_TRUE(GetLastError() == ERROR_PATH_NOT_FOUND, "Unknown alias sets ERROR_PATH_NOT_FOUND");
+    WIN32_FIND_DATAA fda;
+    char root_a[] = "\\";
+    EXPECT_TRUE(p.find_first(root_a, &fda) == INVALID_HANDLE_VALUE, "ANSI stub refuses to enumerate");
+    EXPECT_TRUE(p.find_close(INVALID_HANDLE_VALUE) == 0 && p.find_close(NULL) == 0, "FsFindClose tolerates invalid handles");
+
+    unload_plugin_copy(&p, dir);
+    DeleteFileW(ini);
+    RemoveDirectoryW(dir);
+}
+
+/* %APPDATA%\GHISLER of this test run (set up in main, so the developer's own INI is never read) */
+static WCHAR g_user_dir[MAX_PATH];
+
+/*
+ * Scenario B: the per-user %APPDATA%\GHISLER\TCResticBrowser.ini wins over the INI next to the DLL;
+ * DefaultIniName from FsSetDefaultParams is ignored and no INI is ever auto-created.
+ */
+static void test_user_ini_overrides_plugin_ini(void) {
+    WCHAR dir[MAX_PATH], plug_ini[MAX_PATH], user_ini[MAX_PATH], tc_dir[MAX_PATH], tc_ini[MAX_PATH];
+    EXPECT_TRUE(make_unique_dir(L"restic_dll_userini", dir, MAX_PATH) &&
+                make_unique_dir(L"restic_dll_tcconfig", tc_dir, MAX_PATH), "Create directories");
+    swprintf_s(plug_ini, MAX_PATH, L"%ls\\TCResticBrowser.ini", dir);
+    swprintf_s(user_ini, MAX_PATH, L"%ls\\TCResticBrowser.ini", g_user_dir);
+    swprintf_s(tc_ini, MAX_PATH, L"%ls\\TCResticBrowser.ini", tc_dir);
+    DeleteFileW(plug_ini);
+    DeleteFileW(user_ini);
+
+    Plugin p;
+    EXPECT_TRUE(load_plugin_copy(dir, &p), "Load plugin copy");
+    EXPECT_TRUE(p.init_w && p.set_default_params && p.find_first_w && p.find_next_w && p.find_close,
+                "Entry points resolved");
+
+    /* Total Commander's settings folder pointing elsewhere (e.g. a portable install) is not consulted */
+    EXPECT_TRUE(write_file(tc_ini, "[Repositories]\r\nFromDefaultIniName=D:\\repo\r\n"), "Write INI next to wincmd.ini");
+    DefaultParams dps;
+    memset(&dps, 0, sizeof(dps));
+    dps.size = (int)sizeof(dps);
+    WideCharToMultiByte(CP_ACP, 0, tc_dir, -1, dps.DefaultIniName, (int)sizeof(dps.DefaultIniName), NULL, NULL);
+    strcat_s(dps.DefaultIniName, sizeof(dps.DefaultIniName), "\\wincmd.ini");
+    p.init_w(1, NULL, NULL, NULL);
+    p.set_default_params(&dps);
+
+    WIN32_FIND_DATAW fd;
+    SetLastError(0);
+    HANDLE h = p.find_first_w(L"\\", &fd);
+    EXPECT_TRUE(h == INVALID_HANDLE_VALUE && GetLastError() == ERROR_NO_MORE_FILES,
+                "No INI in %APPDATA%\\GHISLER or the plugin directory -> empty root");
+    EXPECT_TRUE(GetFileAttributesW(plug_ini) == INVALID_FILE_ATTRIBUTES &&
+                GetFileAttributesW(user_ini) == INVALID_FILE_ATTRIBUTES,
+                "No INI file is auto-created on disk");
+
+    /* The shipped INI next to the DLL is used while there is no per-user one */
+    EXPECT_TRUE(write_file(plug_ini, "[Repositories]\r\nShipped=D:\\repo\r\n"), "Write plugin-directory INI");
+    h = p.find_first_w(L"\\", &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE, "Plugin-directory INI is used");
+    EXPECT_WSTR_EQ(fd.cFileName, L"Shipped", "Alias from the plugin-directory INI");
+    p.find_close(h);
+
+    /* A per-user INI appearing later takes over in full on the next listing, without a reload */
+    EXPECT_TRUE(write_file(user_ini, "[Repositories]\r\nPersonal=D:\\repo\r\n"), "Write per-user INI");
+    h = p.find_first_w(L"\\", &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE, "Per-user INI is picked up without reloading the plugin");
+    EXPECT_WSTR_EQ(fd.cFileName, L"Personal", "Alias from the per-user INI");
+    EXPECT_TRUE(!p.find_next_w(h, &fd), "Plugin-directory INI is not merged in");
+    p.find_close(h);
+
+    /* RootName from the active INI is what the installer gets from FsGetDefRootName */
+    char root_name[64] = {0};
+    p.get_root_name(root_name, (int)sizeof(root_name));
+    EXPECT_TRUE(strcmp(root_name, "TCResticBrowser") == 0, "Default root name without RootName");
+    EXPECT_TRUE(write_file(user_ini, "[Settings]\r\nRootName=Personal Backups\r\n[Repositories]\r\nPersonal=D:\\repo\r\n"),
+                "Write per-user INI with RootName");
+    p.get_root_name(root_name, (int)sizeof(root_name));
+    EXPECT_TRUE(strcmp(root_name, "Personal Backups") == 0, "Configured RootName reported by FsGetDefRootName");
+
+    unload_plugin_copy(&p, dir);
+    DeleteFileW(user_ini);
+    DeleteFileW(plug_ini);
+    DeleteFileW(tc_ini);
+    RemoveDirectoryW(dir);
+    RemoveDirectoryW(tc_dir);
+}
+
+/* Mock Total Commander callback state for Scenario C (end-to-end live navigation) */
+#define FIXTURE_PASSWORD L"p@ss \"w0rd\" \u00fc %PATH% \u65e5\u672c"
+
+static int   g_e2e_pwd_prompts      = 0;
+static int   g_e2e_msg_dialogs      = 0;
+static int   g_e2e_error_logs       = 0;
+static int   g_e2e_progress_calls   = 0;
+static BOOL  g_e2e_force_abort      = FALSE;
+static BOOL  g_e2e_abort_after_start = FALSE; /* abort once the transfer reports progress above 0 % */
+static int   g_e2e_pwd_mode         = 0; /* 0 = wrong once then correct, 1 = always correct, 2 = always wrong,
+                                           3 = user submits an empty password, 4 = user cancels the dialog,
+                                           5 = correct password with a trailing space once, then correct */
+static WCHAR g_e2e_last_prompt[256] = {0};
+static WCHAR g_e2e_last_msg[256]    = {0};
+static WCHAR g_e2e_progress_target[512] = {0};
+static int   g_e2e_progress_percent = -1;
+static volatile LONG g_e2e_mt_failures = 0;
+
+static int __stdcall e2e_progress_proc(int PluginNr, WCHAR* SourceName, WCHAR* TargetName, int PercentDone) {
+    (void)PluginNr;
+    (void)SourceName;
+    if (TargetName) {
+        wcsncpy_s(g_e2e_progress_target, _countof(g_e2e_progress_target), TargetName, _TRUNCATE);
+    }
+    g_e2e_progress_percent = PercentDone;
+    g_e2e_progress_calls++;
+    if (g_e2e_abort_after_start && PercentDone > 0) return 1;
+    return g_e2e_force_abort ? 1 : 0;
+}
+
+static void __stdcall e2e_log_proc(int PluginNr, int MsgType, WCHAR* LogString) {
+    (void)PluginNr;
+    if (MsgType == MSGTYPE_IMPORTANTERROR && LogString) {
+        g_e2e_error_logs++;
+    }
+}
+
+static BOOL __stdcall e2e_request_proc(
+    int PluginNr,
+    int RequestType,
+    WCHAR* CustomTitle,
+    WCHAR* CustomText,
+    WCHAR* ReturnedText,
+    int maxlen
+) {
+    (void)PluginNr;
+    (void)CustomTitle;
+    if (RequestType == RT_Password) {
+        g_e2e_pwd_prompts++;
+        if (CustomText) {
+            wcsncpy_s(g_e2e_last_prompt, _countof(g_e2e_last_prompt), CustomText, _TRUNCATE);
+        }
+        if (g_e2e_pwd_mode == 3) {
+            ReturnedText[0] = L'\0';
+            return TRUE;
+        }
+        if (g_e2e_pwd_mode == 4) {
+            return FALSE;
+        }
+        if (g_e2e_pwd_mode == 5 && g_e2e_pwd_prompts == 1) {
+            _snwprintf_s(ReturnedText, (size_t)maxlen, _TRUNCATE, L"%ls ", FIXTURE_PASSWORD);
+            return TRUE;
+        }
+        if (g_e2e_pwd_mode == 0 && g_e2e_pwd_prompts == 1) {
+            wcsncpy_s(ReturnedText, (size_t)maxlen, L"wrong_first_attempt", _TRUNCATE);
+            return TRUE;
+        }
+        if (g_e2e_pwd_mode == 2) {
+            wcsncpy_s(ReturnedText, (size_t)maxlen, L"always_wrong", _TRUNCATE);
+            return TRUE;
+        }
+        wcsncpy_s(ReturnedText, (size_t)maxlen, FIXTURE_PASSWORD, _TRUNCATE);
+        return TRUE;
+    }
+    if (RequestType == RT_MsgOK) {
+        g_e2e_msg_dialogs++;
+        if (CustomText) {
+            wcsncpy_s(g_e2e_last_msg, _countof(g_e2e_last_msg), CustomText, _TRUNCATE);
+        }
+        return TRUE;
+    }
+    return FALSE;
+}
+
+/* Worker for the concurrency scenario: lists one repository a few times and counts failures */
+typedef struct {
+    const Plugin* plugin;
+    const WCHAR*  path;
+} MtJob;
+
+static DWORD WINAPI mt_list_worker(LPVOID param) {
+    const MtJob* job = (const MtJob*)param;
+    for (int i = 0; i < 3; ++i) {
+        WIN32_FIND_DATAW fd;
+        HANDLE h = job->plugin->find_first_w((WCHAR*)job->path, &fd);
+        if (h == INVALID_HANDLE_VALUE) {
+            InterlockedIncrement(&g_e2e_mt_failures);
+            continue;
+        }
+        int entries = 1;
+        while (job->plugin->find_next_w(h, &fd)) entries++;
+        job->plugin->find_close(h);
+        if (entries != 2) InterlockedIncrement(&g_e2e_mt_failures); /* Fixture has two snapshots */
+    }
+    return 0;
+}
+
+/*
+ * Simulates Total Commander's native F5 copy of a directory: walks the remote tree via
+ * FsFindFirstW/FsFindNextW/FsFindClose, creates local directories, and calls FsGetFileW for files.
+ */
+static BOOL tc_copy_folder_recursive(
+    const Plugin* p,
+    const WCHAR* remote_dir,
+    const WCHAR* local_dir,
+    int* out_dirs,
+    int* out_files
+) {
+    if (!CreateDirectoryW(local_dir, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
+        return FALSE;
+    }
+    (*out_dirs)++;
+
+    WIN32_FIND_DATAW fd;
+    HANDLE h = p->find_first_w((WCHAR*)remote_dir, &fd);
+    if (h == INVALID_HANDLE_VALUE) {
+        return GetLastError() == ERROR_NO_MORE_FILES; /* Empty directory is valid */
+    }
+
+    BOOL ok = TRUE;
+    do {
+        WCHAR r_child[MAX_PATH * 2], l_child[MAX_PATH * 2];
+        swprintf_s(r_child, _countof(r_child), L"%ls\\%ls", remote_dir, fd.cFileName);
+        swprintf_s(l_child, _countof(l_child), L"%ls\\%ls", local_dir, fd.cFileName);
+
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            if (!tc_copy_folder_recursive(p, r_child, l_child, out_dirs, out_files)) {
+                ok = FALSE;
+                break;
+            }
+        } else {
+            RemoteInfo ri;
+            ri.SizeLow       = fd.nFileSizeLow;
+            ri.SizeHigh      = fd.nFileSizeHigh;
+            ri.LastWriteTime = fd.ftLastWriteTime;
+            ri.Attr          = (int)fd.dwFileAttributes;
+            if (p->get_file_w(r_child, l_child, FS_COPYFLAGS_OVERWRITE, &ri) != FS_FILE_OK) {
+                ok = FALSE;
+                break;
+            }
+            (*out_files)++;
+        }
+    } while (p->find_next_w(h, &fd));
+
+    p->find_close(h);
+    return ok;
+}
+
+static BOOL verify_pattern_file(const WCHAR* path, DWORD size);
+
+/* Exercises FsGetFileW (single file, overwrite protocol, move rejection, missing file) and recursive folder copy */
+static void test_e2e_file_and_folder_extraction(const Plugin* p, const WCHAR* dir, const WCHAR* data_path) {
+    WCHAR local_readme[MAX_PATH];
+    swprintf_s(local_readme, _countof(local_readme), L"%ls\\extracted_readme.txt", dir);
+    DeleteFileW(local_readme);
+
+    WCHAR remote_readme[MAX_PATH * 2];
+    swprintf_s(remote_readme, _countof(remote_readme), L"%ls\\readme.txt", data_path);
+
+    RemoteInfo ri = {5, 0, {0x802D2000, 0x01D5EF01}, FILE_ATTRIBUTE_READONLY};
+    g_e2e_progress_percent = -1;
+    EXPECT_TRUE(p->get_file_w(remote_readme, local_readme, 0, &ri) == FS_FILE_OK,
+                "FsGetFileW extracts readme.txt");
+    EXPECT_TRUE(g_e2e_progress_percent == 100, "FsGetFileW reports 100% completion to ProgressProcW");
+
+    /* Calling FsGetFileW again without FS_COPYFLAGS_OVERWRITE returns FS_FILE_EXISTS (TC overwrite prompt) */
+    EXPECT_TRUE(p->get_file_w(remote_readme, local_readme, 0, &ri) == FS_FILE_EXISTS,
+                "Existing local file without OVERWRITE flag returns FS_FILE_EXISTS");
+    /* With FS_COPYFLAGS_OVERWRITE it succeeds */
+    EXPECT_TRUE(p->get_file_w(remote_readme, local_readme, FS_COPYFLAGS_OVERWRITE, &ri) == FS_FILE_OK,
+                "Existing local file with FS_COPYFLAGS_OVERWRITE is overwritten");
+
+    /* Move (F6) and resume flags are rejected because snapshots are read-only */
+    EXPECT_TRUE(p->get_file_w(remote_readme, local_readme, FS_COPYFLAGS_MOVE, &ri) == FS_FILE_NOTSUPPORTED,
+                "FS_COPYFLAGS_MOVE returns FS_FILE_NOTSUPPORTED");
+    EXPECT_TRUE(p->get_file_w(remote_readme, local_readme, FS_COPYFLAGS_RESUME, &ri) == FS_FILE_NOTSUPPORTED,
+                "FS_COPYFLAGS_RESUME returns FS_FILE_NOTSUPPORTED");
+    EXPECT_TRUE(p->get_file("a", "b", 0, &ri) == FS_FILE_NOTSUPPORTED,
+                "ANSI FsGetFile stub returns FS_FILE_NOTSUPPORTED");
+
+    /* Non-existent remote file -> FS_FILE_NOTFOUND */
+    WCHAR remote_missing[MAX_PATH * 2], local_missing[MAX_PATH];
+    swprintf_s(remote_missing, _countof(remote_missing), L"%ls\\no_such.txt", data_path);
+    swprintf_s(local_missing, _countof(local_missing), L"%ls\\no_such.txt", dir);
+    EXPECT_TRUE(p->get_file_w(remote_missing, local_missing, 0, &ri) == FS_FILE_NOTFOUND &&
+                GetFileAttributesW(local_missing) == INVALID_FILE_ATTRIBUTES,
+                "Missing snapshot file returns FS_FILE_NOTFOUND without creating local file");
+
+    /* Recursive folder copy (simulating Total Commander copying the "sub" folder and all its contents) */
+    WCHAR remote_sub[MAX_PATH * 2], local_sub[MAX_PATH];
+    swprintf_s(remote_sub, _countof(remote_sub), L"%ls\\sub", data_path);
+    swprintf_s(local_sub, _countof(local_sub), L"%ls\\copied_sub", dir);
+    int copied_dirs = 0, copied_files = 0;
+    EXPECT_TRUE(tc_copy_folder_recursive(p, remote_sub, local_sub, &copied_dirs, &copied_files),
+                "Recursive folder copy via FsFindFirstW + FsGetFileW succeeds");
+    EXPECT_TRUE(copied_dirs == 2 && copied_files == 3,
+                "Copied 'sub', 'sub\\sub2', 'inner.txt', 'deep.txt' and 'binary.dat'");
+    WCHAR deep_local[MAX_PATH], inner_local[MAX_PATH];
+    swprintf_s(inner_local, _countof(inner_local), L"%ls\\inner.txt", local_sub);
+    swprintf_s(deep_local, _countof(deep_local), L"%ls\\sub2\\deep.txt", local_sub);
+    EXPECT_TRUE(GetFileAttributesW(inner_local) != INVALID_FILE_ATTRIBUTES &&
+                GetFileAttributesW(deep_local) != INVALID_FILE_ATTRIBUTES,
+                "Extracted nested files exist on disk");
+
+    WCHAR binary_local[MAX_PATH];
+    swprintf_s(binary_local, _countof(binary_local), L"%ls\\sub2\\binary.dat", local_sub);
+    EXPECT_TRUE(verify_pattern_file(binary_local, 70000), "Binary file inside the copied folder is intact");
+    DeleteFileW(binary_local);
+    DeleteFileW(deep_local);
+    DeleteFileW(inner_local);
+    WCHAR sub2_local[MAX_PATH];
+    swprintf_s(sub2_local, _countof(sub2_local), L"%ls\\sub2", local_sub);
+    RemoveDirectoryW(sub2_local);
+    RemoveDirectoryW(local_sub);
+    DeleteFileW(local_readme);
+}
+
+/* Deterministic binary payload used by the fixture (0x00, 0x0A, 0x0D and 0x1A included) */
+static unsigned char pattern_byte(unsigned long i) {
+    return (unsigned char)((i * 7u + i / 251u) & 0xFFu);
+}
+
+static BOOL verify_pattern_file(const WCHAR* path, DWORD size) {
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
+    BOOL ok = TRUE;
+    DWORD pos = 0, got = 0;
+    unsigned char buf[4096];
+    while (ok && ReadFile(h, buf, sizeof(buf), &got, NULL) && got > 0) {
+        for (DWORD i = 0; ok && i < got; ++i) ok = (buf[i] == pattern_byte(pos + i));
+        pos += got;
+    }
+    CloseHandle(h);
+    return ok && pos == size;
+}
+
+static BOOL file_has_text(const WCHAR* path, const char* text) {
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
+    char buf[64] = {0};
+    DWORD got = 0;
+    BOOL ok = ReadFile(h, buf, sizeof(buf) - 1, &got, NULL) && got == strlen(text) && memcmp(buf, text, got) == 0;
+    CloseHandle(h);
+    return ok;
+}
+
+static int count_partial_files(const WCHAR* dir) {
+    WCHAR pattern[MAX_PATH];
+    swprintf_s(pattern, MAX_PATH, L"%ls\\~rp*.tmp", dir);
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    int n = 0;
+    do { n++; } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return n;
+}
+
+/* Copies the first `segments` backslash-separated components of a virtual path ("\A\B\C", 2 -> "\A\B") */
+static void virtual_path_prefix(const WCHAR* path, int segments, WCHAR* out, size_t cap) {
+    size_t n = 0;
+    int seen = 0;
+    for (; path[n] != L'\0' && n + 1 < cap; ++n) {
+        if (path[n] == L'\\' && ++seen > segments) break;
+        out[n] = path[n];
+    }
+    out[n] = L'\0';
+}
+
+/* FsGetFileW edge cases: data fidelity, failure atomicity, argument validation, abort, password flows */
+static void test_e2e_extraction_edge_cases(const Plugin* p, const WCHAR* dir, const WCHAR* data_path) {
+    const int saved_prompts = g_e2e_pwd_prompts, saved_dialogs = g_e2e_msg_dialogs;
+    const int saved_logs = g_e2e_error_logs, saved_mode = g_e2e_pwd_mode;
+    RemoteInfo ri = {5, 0, {0x802D2000, 0x01D5EF01}, FILE_ATTRIBUTE_READONLY};
+    WCHAR remote[MAX_PATH * 2], local[MAX_PATH], prefix[MAX_PATH * 2];
+
+    /* Binary fidelity and mtime preservation */
+    RemoteInfo ri_bin = {70000, 0, {0x802D2000, 0x01D5EF01}, 0};
+    swprintf_s(remote, _countof(remote), L"%ls\\sub\\sub2\\binary.dat", data_path);
+    swprintf_s(local, _countof(local), L"%ls\\bin.dat", dir);
+    DeleteFileW(local);
+    EXPECT_TRUE(p->get_file_w(remote, local, 0, &ri_bin) == FS_FILE_OK && verify_pattern_file(local, 70000),
+                "Binary file (0x00/0x0A/0x0D/0x1A) is extracted byte for byte");
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    EXPECT_TRUE(GetFileAttributesExW(local, GetFileExInfoStandard, &fad) &&
+                fad.ftLastWriteTime.dwLowDateTime == ri_bin.LastWriteTime.dwLowDateTime &&
+                fad.ftLastWriteTime.dwHighDateTime == ri_bin.LastWriteTime.dwHighDateTime,
+                "LastWriteTime from RemoteInfoStruct is applied to the extracted file");
+
+    /* A failed overwrite must leave the previous file untouched */
+    swprintf_s(remote, _countof(remote), L"%ls\\no_such.bin", data_path);
+    EXPECT_TRUE(p->get_file_w(remote, local, FS_COPYFLAGS_OVERWRITE, &ri) == FS_FILE_NOTFOUND &&
+                verify_pattern_file(local, 70000), "Missing remote file does not destroy the existing local file");
+
+    /* MOVE is refused even together with OVERWRITE and never touches the target */
+    swprintf_s(remote, _countof(remote), L"%ls\\readme.txt", data_path);
+    EXPECT_TRUE(p->get_file_w(remote, local, FS_COPYFLAGS_MOVE | FS_COPYFLAGS_OVERWRITE, &ri) == FS_FILE_NOTSUPPORTED &&
+                verify_pattern_file(local, 70000), "MOVE|OVERWRITE -> FS_FILE_NOTSUPPORTED, target untouched");
+
+    /* Local-side failures map to FS_FILE_WRITEERROR without popups */
+    EXPECT_TRUE(p->get_file_w(remote, (WCHAR*)dir, FS_COPYFLAGS_OVERWRITE, &ri) == FS_FILE_WRITEERROR,
+                "A directory as LocalName -> FS_FILE_WRITEERROR");
+    swprintf_s(local, _countof(local), L"%ls\\no_such_subdir\\x.txt", dir);
+    EXPECT_TRUE(p->get_file_w(remote, local, 0, &ri) == FS_FILE_WRITEERROR,
+                "Non-existent local directory -> FS_FILE_WRITEERROR");
+
+    /* Target names Windows would map to a stream, a device or another file are refused up front */
+    static const WCHAR* const unsafe_leaves[] = {L"carrier.txt:hidden", L"CON", L"nul.txt", L"COM1", L"trail."};
+    WCHAR carrier[MAX_PATH], other[MAX_PATH];
+    swprintf_s(carrier, _countof(carrier), L"%ls\\carrier.txt", dir);
+    swprintf_s(other, _countof(other), L"%ls\\trail", dir);
+    EXPECT_TRUE(write_file(carrier, "keep"), "Carrier file for the stream test is created");
+    DeleteFileW(other);
+    for (size_t i = 0; i < _countof(unsafe_leaves); ++i) {
+        swprintf_s(local, _countof(local), L"%ls\\%ls", dir, unsafe_leaves[i]);
+        EXPECT_TRUE(p->get_file_w(remote, local, FS_COPYFLAGS_OVERWRITE, &ri) == FS_FILE_WRITEERROR,
+                    "A target name Windows cannot store as is -> FS_FILE_WRITEERROR");
+    }
+    swprintf_s(local, _countof(local), L"%ls:hidden", carrier);
+    EXPECT_TRUE(GetFileAttributesW(local) == INVALID_FILE_ATTRIBUTES && file_has_text(carrier, "keep") &&
+                GetFileAttributesW(other) == INVALID_FILE_ATTRIBUTES,
+                "No alternate data stream is written and \"trail.\" does not become \"trail\"");
+    DeleteFileW(carrier);
+    EXPECT_TRUE(g_e2e_msg_dialogs == saved_dialogs, "Local-side failures do not raise Restic error popups");
+
+    /* RemoteInfoStruct variants */
+    swprintf_s(local, _countof(local), L"%ls\\noinfo.txt", dir);
+    DeleteFileW(local);
+    EXPECT_TRUE(p->get_file_w(remote, local, 0, NULL) == FS_FILE_OK && file_has_text(local, "xxxxx"),
+                "ri == NULL is tolerated");
+    RemoteInfo ri_unknown = {5, 0, {0xFFFFFFFE, 0xFFFFFFFF}, 0};
+    EXPECT_TRUE(p->get_file_w(remote, local, FS_COPYFLAGS_OVERWRITE, &ri_unknown) == FS_FILE_OK &&
+                GetFileAttributesExW(local, GetFileExInfoStandard, &fad) &&
+                fad.ftLastWriteTime.dwHighDateTime != 0xFFFFFFFF,
+                "The 'unknown time' marker is not written to the file");
+    RemoteInfo ri_dir = {0, 0, {0, 0}, FILE_ATTRIBUTE_DIRECTORY};
+    EXPECT_TRUE(p->get_file_w(remote, local, FS_COPYFLAGS_OVERWRITE, &ri_dir) == FS_FILE_NOTSUPPORTED,
+                "Directories are never extracted through FsGetFileW");
+    SetFileAttributesW(local, FILE_ATTRIBUTE_READONLY);
+    EXPECT_TRUE(p->get_file_w(remote, local, 0, &ri) == FS_FILE_EXISTS, "Read-only target reported as existing");
+    EXPECT_TRUE(p->get_file_w(remote, local, FS_COPYFLAGS_OVERWRITE, &ri) == FS_FILE_OK &&
+                (GetFileAttributesW(local) & FILE_ATTRIBUTE_READONLY) == 0,
+                "OVERWRITE replaces a read-only target");
+    DeleteFileW(local);
+
+    /* Invalid remote names never reach Restic */
+    WCHAR* bad_remote[6];
+    WCHAR snap_level[MAX_PATH * 2], alias_level[MAX_PATH * 2], no_alias[] = L"\\NoSuchAlias\\x\\y";
+    virtual_path_prefix(data_path, 2, snap_level, _countof(snap_level));
+    virtual_path_prefix(data_path, 1, alias_level, _countof(alias_level));
+    swprintf_s(prefix, _countof(prefix), L"\\MainRepo\\not-a-snapshot\\file");
+    bad_remote[0] = L"\\";
+    bad_remote[1] = alias_level;
+    bad_remote[2] = snap_level;
+    bad_remote[3] = no_alias;
+    bad_remote[4] = prefix;
+    bad_remote[5] = L"";
+    swprintf_s(local, _countof(local), L"%ls\\never.txt", dir);
+    for (int i = 0; i < 6; ++i) {
+        g_tests_run++;
+        DeleteFileW(local);
+        if (p->get_file_w(bad_remote[i], local, 0, &ri) != FS_FILE_NOTFOUND ||
+            GetFileAttributesW(local) != INVALID_FILE_ATTRIBUTES) {
+            printf("[FAIL] %s:%d: invalid remote name #%d must give FS_FILE_NOTFOUND\n", __FUNCTION__, __LINE__, i);
+            g_tests_failed++;
+        }
+    }
+    EXPECT_TRUE(p->get_file_w(NULL, local, 0, &ri) == FS_FILE_NOTFOUND &&
+                p->get_file_w(remote, NULL, 0, &ri) == FS_FILE_NOTFOUND && g_e2e_pwd_prompts == saved_prompts,
+                "NULL arguments are rejected without prompting");
+
+    /* ESC: before the transfer, and in the middle of it (with and without an existing target) */
+    swprintf_s(local, _countof(local), L"%ls\\esc.bin", dir);
+    DeleteFileW(local);
+    g_e2e_force_abort = TRUE;
+    EXPECT_TRUE(p->get_file_w(remote, local, 0, &ri) == FS_FILE_USERABORT &&
+                GetFileAttributesW(local) == INVALID_FILE_ATTRIBUTES, "ESC at the start -> FS_FILE_USERABORT");
+    g_e2e_force_abort = FALSE;
+    RemoteInfo ri_big = {100000, 0, {0x802D2000, 0x01D5EF01}, 0};
+    swprintf_s(remote, _countof(remote), L"%ls\\big.bin", data_path);
+    g_e2e_abort_after_start = TRUE;
+    EXPECT_TRUE(p->get_file_w(remote, local, 0, &ri_big) == FS_FILE_USERABORT &&
+                GetFileAttributesW(local) == INVALID_FILE_ATTRIBUTES && count_partial_files(dir) == 0,
+                "ESC in the middle of a transfer leaves neither target nor temporary file");
+    swprintf_s(local, _countof(local), L"%ls\\bin.dat", dir);
+    EXPECT_TRUE(p->get_file_w(remote, local, FS_COPYFLAGS_OVERWRITE, &ri_big) == FS_FILE_USERABORT &&
+                verify_pattern_file(local, 70000) && count_partial_files(dir) == 0,
+                "ESC during an overwrite keeps the previous file intact");
+    g_e2e_abort_after_start = FALSE;
+    DeleteFileW(local);
+
+    /* Password flows on a repository whose password is not cached yet */
+    swprintf_s(remote, _countof(remote), L"\\ExtractRepo%ls\\readme.txt", data_path + wcslen(L"\\MainRepo"));
+    swprintf_s(local, _countof(local), L"%ls\\slot.txt", dir);
+    g_e2e_pwd_mode = 4; /* user cancels the password dialog */
+    g_e2e_pwd_prompts = 0;
+    EXPECT_TRUE(p->get_file_w(remote, local, 0, &ri) == FS_FILE_USERABORT && g_e2e_pwd_prompts == 1 &&
+                g_e2e_msg_dialogs == saved_dialogs, "Cancelled password dialog -> FS_FILE_USERABORT, no popup");
+    g_e2e_pwd_mode = 2; /* wrong password three times */
+    g_e2e_pwd_prompts = 0;
+    EXPECT_TRUE(p->get_file_w(remote, local, 0, &ri) == FS_FILE_READERROR && g_e2e_pwd_prompts == 3 &&
+                g_e2e_msg_dialogs == saved_dialogs + 1 && GetFileAttributesW(local) == INVALID_FILE_ATTRIBUTES,
+                "Three wrong passwords -> FS_FILE_READERROR with one popup and no local file");
+    g_e2e_pwd_mode = 0; /* wrong first, correct second */
+    g_e2e_pwd_prompts = 0;
+    EXPECT_TRUE(p->get_file_w(remote, local, 0, &ri) == FS_FILE_OK && g_e2e_pwd_prompts == 2 &&
+                file_has_text(local, "xxxxx"), "Retry after a wrong password extracts the file");
+    g_e2e_pwd_prompts = 0;
+    EXPECT_TRUE(p->get_file_w(remote, local, FS_COPYFLAGS_OVERWRITE, &ri) == FS_FILE_OK && g_e2e_pwd_prompts == 0,
+                "The validated password is cached for the next file of the same copy operation");
+    DeleteFileW(local);
+
+    EXPECT_TRUE(count_partial_files(dir) == 0, "No temporary files remain in the destination directory");
+    g_e2e_pwd_prompts = saved_prompts;
+    g_e2e_msg_dialogs = saved_dialogs;
+    g_e2e_error_logs  = saved_logs;
+    g_e2e_pwd_mode    = saved_mode;
+}
+
+/* Recursively descends the first directory at each depth until the fixture "data" directory is found */
+static BOOL descend_to_fixture_data(
+    const Plugin* p,
+    const WCHAR* current_path,
+    int depth,
+    WCHAR* out_data_path,
+    size_t out_cap
+) {
+    if (depth > 16) return FALSE;
+
+    WIN32_FIND_DATAW fd;
+    HANDLE h = p->find_first_w((WCHAR*)current_path, &fd);
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
+
+    WCHAR first_dir[MAX_PATH] = {0};
+    BOOL found_data = FALSE;
+    do {
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            if (wcscmp(fd.cFileName, L"data") == 0) {
+                found_data = TRUE;
+                break;
+            }
+            if (first_dir[0] == L'\0') {
+                wcsncpy_s(first_dir, MAX_PATH, fd.cFileName, _TRUNCATE);
+            }
+        }
+    } while (p->find_next_w(h, &fd));
+    p->find_close(h);
+
+    if (found_data) {
+        swprintf_s(out_data_path, out_cap, L"%ls\\data", current_path);
+        return TRUE;
+    }
+    if (first_dir[0] == L'\0') return FALSE;
+
+    WCHAR next_path[MAX_PATH * 2];
+    swprintf_s(next_path, _countof(next_path), L"%ls\\%ls", current_path, first_dir);
+    return descend_to_fixture_data(p, next_path, depth + 1, out_data_path, out_cap);
+}
+
+/* Scenario C: full end-to-end navigation (Level 0 -> Level 1 -> Level 2+, password retry & session) */
+static void test_live_end_to_end_navigation(void) {
+    if (GetFileAttributesW(L"tmp\\restic.exe") == INVALID_FILE_ATTRIBUTES ||
+        GetFileAttributesW(L"tmp\\test_fixture\\repo\\config") == INVALID_FILE_ATTRIBUTES) {
+        printf("[SKIP] tmp\\restic.exe or tmp\\test_fixture\\repo not found: E2E DLL test skipped.\n");
+        return;
+    }
+
+    WCHAR restic_abs[MAX_PATH] = {0}, repo_abs[MAX_PATH] = {0};
+    GetFullPathNameW(L"tmp\\restic.exe", MAX_PATH, restic_abs, NULL);
+    GetFullPathNameW(L"tmp\\test_fixture\\repo", MAX_PATH, repo_abs, NULL);
+
+    WCHAR dir[MAX_PATH], ini[MAX_PATH];
+    EXPECT_TRUE(make_unique_dir(L"restic_dll_e2e", dir, MAX_PATH), "Create E2E plugin directory");
+    swprintf_s(ini, MAX_PATH, L"%ls\\TCResticBrowser.ini", dir);
+
+    char restic_a[MAX_PATH] = {0}, repo_a[MAX_PATH] = {0}, dir_a[MAX_PATH] = {0};
+    static char ini_text[6144]; /* Static: /analyze (C6262) caps a frame at 16 KB */
+    WideCharToMultiByte(CP_ACP, 0, restic_abs, -1, restic_a, sizeof(restic_a), NULL, NULL);
+    WideCharToMultiByte(CP_ACP, 0, dir, -1, dir_a, sizeof(dir_a), NULL, NULL);
+    WideCharToMultiByte(CP_ACP, 0, repo_abs, -1, repo_a, sizeof(repo_a), NULL, NULL);
+    char long_alias[256];
+    memset(long_alias, 'L', 250);
+    long_alias[250] = '\0';
+    int ini_len = snprintf(
+        ini_text,
+        sizeof(ini_text),
+        "[Settings]\r\nResticPath=%s\r\n[Logging]\r\nLogPath=%s\\log dir\\e2e.log\r\n"
+        "[Repositories]\r\nMainRepo=%s\r\nSecondRepo=%s\r\nThirdRepo=%s\r\n"
+        "ExtractRepo=%s\r\nHintRepo=%s\r\n"
+        "MissingRepo=C:\\no_such_restic_repo_999\r\n%s=C:\\no_such_restic_repo_999\r\n",
+        restic_a,
+        dir_a,
+        repo_a,
+        repo_a,
+        repo_a,
+        repo_a,
+        repo_a,
+        long_alias
+    );
+    for (int i = 1; i <= 10; ++i) { /* More aliases than session slots (8) */
+        ini_len += snprintf(ini_text + ini_len, sizeof(ini_text) - (size_t)ini_len, "Slot%02d=%s\r\n", i, repo_a);
+    }
+    EXPECT_TRUE(ini_len > 0 && (size_t)ini_len < sizeof(ini_text), "E2E INI fits its buffer");
+    EXPECT_TRUE(write_file(ini, ini_text), "Write E2E INI");
+
+    Plugin p;
+    EXPECT_TRUE(load_plugin_copy(dir, &p), "Load plugin copy for E2E");
+    EXPECT_TRUE(p.init_w(42, (void*)e2e_progress_proc, (void*)e2e_log_proc, (void*)e2e_request_proc) == 0,
+                "Register Total Commander callbacks");
+
+    /* 1. Level 1 (\MainRepo): wrong password on first prompt -> automatic retry -> 2 snapshots listed */
+    g_e2e_pwd_mode    = 0;
+    g_e2e_pwd_prompts = 0;
+    g_e2e_msg_dialogs = 0;
+    g_e2e_error_logs  = 0;
+
+    WIN32_FIND_DATAW fd;
+    HANDLE h = p.find_first_w(L"\\MainRepo", &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE, "Level 1 snapshot enumeration succeeds after password retry");
+    EXPECT_TRUE(g_e2e_pwd_prompts == 2, "Prompted twice (initial + 1 retry after wrong password)");
+    EXPECT_TRUE(wcsstr(g_e2e_last_prompt, L"Wrong password") != NULL, "Retry prompt tells the user the password was wrong");
+    EXPECT_TRUE(g_e2e_msg_dialogs == 0, "No error dialog when retry succeeds");
+
+    WCHAR latest_snap[MAX_PATH] = {0};
+    size_t snap_count = 0;
+    do {
+        snap_count++;
+        wcsncpy_s(latest_snap, MAX_PATH, fd.cFileName, _TRUNCATE);
+    } while (p.find_next_w(h, &fd));
+    p.find_close(h);
+    EXPECT_TRUE(snap_count == 2, "Both fixture snapshots returned at Level 1");
+
+    /* 2. Level 2+ (\MainRepo\<snap>\...): session password cached in RAM (0 additional prompts) */
+    g_e2e_pwd_prompts = 0;
+    static WCHAR snap_root[MAX_PATH * 2], data_path[MAX_PATH * 2]; /* Static: /analyze (C6262) caps a frame at 16 KB */
+    swprintf_s(snap_root, _countof(snap_root), L"\\MainRepo\\%ls", latest_snap);
+    EXPECT_TRUE(descend_to_fixture_data(&p, snap_root, 0, data_path, _countof(data_path)),
+                "Descend snapshot directory tree down to fixture data folder");
+
+    h = p.find_first_w(data_path, &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE, "List data directory inside snapshot");
+    BOOL saw_readme = FALSE, saw_empty_dir = FALSE;
+    do {
+        if (wcscmp(fd.cFileName, L"readme.txt") == 0 && fd.nFileSizeLow == 5) saw_readme = TRUE;
+        if (wcscmp(fd.cFileName, L"empty_dir") == 0 && (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            saw_empty_dir = TRUE;
+        }
+    } while (p.find_next_w(h, &fd));
+    p.find_close(h);
+    EXPECT_TRUE(saw_readme && saw_empty_dir, "data folder contains readme.txt (5 B) and empty_dir");
+
+    /* Empty directory inside snapshot -> ERROR_NO_MORE_FILES, no error popup */
+    static WCHAR empty_path[MAX_PATH * 2];
+    swprintf_s(empty_path, _countof(empty_path), L"%ls\\empty_dir", data_path);
+    SetLastError(0);
+    EXPECT_TRUE(p.find_first_w(empty_path, &fd) == INVALID_HANDLE_VALUE &&
+                GetLastError() == ERROR_NO_MORE_FILES, "Empty snapshot directory returns ERROR_NO_MORE_FILES");
+
+    /* 2b. File extraction via FsGetFileW + recursive directory copy (as Total Commander does on F5) */
+    test_e2e_file_and_folder_extraction(&p, dir, data_path);
+    test_e2e_extraction_edge_cases(&p, dir, data_path);
+
+    /* Non-existent directory inside snapshot -> ERROR_PATH_NOT_FOUND, no error popup */
+    static WCHAR missing_sub[MAX_PATH * 2];
+    swprintf_s(missing_sub, _countof(missing_sub), L"%ls\\does_not_exist", data_path);
+    SetLastError(0);
+    EXPECT_TRUE(p.find_first_w(missing_sub, &fd) == INVALID_HANDLE_VALUE &&
+                GetLastError() == ERROR_PATH_NOT_FOUND, "Missing snapshot path returns ERROR_PATH_NOT_FOUND");
+    EXPECT_TRUE(g_e2e_pwd_prompts == 0 && g_e2e_msg_dialogs == 0,
+                "All navigations within MainRepo reused the cached RAM password with no popups");
+
+    /* 3. Repositories keep independent sessions: SecondRepo prompts once, MainRepo is NOT asked again */
+    g_e2e_pwd_mode = 1;
+    h = p.find_first_w(L"\\SecondRepo", &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE, "Level 1 on SecondRepo succeeds");
+    p.find_close(h);
+    EXPECT_TRUE(g_e2e_pwd_prompts == 1, "First visit of another repository prompts exactly once");
+    h = p.find_first_w(L"\\MainRepo", &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE, "Back to MainRepo");
+    p.find_close(h);
+    h = p.find_first_w(L"\\SecondRepo", &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE, "And again SecondRepo");
+    p.find_close(h);
+    EXPECT_TRUE(g_e2e_pwd_prompts == 1, "Alternating between two panels' repositories never re-prompts");
+
+    /* 4. Exhausting all 3 password attempts returns ERROR_ACCESS_DENIED and shows an error dialog */
+    g_e2e_pwd_mode    = 2;
+    g_e2e_pwd_prompts = 0;
+    g_e2e_msg_dialogs = 0;
+    g_e2e_error_logs  = 0;
+    SetLastError(0);
+    EXPECT_TRUE(p.find_first_w(L"\\ThirdRepo", &fd) == INVALID_HANDLE_VALUE &&
+                GetLastError() == ERROR_ACCESS_DENIED, "3 wrong passwords -> ERROR_ACCESS_DENIED");
+    EXPECT_TRUE(g_e2e_pwd_prompts == 3, "Asked password 3 times before giving up");
+    EXPECT_TRUE(g_e2e_msg_dialogs == 1 && g_e2e_error_logs == 1, "Notified user and log after password failure");
+    /* A wrong password must not stay cached: the next visit prompts again (and succeeds now) */
+    g_e2e_pwd_mode    = 1;
+    g_e2e_pwd_prompts = 0;
+    h = p.find_first_w(L"\\ThirdRepo", &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 1, "Rejected password was not cached");
+    p.find_close(h);
+
+    /* 4b. Empty password and cancelled dialog: ERROR_CANCELLED, no popup, nothing cached */
+    g_e2e_msg_dialogs = 0;
+    for (int mode = 3; mode <= 4; ++mode) {
+        g_e2e_pwd_mode    = mode;
+        g_e2e_pwd_prompts = 0;
+        SetLastError(0);
+        EXPECT_TRUE(p.find_first_w(L"\\Slot01", &fd) == INVALID_HANDLE_VALUE &&
+                    GetLastError() == ERROR_CANCELLED, "Empty/cancelled password -> ERROR_CANCELLED");
+        EXPECT_TRUE(g_e2e_pwd_prompts == 1 && g_e2e_msg_dialogs == 0, "Single prompt and no error dialog");
+    }
+    g_e2e_pwd_mode    = 1;
+    g_e2e_pwd_prompts = 0;
+    h = p.find_first_w(L"\\Slot01", &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 1, "Nothing was cached after empty/cancelled input");
+    p.find_close(h);
+
+    /* 4c. Session table has 8 slots: visiting 10 repositories recycles the oldest ones */
+    g_e2e_pwd_prompts = 0;
+    for (int i = 2; i <= 10; ++i) {
+        WCHAR slot_path[32];
+        swprintf_s(slot_path, _countof(slot_path), L"\\Slot%02d", i);
+        h = p.find_first_w(slot_path, &fd);
+        EXPECT_TRUE(h != INVALID_HANDLE_VALUE, "Slot repository listed");
+        p.find_close(h);
+    }
+    EXPECT_TRUE(g_e2e_pwd_prompts == 9, "Each new repository prompted once");
+    g_e2e_pwd_prompts = 0;
+    h = p.find_first_w(L"\\Slot10", &fd);
+    p.find_close(h);
+    EXPECT_TRUE(g_e2e_pwd_prompts == 0, "Most recent repository still cached");
+    h = p.find_first_w(L"\\Slot01", &fd);
+    p.find_close(h);
+    EXPECT_TRUE(g_e2e_pwd_prompts == 1, "Oldest session was evicted and requires a new password (no crash, no corruption)");
+
+    /* 5. Non-existent repository (\MissingRepo) -> exit code 10 -> ERROR_PATH_NOT_FOUND + dialog */
+    g_e2e_pwd_mode    = 1;
+    g_e2e_msg_dialogs = 0;
+    g_e2e_error_logs  = 0;
+    SetLastError(0);
+    EXPECT_TRUE(p.find_first_w(L"\\MissingRepo", &fd) == INVALID_HANDLE_VALUE &&
+                GetLastError() == ERROR_PATH_NOT_FOUND, "Missing repository returns ERROR_PATH_NOT_FOUND");
+    EXPECT_TRUE(g_e2e_msg_dialogs == 1 && g_e2e_error_logs == 1, "Missing repository notifies user and log");
+    /* Unvalidated password for a repository that failed to open is not kept */
+    g_e2e_pwd_prompts = 0;
+    p.find_first_w(L"\\MissingRepo", &fd);
+    EXPECT_TRUE(g_e2e_pwd_prompts == 1, "Password of an unreachable repository is not cached");
+
+    /* 5b. A 250-character alias plus a long Restic message must not overflow any message buffer */
+    WCHAR long_path[300] = L"\\";
+    for (int i = 0; i < 250; ++i) long_path[1 + i] = L'L';
+    long_path[251] = L'\0';
+    g_e2e_msg_dialogs = 0;
+    SetLastError(0);
+    EXPECT_TRUE(p.find_first_w(long_path, &fd) == INVALID_HANDLE_VALUE &&
+                GetLastError() == ERROR_PATH_NOT_FOUND && g_e2e_msg_dialogs == 1,
+                "Very long alias is reported without crashing");
+
+    /* 6. Pressing ESC in Total Commander (ProgressProc returns 1) cancels without error dialog */
+    g_e2e_pwd_mode       = 1;
+    g_e2e_force_abort    = TRUE;
+    g_e2e_progress_calls = 0;
+    g_e2e_msg_dialogs    = 0;
+    g_e2e_progress_target[0] = L'\0';
+    SetLastError(0);
+    EXPECT_TRUE(p.find_first_w(L"\\SecondRepo", &fd) == INVALID_HANDLE_VALUE &&
+                GetLastError() == ERROR_CANCELLED, "User abort via ProgressProc returns ERROR_CANCELLED");
+    EXPECT_TRUE(g_e2e_progress_calls > 0 && g_e2e_msg_dialogs == 0,
+                "ProgressProc was polled and no error dialog was shown on user cancel");
+    EXPECT_TRUE(g_e2e_progress_percent == 0, "Progress is reported as indeterminate (0 %)");
+    EXPECT_TRUE(wcsstr(g_e2e_progress_target, repo_abs) == NULL && wcsstr(g_e2e_progress_target, L"SecondRepo") != NULL,
+                "Progress dialog shows the alias, never the repository URL (it may contain credentials)");
+    g_e2e_force_abort = FALSE;
+    /* A password restic has not accepted yet is not kept after ESC: the next visit asks again */
+    g_e2e_pwd_prompts = 0;
+    h = p.find_first_w(L"\\SecondRepo", &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 1, "Unverified password not cached after a user abort");
+    p.find_close(h);
+    /* A password restic has accepted survives a later ESC */
+    g_e2e_force_abort = TRUE;
+    EXPECT_TRUE(p.find_first_w(L"\\SecondRepo", &fd) == INVALID_HANDLE_VALUE && GetLastError() == ERROR_CANCELLED,
+                "Second user abort");
+    g_e2e_force_abort = FALSE;
+    g_e2e_pwd_prompts = 0;
+    h = p.find_first_w(L"\\SecondRepo", &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 0, "Verified password survives a user abort");
+    p.find_close(h);
+
+    /* 7. Concurrent listings from several threads (TC may call the plugin from worker threads) */
+    {
+        enum { THREADS = 6 };
+        HANDLE threads[THREADS];
+        MtJob jobs[THREADS];
+        g_e2e_mt_failures = 0;
+        for (int i = 0; i < THREADS; ++i) {
+            jobs[i].plugin = &p;
+            jobs[i].path   = (i % 2) ? L"\\MainRepo" : L"\\SecondRepo";
+            threads[i]     = CreateThread(NULL, 0, mt_list_worker, &jobs[i], 0, NULL);
+        }
+        WaitForMultipleObjects(THREADS, threads, TRUE, 120000);
+        for (int i = 0; i < THREADS; ++i) CloseHandle(threads[i]);
+        EXPECT_TRUE(g_e2e_mt_failures == 0, "Concurrent listings all succeed (cached sessions, thread-safe)");
+    }
+
+    /* A rejected password with a trailing space: the retry prompt (and the log) says so */
+    g_e2e_pwd_mode    = 5;
+    g_e2e_pwd_prompts = 0;
+    g_e2e_msg_dialogs = 0;
+    h = p.find_first_w(L"\\HintRepo", &fd);
+    if (h != INVALID_HANDLE_VALUE) p.find_close(h);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 2 && g_e2e_msg_dialogs == 0,
+                "Password with a trailing space rejected, then the correct one accepted");
+    EXPECT_TRUE(wcsstr(g_e2e_last_prompt, L"Wrong password. Note: the password you entered ends with a space.") != NULL,
+                "Retry prompt points out the trailing space");
+
+    /* While passwords are cached, the root starts with "<wastebasket> Forget N Passwords"; Enter on it
+       wipes them all, reports how many and sends Total Commander back to the root (re-read) */
+    WCHAR forget[MAX_PATH] = L"\\", exec_name[MAX_PATH];
+    h = p.find_first_w(L"\\", &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE && wcsncmp(fd.cFileName, L"\U0001F5D1 Forget ", 9) == 0 &&
+                wcscmp(fd.cFileName + wcslen(fd.cFileName) - 10, L" Passwords") == 0 &&
+                (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0,
+                "Root starts with the 'Forget N Passwords' file while passwords are cached");
+    wcscat_s(forget, MAX_PATH, fd.cFileName);
+    p.find_close(h);
+    WCHAR open_verb[] = L"open";
+    g_e2e_msg_dialogs = 0;
+    wcscpy_s(exec_name, MAX_PATH, forget);
+    EXPECT_TRUE(p.execute_w(NULL, exec_name, open_verb) == FS_EXEC_SYMLINK && g_e2e_msg_dialogs == 1 &&
+                wcsstr(g_e2e_last_msg, L"remembered repository passwords.") != NULL && wcscmp(exec_name, L"\\") == 0,
+                "Forget wipes the cache, reports the number and sends Total Commander back to the root");
+    h = p.find_first_w(L"\\", &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE && wcsncmp(fd.cFileName, L"\U0001F5D1", 2) != 0,
+                "The forget entry disappears once nothing is cached");
+    p.find_close(h);
+    g_e2e_pwd_mode    = 1;
+    g_e2e_pwd_prompts = 0;
+    h = p.find_first_w(L"\\MainRepo", &fd);
+    if (h != INVALID_HANDLE_VALUE) p.find_close(h);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 1, "A forgotten password is asked for again");
+    h = p.find_first_w(L"\\", &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE && wcscmp(fd.cFileName, L"\U0001F5D1 Forget 1 Password") == 0,
+                "Singular entry name");
+    p.find_close(h);
+    /* An INI without repositories still lists the entry, so cached passwords can always be wiped */
+    EXPECT_TRUE(write_file(ini, "[Settings]\r\n[Repositories]\r\n"), "Write an INI without repositories");
+    h = p.find_first_w(L"\\", &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE && wcscmp(fd.cFileName, L"\U0001F5D1 Forget 1 Password") == 0 &&
+                !p.find_next_w(h, &fd),
+                "Forget entry listed alone when the INI has no repositories");
+    if (h != INVALID_HANDLE_VALUE) p.find_close(h);
+    EXPECT_TRUE(write_file(ini, ini_text), "Restore the E2E INI");
+    h = p.find_first_w(L"\\", &fd); /* Reads it again, which also turns the log back on */
+    if (h != INVALID_HANDLE_VALUE) p.find_close(h);
+    wcscpy_s(exec_name, MAX_PATH, forget);
+    EXPECT_TRUE(p.execute_w(NULL, exec_name, open_verb) == FS_EXEC_SYMLINK &&
+                wcscmp(g_e2e_last_msg, L"Forgot 1 remembered repository password.") == 0,
+                "A stale entry name (other count) still forgets; singular message");
+    wcscpy_s(exec_name, MAX_PATH, forget);
+    EXPECT_TRUE(p.execute_w(NULL, exec_name, open_verb) == FS_EXEC_SYMLINK &&
+                wcscmp(g_e2e_last_msg, L"No repository password was remembered.") == 0 &&
+                wcscmp(exec_name, L"\\") == 0,
+                "Nothing to forget: a stale entry still sends Total Commander back to the root");
+    WCHAR some_file[] = L"\\MainRepo\\2026-10-18_12-00-00_[abcd1234]\\readme.txt";
+    WCHAR properties[] = L"properties", chmod_verb[] = L"chmod 755", quote_verb[] = L"quote cd x";
+    EXPECT_TRUE(p.execute_w(NULL, some_file, open_verb) == FS_EXEC_YOURSELF,
+                "Enter on a snapshot file is left to Total Commander (download and open)");
+    EXPECT_TRUE(p.execute_w(NULL, forget, properties) == FS_EXEC_OK &&
+                p.execute_w(NULL, some_file, chmod_verb) == FS_EXEC_ERROR &&
+                p.execute_w(NULL, some_file, quote_verb) == FS_EXEC_ERROR,
+                "properties is a no-op, chmod and quote commands are refused");
+    EXPECT_TRUE(p.find_first_w(forget, &fd) == INVALID_HANDLE_VALUE, "The forget entry is not a folder");
+
+    /* [Logging] LogPath: restic runs, exit codes and prompts are logged; passwords never are */
+    WCHAR log_dir[MAX_PATH], log_file[MAX_PATH];
+    swprintf_s(log_dir, MAX_PATH, L"%ls\\log dir", dir);
+    swprintf_s(log_file, MAX_PATH, L"%ls\\e2e.log", log_dir);
+    char* log_text = read_text_file(log_file);
+    EXPECT_TRUE(log_text != NULL, "Diagnostic log written to [Logging] LogPath");
+    char fixture_pwd_u8[128] = {0};
+    WideCharToMultiByte(CP_UTF8, 0, FIXTURE_PASSWORD, -1, fixture_pwd_u8, sizeof(fixture_pwd_u8), NULL, NULL);
+    BOOL logged_init   = strstr(log_text, "FsInitW: TCResticBrowser") != NULL;
+    BOOL logged_run    = strstr(log_text, "restic run: ") != NULL && strstr(log_text, "snapshots --json --no-lock") != NULL;
+    BOOL logged_wrong  = strstr(log_text, "exit code 12 after ") != NULL &&
+                         strstr(log_text, "wrong password or no key found") != NULL;
+    BOOL logged_prompt = strstr(log_text, "Password prompt for 'MainRepo'") != NULL &&
+                         strstr(log_text, "characters entered") != NULL;
+    BOOL logged_error  = strstr(log_text, "Error shown to the user: ") != NULL;
+    BOOL logged_forget = strstr(log_text, "Forget All Passwords: 1 cached password(s) wiped") != NULL;
+    BOOL logged_hint   = strstr(log_text, "Password prompt for 'HintRepo': ") != NULL &&
+                         strstr(log_text, "characters entered; the password ends with a space") != NULL;
+    BOOL leaked        = strstr(log_text, fixture_pwd_u8) != NULL || strstr(log_text, "wrong_first_attempt") != NULL ||
+                         strstr(log_text, "always_wrong") != NULL;
+    free(log_text);
+    EXPECT_TRUE(logged_init && logged_run && logged_wrong, "Log has the plugin start, restic command lines and exit codes");
+    EXPECT_TRUE(logged_prompt && logged_error, "Log has password prompts (length only) and errors shown to the user");
+    EXPECT_TRUE(logged_hint, "Log notes a trailing space in an entered password");
+    EXPECT_TRUE(logged_forget, "Log notes Forget All Passwords");
+    EXPECT_TRUE(!leaked, "No password, right or wrong, appears in the log");
+
+    unload_plugin_copy(&p, dir);
+    DeleteFileW(ini);
+    DeleteFileW(log_file);
+    RemoveDirectoryW(log_dir);
+    RemoveDirectoryW(dir);
+}
+
+/* Copies the directory tree src into dst (created); used to place the fixture repository elsewhere */
+static BOOL copy_tree(const WCHAR* src, const WCHAR* dst) {
+    if (!CreateDirectoryW(dst, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return FALSE;
+    WCHAR pattern[MAX_PATH * 2];
+    swprintf_s(pattern, _countof(pattern), L"%ls\\*", src);
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
+    BOOL ok = TRUE;
+    do {
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+        WCHAR from[MAX_PATH * 2], to[MAX_PATH * 2];
+        swprintf_s(from, _countof(from), L"%ls\\%ls", src, fd.cFileName);
+        swprintf_s(to, _countof(to), L"%ls\\%ls", dst, fd.cFileName);
+        ok = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? copy_tree(from, to) : CopyFileW(from, to, FALSE);
+    } while (ok && FindNextFileW(h, &fd));
+    FindClose(h);
+    return ok;
+}
+
+/* Deletes the directory tree path (best effort) */
+static void delete_tree(const WCHAR* path) {
+    WCHAR pattern[MAX_PATH * 2];
+    swprintf_s(pattern, _countof(pattern), L"%ls\\*", path);
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pattern, &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+            WCHAR child[MAX_PATH * 2];
+            swprintf_s(child, _countof(child), L"%ls\\%ls", path, fd.cFileName);
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                delete_tree(child);
+            } else {
+                SetFileAttributesW(child, FILE_ATTRIBUTE_NORMAL);
+                DeleteFileW(child);
+            }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    RemoveDirectoryW(path);
+}
+
+/*
+ * Scenario D: paths with spaces, written the ways a user would write them in TCResticBrowser.ini -
+ * ResticPath and repository paths with spaces, unquoted and quoted, with and without a trailing
+ * backslash. restic.exe and the repository live in folders with spaces, like "C:\Program Files".
+ */
+static void test_live_paths_with_spaces(void) {
+    if (GetFileAttributesW(L"tmp\\restic.exe") == INVALID_FILE_ATTRIBUTES ||
+        GetFileAttributesW(L"tmp\\test_fixture\\repo\\config") == INVALID_FILE_ATTRIBUTES) {
+        printf("[SKIP] tmp\\restic.exe or tmp\\test_fixture\\repo not found: spaces E2E test skipped.\n");
+        return;
+    }
+
+    WCHAR dir[MAX_PATH], exe_dir[MAX_PATH], exe[MAX_PATH], repo[MAX_PATH], ini[MAX_PATH];
+    EXPECT_TRUE(make_unique_dir(L"restic dll spaces", dir, MAX_PATH), "Create plugin directory with spaces");
+    swprintf_s(exe_dir, MAX_PATH, L"%ls\\Program Files\\Restic", dir);
+    swprintf_s(exe, MAX_PATH, L"%ls\\restic.exe", exe_dir);
+    swprintf_s(repo, MAX_PATH, L"%ls\\My Backups\\Firefox Thunderbird.restic-repo", dir);
+    swprintf_s(ini, MAX_PATH, L"%ls\\TCResticBrowser.ini", dir);
+
+    WCHAR program_files[MAX_PATH], backups[MAX_PATH];
+    swprintf_s(program_files, MAX_PATH, L"%ls\\Program Files", dir);
+    swprintf_s(backups, MAX_PATH, L"%ls\\My Backups", dir);
+    EXPECT_TRUE((CreateDirectoryW(program_files, NULL) || GetLastError() == ERROR_ALREADY_EXISTS) &&
+                (CreateDirectoryW(exe_dir, NULL) || GetLastError() == ERROR_ALREADY_EXISTS) &&
+                CopyFileW(L"tmp\\restic.exe", exe, FALSE),
+                "Copy restic.exe into a folder with spaces");
+    EXPECT_TRUE((CreateDirectoryW(backups, NULL) || GetLastError() == ERROR_ALREADY_EXISTS) &&
+                copy_tree(L"tmp\\test_fixture\\repo", repo),
+                "Copy the fixture repository into a folder with spaces");
+
+    char exe_u8[MAX_PATH * 3] = {0}, repo_u8[MAX_PATH * 3] = {0}, dir_u8[MAX_PATH * 3] = {0};
+    static char ini_text[4096]; /* Static: /analyze (C6262) caps a frame at 16 KB */
+    WideCharToMultiByte(CP_UTF8, 0, exe, -1, exe_u8, sizeof(exe_u8), NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, dir, -1, dir_u8, sizeof(dir_u8), NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, repo, -1, repo_u8, sizeof(repo_u8), NULL, NULL);
+    int ini_len = snprintf(
+        ini_text,
+        sizeof(ini_text),
+        "[Settings]\r\nResticPath=%s\r\nPasswordTimeoutSeconds=5\r\n[Logging]\r\nLogPath=%s\\spaces.log\r\n"
+        "[Repositories]\r\n"
+        "Plain=%s\r\nTrailing Backslash=%s\\\r\nQuoted=\"%s\"\r\nQuoted Trailing=\"%s\\\"\r\nTimed=%s\r\n",
+        exe_u8, dir_u8, repo_u8, repo_u8, repo_u8, repo_u8, repo_u8
+    );
+    EXPECT_TRUE(ini_len > 0 && (size_t)ini_len < sizeof(ini_text), "Spaces INI fits its buffer");
+    EXPECT_TRUE(write_file(ini, ini_text), "Write spaces INI");
+
+    Plugin p;
+    EXPECT_TRUE(load_plugin_copy(dir, &p), "Load plugin copy from a folder with spaces");
+    EXPECT_TRUE(p.init_w(43, (void*)e2e_progress_proc, (void*)e2e_log_proc, (void*)e2e_request_proc) == 0,
+                "Register Total Commander callbacks (spaces)");
+
+    const WCHAR* aliases[] = {L"Plain", L"Trailing Backslash", L"Quoted", L"Quoted Trailing"};
+    for (size_t i = 0; i < _countof(aliases); ++i) {
+        g_e2e_pwd_mode    = 1;
+        g_e2e_pwd_prompts = 0;
+        g_e2e_msg_dialogs = 0;
+        WCHAR path[MAX_PATH];
+        swprintf_s(path, MAX_PATH, L"\\%ls", aliases[i]);
+        WIN32_FIND_DATAW fd;
+        HANDLE h = p.find_first_w(path, &fd);
+        size_t snaps = 0;
+        if (h != INVALID_HANDLE_VALUE) {
+            do snaps++; while (p.find_next_w(h, &fd));
+            p.find_close(h);
+        }
+        char msg[160];
+        snprintf(msg, sizeof(msg), "Snapshots listed through alias #%u (path with spaces), one prompt, no error",
+                 (unsigned)i);
+        EXPECT_TRUE(snaps == 2 && g_e2e_pwd_prompts == 1 && g_e2e_msg_dialogs == 0, msg);
+    }
+
+    /* PasswordTimeoutSeconds=5: reused within the timeout (counted from when restic first accepted
+       it, not from the last use), wiped by the timer afterwards even without any plugin call */
+    g_e2e_pwd_prompts = 0;
+    WIN32_FIND_DATAW fd2;
+    HANDLE h2 = p.find_first_w(L"\\Timed", &fd2);
+    if (h2 != INVALID_HANDLE_VALUE) p.find_close(h2);
+    h2 = p.find_first_w(L"\\Timed", &fd2);
+    if (h2 != INVALID_HANDLE_VALUE) p.find_close(h2);
+    EXPECT_TRUE(h2 != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 1, "Cached password reused within the timeout");
+    Sleep(6500);
+    WCHAR log_file[MAX_PATH];
+    swprintf_s(log_file, MAX_PATH, L"%ls\\spaces.log", dir);
+    char* log_text = read_text_file(log_file);
+    BOOL expired = log_text && strstr(log_text, "Cached password for 'Timed' forgotten: PasswordTimeoutSeconds (5 s) elapsed");
+    free(log_text);
+    EXPECT_TRUE(expired, "The timer wiped the password after the timeout without a plugin call");
+    h2 = p.find_first_w(L"\\Timed", &fd2);
+    if (h2 != INVALID_HANDLE_VALUE) p.find_close(h2);
+    EXPECT_TRUE(h2 != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 2, "Expired password is asked for again");
+
+    /* PasswordTimeoutResetOnUse=yes: each completed use starts the interval again, so a repository
+       in active use outlives the timeout; once it is left alone the password expires */
+    int reset_len = snprintf(
+        ini_text, sizeof(ini_text),
+        "[Settings]\r\nResticPath=%s\r\nPasswordTimeoutSeconds=4\r\nPasswordTimeoutResetOnUse=yes\r\n"
+        "[Logging]\r\nLogPath=%s\\spaces.log\r\n[Repositories]\r\nSliding=%s\r\n",
+        exe_u8, dir_u8, repo_u8);
+    EXPECT_TRUE(reset_len > 0 && (size_t)reset_len < sizeof(ini_text) && write_file(ini, ini_text),
+                "Rewrite the INI with PasswordTimeoutResetOnUse=yes");
+    g_e2e_pwd_prompts = 0;
+    for (int i = 0; i < 4; ++i) { /* 4 uses 2 s apart: well past the 4 s timeout in total */
+        h2 = p.find_first_w(L"\\Sliding", &fd2);
+        if (h2 != INVALID_HANDLE_VALUE) p.find_close(h2);
+        if (i < 3) Sleep(2000);
+    }
+    EXPECT_TRUE(h2 != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 1, "Password kept while in use (reset on use)");
+    Sleep(5500);
+    h2 = p.find_first_w(L"\\Sliding", &fd2);
+    if (h2 != INVALID_HANDLE_VALUE) p.find_close(h2);
+    EXPECT_TRUE(h2 != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 2, "Password expires once it is no longer used");
+
+    unload_plugin_copy(&p, dir);
+    DeleteFileW(ini);
+    delete_tree(dir);
+}
+
+/* Fills `out` with `name` in the directory of this executable */
+static BOOL path_next_to_exe(const WCHAR* name, WCHAR* out, size_t cap) {
+    WCHAR exe[MAX_PATH];
+    DWORD n = GetModuleFileNameW(NULL, exe, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return FALSE;
+    WCHAR* slash = wcsrchr(exe, L'\\');
+    if (!slash) return FALSE;
+    *slash = L'\0';
+    return swprintf_s(out, cap, L"%ls\\%ls", exe, name) > 0;
+}
+
+int main(void) {
+    printf("Running Restic WFX plugin DLL smoke tests...\n");
+    if (!path_next_to_exe(L"" RESTIC_WFX_FILE_NAME, g_plugin_dll, MAX_PATH) ||
+        !path_next_to_exe(L"pluginst.inf", g_pluginst_inf, MAX_PATH)) {
+        printf("[FAIL] Cannot determine the directory of this executable.\n");
+        return 1;
+    }
+    if (GetFileAttributesW(g_plugin_dll) == INVALID_FILE_ATTRIBUTES) {
+        printf("[SKIP] %ls not found: DLL smoke tests skipped.\n", g_plugin_dll);
+        return 0;
+    }
+
+    /* Never pick up the developer's own %APPDATA%\GHISLER\TCResticBrowser.ini */
+    WCHAR appdata_dir[MAX_PATH];
+    if (!make_unique_dir(L"restic_dll_appdata", appdata_dir, MAX_PATH) ||
+        swprintf_s(g_user_dir, MAX_PATH, L"%ls\\GHISLER", appdata_dir) <= 0 ||
+        !(CreateDirectoryW(g_user_dir, NULL) || GetLastError() == ERROR_ALREADY_EXISTS) ||
+        !SetEnvironmentVariableW(L"APPDATA", appdata_dir)) {
+        printf("[FAIL] Cannot set up a temporary %%APPDATA%%.\n");
+        return 1;
+    }
+
+    test_export_surface();
+    test_primary_ini_next_to_dll();
+    test_user_ini_overrides_plugin_ini();
+    test_live_end_to_end_navigation();
+    test_live_paths_with_spaces();
+
+    RemoveDirectoryW(g_user_dir);
+    RemoveDirectoryW(appdata_dir);
+
+    if (g_tests_failed == 0) {
+        printf("[PASS] All %d assertions succeeded.\n", g_tests_run);
+        return 0;
+    }
+    printf("[FAIL] %d of %d assertions failed.\n", g_tests_failed, g_tests_run);
+    return 1;
+}

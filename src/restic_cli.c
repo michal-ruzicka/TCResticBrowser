@@ -14,9 +14,12 @@
 #include <stdlib.h>
 #endif
 #include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 #include <wchar.h>
-#include "cJSON.h"
+#include "json.h"
+#include "config.h"
+#include "log.h"
 
 /* 100-nanosecond FILETIME ticks per minute (timezone offset conversion) */
 #define FILETIME_TICKS_PER_MINUTE 600000000ULL
@@ -114,6 +117,7 @@ BOOL restic_parse_iso8601_time(const char* iso_str, FILETIME* out_ft) {
     unsigned long long frac_ticks = 0;
     if (*p == '.') {
         ++p;
+        if (!is_ascii_digit(*p)) return FALSE; /* "." needs at least one digit */
         unsigned long long multiplier = 1000000ULL;
         while (is_ascii_digit(*p)) {
             if (multiplier > 0) {
@@ -124,22 +128,26 @@ BOOL restic_parse_iso8601_time(const char* iso_str, FILETIME* out_ft) {
         }
     }
 
-    /* Optional timezone designator: 'Z', '+HH:MM', '-HH:MM', '+HHMM', '-HHMM', '+HH' */
+    /* Optional timezone designator: 'Z', '+HH:MM', '-HH:MM', '+HHMM', '-HHMM', '+HH'; then the end */
     long long tz_offset_minutes = 0;
-    if (*p == '+' || *p == '-') {
+    if (*p == 'Z' || *p == 'z') {
+        ++p;
+    } else if (*p == '+' || *p == '-') {
         int sign = (*p == '+') ? 1 : -1;
         ++p;
         int tz_h = parse_fixed_digits(p, 2);
         if (tz_h < 0 || tz_h > 23) return FALSE;
         p += 2;
-        if (*p == ':') ++p;
         int tz_m = 0;
-        if (is_ascii_digit(p[0]) && is_ascii_digit(p[1])) {
+        if (*p != '\0') {
+            if (*p == ':') ++p;
             tz_m = parse_fixed_digits(p, 2);
             if (tz_m < 0 || tz_m > 59) return FALSE;
+            p += 2;
         }
         tz_offset_minutes = (long long)sign * ((long long)tz_h * 60LL + (long long)tz_m);
     }
+    if (*p != '\0') return FALSE; /* Trailing characters: not a timestamp restic writes */
 
     ULARGE_INTEGER uli;
     uli.LowPart  = ft.dwLowDateTime;
@@ -160,9 +168,14 @@ BOOL restic_parse_iso8601_time(const char* iso_str, FILETIME* out_ft) {
     return TRUE;
 }
 
-BOOL restic_format_snapshot_dirname(
+#define SNAPSHOT_SHORT_ID_CHARS 8  /* What restic prints as short_id */
+#define SNAPSHOT_ID_MAX_CHARS   64 /* A full snapshot ID */
+
+/* restic_format_snapshot_dirname() with the first id_chars characters of the ID */
+static BOOL format_snapshot_dirname_n(
     const char* iso_time,
     const char* snapshot_id,
+    size_t id_chars,
     WCHAR* out_dirname,
     size_t out_capacity
 ) {
@@ -176,10 +189,11 @@ BOOL restic_format_snapshot_dirname(
         return FALSE;
     }
 
-    char short_id[9] = {0};
-    strncpy_s(short_id, sizeof(short_id), snapshot_id, 8);
+    char short_id[SNAPSHOT_ID_MAX_CHARS + 1] = {0};
+    strncpy_s(short_id, sizeof(short_id), snapshot_id,
+              id_chars < SNAPSHOT_ID_MAX_CHARS ? id_chars : SNAPSHOT_ID_MAX_CHARS);
 
-    char formatted[64] = {0};
+    char formatted[128] = {0};
     int written = snprintf(
         formatted, sizeof(formatted), "%.4s-%.2s-%.2s_%.2s-%.2s-%.2s_[%s]",
         iso_time + 0, iso_time + 5, iso_time + 8,
@@ -190,6 +204,15 @@ BOOL restic_format_snapshot_dirname(
     }
 
     return MultiByteToWideChar(CP_UTF8, 0, formatted, -1, out_dirname, (int)out_capacity) > 0;
+}
+
+BOOL restic_format_snapshot_dirname(
+    const char* iso_time,
+    const char* snapshot_id,
+    WCHAR* out_dirname,
+    size_t out_capacity
+) {
+    return format_snapshot_dirname_n(iso_time, snapshot_id, SNAPSHOT_SHORT_ID_CHARS, out_dirname, out_capacity);
 }
 
 BOOL restic_extract_snapshot_id(
@@ -263,6 +286,70 @@ BOOL restic_normalize_filter_path(
     return TRUE;
 }
 
+typedef enum {
+    PWC_PLAIN = 0,
+    PWC_SPACE,
+    PWC_TAB,
+    PWC_LINE_BREAK,
+    PWC_CONTROL,
+    PWC_NBSP,
+    PWC_UNUSUAL_SPACE,
+    PWC_INVISIBLE,
+    PWC_COUNT
+} PasswordCharClass;
+
+static PasswordCharClass classify_password_char(WCHAR c) {
+    if (c == L' ') return PWC_SPACE;
+    if (c == L'\t') return PWC_TAB;
+    if (c == L'\r' || c == L'\n' || c == 0x0B || c == 0x0C || c == 0x85 || c == 0x2028 || c == 0x2029) {
+        return PWC_LINE_BREAK;
+    }
+    if (c < 0x20 || (c >= 0x7F && c <= 0x9F)) return PWC_CONTROL;
+    if (c == 0xA0 || c == 0x2007 || c == 0x202F) return PWC_NBSP;
+    if (c == 0x1680 || (c >= 0x2000 && c <= 0x200A) || c == 0x205F || c == 0x3000) return PWC_UNUSUAL_SPACE;
+    if (c == 0xAD || c == 0x180E || (c >= 0x200B && c <= 0x200F) || (c >= 0x202A && c <= 0x202E) ||
+        (c >= 0x2060 && c <= 0x2064) || c == 0xFEFF) {
+        return PWC_INVISIBLE;
+    }
+    return PWC_PLAIN;
+}
+
+static const WCHAR* const kPasswordCharNames[PWC_COUNT] = {
+    L"", L"a space", L"a tab", L"a line break", L"a control character", L"a non-breaking space",
+    L"an unusual space character", L"an invisible character (such as a zero-width space)"
+};
+
+/* Appends "; <verb> <name>" (truncating, never failing) */
+static void append_phrase(WCHAR* out, size_t cap, const WCHAR* verb, PasswordCharClass cls) {
+    size_t len = wcslen(out);
+    if (len + 1 >= cap) return;
+    _snwprintf_s(out + len, cap - len, _TRUNCATE, L"%ls%ls %ls", len > 0 ? L"; " : L"", verb,
+                 kPasswordCharNames[cls]);
+}
+
+BOOL restic_describe_password(const WCHAR* password, WCHAR* out, size_t cap) {
+    if (!out || cap == 0) return FALSE;
+    out[0] = L'\0';
+    size_t n = password ? wcslen(password) : 0;
+    if (n == 0) return FALSE;
+
+    PasswordCharClass first = classify_password_char(password[0]);
+    PasswordCharClass last  = n > 1 ? classify_password_char(password[n - 1]) : PWC_PLAIN;
+    BOOL inner[PWC_COUNT]   = {FALSE};
+    for (size_t i = 1; i + 1 < n; ++i) {
+        inner[classify_password_char(password[i])] = TRUE;
+    }
+
+    if (first != PWC_PLAIN) append_phrase(out, cap, L"starts with", first);
+    if (last != PWC_PLAIN) append_phrase(out, cap, L"ends with", last);
+    for (int cls = PWC_TAB; cls < PWC_COUNT; ++cls) { /* Inner ordinary spaces are fine */
+        if (inner[cls] && cls != (int)first && cls != (int)last) {
+            append_phrase(out, cap, L"contains", (PasswordCharClass)cls);
+        }
+    }
+    return out[0] != L'\0';
+}
+
 WCHAR* restic_quote_arg(const WCHAR* arg) {
     if (!arg) return NULL;
 
@@ -315,6 +402,67 @@ static BOOL append_find_data(
     return TRUE;
 }
 
+typedef struct {
+    const char* id;
+    size_t index;
+} SnapshotIdRef;
+
+static int compare_snapshot_ids(const void* a, const void* b) {
+    return strcmp(((const SnapshotIdRef*)a)->id, ((const SnapshotIdRef*)b)->id);
+}
+
+static size_t common_prefix_length(const char* a, const char* b) {
+    size_t n = 0;
+    while (a[n] != '\0' && a[n] == b[n]) ++n;
+    return n;
+}
+
+/*
+ * Restic resolves a snapshot by any unique prefix of its ID, and the 8-character short_id is no
+ * longer unique once a repository holds tens of thousands of snapshots: "restic ls <short_id>" then
+ * fails as ambiguous. For every element of the snapshots array this computes how many characters of
+ * its full ID are needed to be unique (at least 8; 0 when it has no usable ID), comparing each ID
+ * only with its neighbours in sorted order. *out_chars is NULL for an empty array.
+ */
+static BOOL unique_id_prefixes(const JsonValue* array, size_t** out_chars) {
+    *out_chars = NULL;
+    size_t n = 0;
+    for (const JsonValue* v = array->child; v; v = v->next) ++n;
+    if (n == 0) return TRUE;
+
+    size_t* chars       = (size_t*)calloc(n, sizeof(size_t));
+    SnapshotIdRef* refs = (SnapshotIdRef*)malloc(n * sizeof(SnapshotIdRef));
+    if (!chars || !refs) {
+        free(chars);
+        free(refs);
+        return FALSE;
+    }
+    size_t m = 0, index = 0;
+    for (const JsonValue* v = array->child; v; v = v->next, ++index) {
+        const char* id = v->type == JSON_OBJECT ? json_string(json_object_get(v, "id")) : NULL;
+        if (id && is_hex_string(id) && strlen(id) <= SNAPSHOT_ID_MAX_CHARS) {
+            refs[m].id    = id;
+            refs[m].index = index;
+            ++m;
+        }
+    }
+    qsort(refs, m, sizeof(SnapshotIdRef), compare_snapshot_ids);
+    for (size_t i = 0; i < m; ++i) {
+        size_t shared = 0;
+        if (i > 0) shared = common_prefix_length(refs[i].id, refs[i - 1].id);
+        if (i + 1 < m) {
+            size_t next = common_prefix_length(refs[i].id, refs[i + 1].id);
+            if (next > shared) shared = next;
+        }
+        size_t need = shared + 1 > SNAPSHOT_SHORT_ID_CHARS ? shared + 1 : SNAPSHOT_SHORT_ID_CHARS;
+        size_t len  = strlen(refs[i].id);
+        chars[refs[i].index] = need < len ? need : len;
+    }
+    free(refs);
+    *out_chars = chars;
+    return TRUE;
+}
+
 ResticResult restic_parse_snapshots_json(
     const char* json_text,
     WIN32_FIND_DATAW** out_items,
@@ -326,41 +474,49 @@ ResticResult restic_parse_snapshots_json(
     *out_items = NULL;
     *out_count = 0;
 
-    cJSON* root = cJSON_Parse(json_text);
-    if (!root) {
+    JsonDoc* doc = json_parse(json_text, strlen(json_text));
+    if (!doc) {
         return RESTIC_ERR_JSON_PARSE;
     }
-    if (cJSON_IsNull(root)) { /* Older Restic versions print "null" for an empty repository */
-        cJSON_Delete(root);
+    const JsonValue* root = json_root(doc);
+    if (root->type == JSON_NULL) { /* Older Restic versions print "null" for an empty repository */
+        json_free(doc);
         return RESTIC_OK;
     }
-    if (!cJSON_IsArray(root)) {
-        cJSON_Delete(root);
+    if (root->type != JSON_ARRAY) {
+        json_free(doc);
         return RESTIC_ERR_JSON_PARSE;
     }
 
-    size_t capacity = 0;
-    cJSON* snap = NULL;
-    cJSON_ArrayForEach(snap, root) {
-        if (!cJSON_IsObject(snap)) continue;
+    size_t* id_chars = NULL;
+    if (!unique_id_prefixes(root, &id_chars)) {
+        json_free(doc);
+        return RESTIC_ERR_OUT_OF_MEMORY;
+    }
 
-        const cJSON* j_time     = cJSON_GetObjectItemCaseSensitive(snap, "time");
-        const cJSON* j_short_id = cJSON_GetObjectItemCaseSensitive(snap, "short_id");
-        const cJSON* j_id       = cJSON_GetObjectItemCaseSensitive(snap, "id");
+    size_t capacity = 0, index = 0;
+    for (const JsonValue* snap = root->child; snap; snap = snap->next, ++index) {
+        if (snap->type != JSON_OBJECT) continue;
 
-        const char* time_str = cJSON_IsString(j_time) ? j_time->valuestring : NULL;
+        const char* time_str = json_string(json_object_get(snap, "time"));
+        const char* short_id = json_string(json_object_get(snap, "short_id"));
+        const char* full_id  = json_string(json_object_get(snap, "id"));
         const char* id_str   = NULL;
-        if (cJSON_IsString(j_short_id) && j_short_id->valuestring[0] != '\0') {
-            id_str = j_short_id->valuestring;
-        } else if (cJSON_IsString(j_id) && j_id->valuestring[0] != '\0') {
-            id_str = j_id->valuestring;
+        size_t id_len        = SNAPSHOT_SHORT_ID_CHARS;
+        if (id_chars && id_chars[index] > SNAPSHOT_SHORT_ID_CHARS) {
+            id_str = full_id; /* Its short_id is shared with another snapshot */
+            id_len = id_chars[index];
+        } else if (short_id && short_id[0] != '\0') {
+            id_str = short_id;
+        } else if (full_id && full_id[0] != '\0') {
+            id_str = full_id;
         }
         if (!time_str || !id_str) continue;
 
         WIN32_FIND_DATAW fd;
         memset(&fd, 0, sizeof(fd));
         FILETIME ft;
-        if (!restic_format_snapshot_dirname(time_str, id_str, fd.cFileName, MAX_PATH) ||
+        if (!format_snapshot_dirname_n(time_str, id_str, id_len, fd.cFileName, MAX_PATH) ||
             !restic_parse_iso8601_time(time_str, &ft)) {
             continue;
         }
@@ -374,12 +530,14 @@ ResticResult restic_parse_snapshots_json(
             free(*out_items);
             *out_items = NULL;
             *out_count = 0;
-            cJSON_Delete(root);
+            free(id_chars);
+            json_free(doc);
             return RESTIC_ERR_OUT_OF_MEMORY;
         }
     }
 
-    cJSON_Delete(root);
+    free(id_chars);
+    json_free(doc);
     return RESTIC_OK;
 }
 
@@ -401,32 +559,47 @@ static BOOL is_direct_child_path(const char* node_path, const char* filter_path)
     return strchr(node_path + filter_len + 1, '/') == NULL;
 }
 
+/*
+ * TRUE when a name taken from a snapshot can be handed to Total Commander as one path component.
+ *
+ * Total Commander builds both the next virtual path and, on copy (F5), the local target path by
+ * appending the reported name. A name containing a separator is therefore not one component but
+ * several: a file named `..\..\x` on a Linux machine is a single legitimate name there, and would
+ * make a recursive copy write outside the chosen target directory here. A name made only of dots
+ * and spaces is refused too, because Win32 strips trailing dots and spaces from path components and
+ * `...` or `.. ` would collapse into `.` or `..`.
+ */
+static BOOL is_safe_component(const WCHAR* name) {
+    if (wcschr(name, L'\\') != NULL || wcschr(name, L'/') != NULL) return FALSE;
+    for (const WCHAR* p = name; *p != L'\0'; ++p) {
+        if (*p != L'.' && *p != L' ') return TRUE;
+    }
+    return FALSE; /* Empty, or nothing but dots and spaces */
+}
+
 /* Fills a WIN32_FIND_DATAW from one `restic ls --json` node object. Returns FALSE to skip it. */
-static BOOL node_to_find_data(const cJSON* obj, WIN32_FIND_DATAW* fd) {
-    const cJSON* j_name  = cJSON_GetObjectItemCaseSensitive(obj, "name");
-    const cJSON* j_type  = cJSON_GetObjectItemCaseSensitive(obj, "type");
-    const cJSON* j_size  = cJSON_GetObjectItemCaseSensitive(obj, "size");
-    const cJSON* j_mtime = cJSON_GetObjectItemCaseSensitive(obj, "mtime");
-    const cJSON* j_ctime = cJSON_GetObjectItemCaseSensitive(obj, "ctime");
-    const cJSON* j_atime = cJSON_GetObjectItemCaseSensitive(obj, "atime");
+static BOOL node_to_find_data(const JsonValue* obj, WIN32_FIND_DATAW* fd) {
+    const char* name  = json_string(json_object_get(obj, "name"));
+    const char* type  = json_string(json_object_get(obj, "type"));
+    const char* mtime = json_string(json_object_get(obj, "mtime"));
+    const char* ctime = json_string(json_object_get(obj, "ctime"));
+    const char* atime = json_string(json_object_get(obj, "atime"));
 
     memset(fd, 0, sizeof(*fd));
-    if (!cJSON_IsString(j_name) ||
-        MultiByteToWideChar(CP_UTF8, 0, j_name->valuestring, -1, fd->cFileName, MAX_PATH) <= 0) {
+    if (!name || MultiByteToWideChar(CP_UTF8, 0, name, -1, fd->cFileName, MAX_PATH) <= 0) {
         return FALSE;
     }
-    /* Empty names and "."/".." would break Total Commander's navigation: never report them */
-    if (fd->cFileName[0] == L'\0' || wcscmp(fd->cFileName, L".") == 0 ||
-        wcscmp(fd->cFileName, L"..") == 0) {
+    /* Empty names, "."/"..", and anything that is not a single path component: never report them */
+    if (!is_safe_component(fd->cFileName)) {
         return FALSE;
     }
 
-    if (cJSON_IsString(j_type) && strcmp(j_type->valuestring, "dir") == 0) {
+    if (type && strcmp(type, "dir") == 0) {
         fd->dwFileAttributes = FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY;
     } else { /* Files, symlinks, devices... (the WFX API wants links reported as plain files) */
         fd->dwFileAttributes = FILE_ATTRIBUTE_READONLY;
-        if (cJSON_IsNumber(j_size) && j_size->valuedouble >= 0.0) {
-            unsigned long long sz = (unsigned long long)j_size->valuedouble;
+        unsigned long long sz = 0;
+        if (json_u64(json_object_get(obj, "size"), &sz)) {
             fd->nFileSizeLow  = (DWORD)(sz & 0xFFFFFFFFULL);
             fd->nFileSizeHigh = (DWORD)(sz >> 32);
         }
@@ -434,15 +607,15 @@ static BOOL node_to_find_data(const cJSON* obj, WIN32_FIND_DATAW* fd) {
 
     FILETIME ft;
     FS_SET_TIME_UNKNOWN(fd->ftLastWriteTime);
-    if (cJSON_IsString(j_mtime) && restic_parse_iso8601_time(j_mtime->valuestring, &ft)) {
+    if (mtime && restic_parse_iso8601_time(mtime, &ft)) {
         fd->ftLastWriteTime  = ft;
         fd->ftCreationTime   = ft;
         fd->ftLastAccessTime = ft;
     }
-    if (cJSON_IsString(j_ctime) && restic_parse_iso8601_time(j_ctime->valuestring, &ft)) {
+    if (ctime && restic_parse_iso8601_time(ctime, &ft)) {
         fd->ftCreationTime = ft;
     }
-    if (cJSON_IsString(j_atime) && restic_parse_iso8601_time(j_atime->valuestring, &ft)) {
+    if (atime && restic_parse_iso8601_time(atime, &ft)) {
         fd->ftLastAccessTime = ft;
     }
     return TRUE;
@@ -481,23 +654,22 @@ ResticResult restic_parse_ls_ndjson(
         }
 
         if (line_len > 0) {
-            cJSON* obj = cJSON_ParseWithLength(line_start, line_len);
-            if (!obj || !cJSON_IsObject(obj)) {
+            JsonDoc* doc = json_parse(line_start, line_len);
+            const JsonValue* obj = json_root(doc);
+            if (!obj || obj->type != JSON_OBJECT) {
                 result = RESTIC_ERR_JSON_PARSE;
             } else {
                 parsed_objects++;
-                const cJSON* j_msg  = cJSON_GetObjectItemCaseSensitive(obj, "message_type");
-                const cJSON* j_path = cJSON_GetObjectItemCaseSensitive(obj, "path");
+                const char* msg_type = json_string(json_object_get(obj, "message_type"));
+                const char* path     = json_string(json_object_get(obj, "path"));
 
-                if (cJSON_IsString(j_msg) && strcmp(j_msg->valuestring, "node") == 0 &&
-                    cJSON_IsString(j_path)) {
-                    const char* path = j_path->valuestring;
+                if (msg_type && strcmp(msg_type, "node") == 0 && path) {
                     WIN32_FIND_DATAW fd;
 
                     if (strcmp(path, filter_path) == 0) {
-                        const cJSON* j_type = cJSON_GetObjectItemCaseSensitive(obj, "type");
-                        self_found = TRUE;
-                        self_is_dir = cJSON_IsString(j_type) && strcmp(j_type->valuestring, "dir") == 0;
+                        const char* type = json_string(json_object_get(obj, "type"));
+                        self_found  = TRUE;
+                        self_is_dir = type && strcmp(type, "dir") == 0;
                     } else if (is_direct_child_path(path, filter_path) && node_to_find_data(obj, &fd)) {
                         if (!append_find_data(out_items, out_count, &capacity, &fd)) {
                             result = RESTIC_ERR_OUT_OF_MEMORY;
@@ -505,7 +677,7 @@ ResticResult restic_parse_ls_ndjson(
                     }
                 }
             }
-            cJSON_Delete(obj);
+            json_free(doc);
         }
 
         if (!line_end) break;
@@ -540,6 +712,7 @@ typedef struct {
 
 static BOOL bytebuf_append(ByteBuf* b, const char* src, size_t n) {
     if (b->len + n + 1 > b->cap) {
+        if (n > SIZE_MAX / 2 - b->len) return FALSE; /* The doubling below would wrap around */
         size_t new_cap = b->cap ? b->cap : 4096;
         while (b->len + n + 1 > new_cap) new_cap *= 2;
         char* p = (char*)realloc(b->data, new_cap);
@@ -553,10 +726,15 @@ static BOOL bytebuf_append(ByteBuf* b, const char* src, size_t n) {
     return TRUE;
 }
 
-/* Moves every byte currently available in a pipe into buf. Sets *eof once the pipe is closed. */
+/*
+ * Moves the bytes currently available in a pipe into buf, at most DRAIN_SLICE_BYTES per call so that
+ * the caller still checks the timeout and ESC while a child floods its output. Sets *eof once the
+ * pipe is closed.
+ */
+#define DRAIN_SLICE_BYTES (1024u * 1024u)
 static BOOL drain_pipe(HANDLE pipe, ByteBuf* buf, BOOL* eof) {
     char chunk[4096];
-    while (!*eof) {
+    for (size_t taken = 0; !*eof && taken < DRAIN_SLICE_BYTES; taken += sizeof(chunk)) {
         DWORD avail = 0;
         DWORD got = 0;
         if (!PeekNamedPipe(pipe, NULL, 0, NULL, &avail, NULL)) {
@@ -640,11 +818,76 @@ fail:
     return NULL;
 }
 
+/* ------------------------------------------------------------------------------------------ */
+/* Diagnostic log (off unless [Logging] LogPath is set). Never logs the password itself.      */
+/* ------------------------------------------------------------------------------------------ */
+
+static const WCHAR* result_name(ResticResult r) {
+    switch (r) {
+        case RESTIC_OK: return L"OK";
+        case RESTIC_ERR_INVALID_ARG: return L"invalid argument";
+        case RESTIC_ERR_SPAWN_FAILED: return L"restic.exe could not be started";
+        case RESTIC_ERR_OUT_OF_MEMORY: return L"out of memory";
+        case RESTIC_ERR_WRONG_PASSWORD: return L"wrong password or no key found";
+        case RESTIC_ERR_REPO_NOT_FOUND: return L"repository not found";
+        case RESTIC_ERR_REPO_LOCKED: return L"repository locked";
+        case RESTIC_ERR_CLI_FAILED: return L"restic failed";
+        case RESTIC_ERR_JSON_PARSE: return L"unexpected restic output";
+        case RESTIC_ERR_PATH_NOT_FOUND: return L"path not found";
+        case RESTIC_ERR_LOCAL_WRITE: return L"local write failed";
+        case RESTIC_ERR_TIMEOUT: return L"timeout";
+        case RESTIC_ERR_CANCELLED: return L"cancelled";
+    }
+    return L"unknown";
+}
+
+/* Logs the command about to run: the repository (credentials redacted) and the password length only */
+static void log_restic_start(const WCHAR* cmd_line, const WCHAR* repo_target, const WCHAR* password) {
+    if (!log_enabled()) return;
+    WCHAR repo[1024];
+    log_redact_target(repo_target, repo, _countof(repo));
+    log_write(L"restic run: %ls", cmd_line);
+    log_write(L"  repository: %ls; password: %u characters", repo, (unsigned)wcslen(password));
+}
+
+/* Logs how a run ended, with restic's stderr (line breaks shown as " | ") */
+static void log_restic_end(ResticResult result, BOOL exited, DWORD exit_code, ULONGLONG start, const ByteBuf* err) {
+    if (!log_enabled()) return;
+    ULONGLONG ms = GetTickCount64() - start;
+    if (exited) {
+        log_write(L"  exit code %lu after %llu ms: %ls", exit_code, ms, result_name(result));
+    } else {
+        log_write(L"  ended after %llu ms: %ls", ms, result_name(result));
+    }
+    if (err && err->data && err->len > 0) {
+        WCHAR text[LOG_MAX_LINE - 128];
+        utf8_to_wide_trunc(err->data, text, _countof(text));
+        WCHAR flat[LOG_MAX_LINE - 128];
+        size_t o = 0;
+        for (const WCHAR* p = text; *p && o + 4 < _countof(flat); ++p) {
+            if (*p == L'\r') continue;
+            if (*p == L'\n') {
+                if (p[1] != L'\0') {
+                    flat[o++] = L' ';
+                    flat[o++] = L'|';
+                    flat[o++] = L' ';
+                }
+                continue;
+            }
+            flat[o++] = *p;
+        }
+        flat[o] = L'\0';
+        log_write(L"  stderr: %ls", flat);
+    }
+}
+
 /*
  * Starts cmd_line hidden with stdin=NUL and stdout/stderr redirected to two anonymous pipes.
- * Only these three handles are inherited (PROC_THREAD_ATTRIBUTE_HANDLE_LIST): other threads of the
- * host process spawning children concurrently can therefore neither keep our pipes open nor leak
- * unrelated inheritable handles into Restic.
+ * Restic inherits only these three handles (PROC_THREAD_ATTRIBUTE_HANDLE_LIST), never unrelated
+ * inheritable handles of Total Commander. The list does not protect the other direction: a child
+ * another thread of the host starts with bInheritHandles in the meantime can inherit the write
+ * ends and keep them open. That is harmless only because collect_output() and the dump loop end
+ * when Restic exits, not at EOF; keep it that way.
  */
 static BOOL spawn_hidden(
     WCHAR* cmd_line,
@@ -765,17 +1008,14 @@ static BOOL find_json_message(const char* text, WCHAR* dst, size_t cap) {
         const char* next = strchr(line, '\n');
         size_t len = next ? (size_t)(next - line) : strlen(line);
         if (len > 0 && *line == '{') {
-            cJSON* obj = cJSON_ParseWithLength(line, len);
-            if (obj) {
-                const cJSON* j_msg = cJSON_GetObjectItemCaseSensitive(obj, "message");
-                if (j_msg != NULL && cJSON_IsString(j_msg) && j_msg->valuestring != NULL &&
-                    j_msg->valuestring[0] != '\0') {
-                    utf8_to_wide_trunc(j_msg->valuestring, dst, cap);
-                    cJSON_Delete(obj);
-                    return TRUE;
-                }
-                cJSON_Delete(obj);
+            JsonDoc* doc = json_parse(line, len);
+            const char* msg = json_string(json_object_get(json_root(doc), "message"));
+            if (msg && msg[0] != '\0') {
+                utf8_to_wide_trunc(msg, dst, cap);
+                json_free(doc);
+                return TRUE;
             }
+            json_free(doc);
         }
         line = next ? next + 1 : NULL;
     }
@@ -804,8 +1044,8 @@ ResticResult restic_exec_command(
     }
     memset(out_result, 0, sizeof(ResticCommandOutput));
 
-    /* A bare file name would make CreateProcess search the current directory: refuse it */
-    if (restic_exe[0] == L'\0' || wcspbrk(restic_exe, L"\\/:") == NULL) {
+    /* A bare or relative name would make CreateProcess search the current directory: refuse it */
+    if (!config_is_absolute_path(restic_exe)) {
         return RESTIC_ERR_SPAWN_FAILED;
     }
 
@@ -828,13 +1068,17 @@ ResticResult restic_exec_command(
 
     HANDLE out_pipe = NULL, err_pipe = NULL;
     PROCESS_INFORMATION pi;
+    ULONGLONG started = GetTickCount64();
+    log_restic_start(cmd_line, repo_target, password);
     BOOL spawned = spawn_hidden(cmd_line, env_block, &out_pipe, &err_pipe, &pi);
+    DWORD spawn_error = spawned ? 0 : GetLastError();
 
     /* Credentials must not outlive the CreateProcess call in this process' memory */
     SecureZeroMemory(env_block, env_chars * sizeof(WCHAR));
     free(env_block);
     free(cmd_line);
     if (!spawned) {
+        log_write(L"  could not start restic.exe (Windows error %lu)", spawn_error);
         return RESTIC_ERR_SPAWN_FAILED;
     }
     CloseHandle(pi.hThread);
@@ -845,9 +1089,11 @@ ResticResult restic_exec_command(
         result = collect_output(pi.hProcess, out_pipe, err_pipe, options, &out, &err);
     }
 
+    BOOL exited = FALSE;
     if (result == RESTIC_OK) {
         DWORD exit_code = 1;
         GetExitCodeProcess(pi.hProcess, &exit_code);
+        exited = TRUE;
         out_result->exit_code = exit_code;
         if (exit_code != 0) {
             build_error_message(&out, &err, out_result->error_message, _countof(out_result->error_message));
@@ -863,6 +1109,7 @@ ResticResult restic_exec_command(
         WaitForSingleObject(pi.hProcess, 5000);
     }
 
+    log_restic_end(result, exited, out_result->exit_code, started, &err);
     CloseHandle(out_pipe);
     CloseHandle(err_pipe);
     CloseHandle(pi.hProcess);
@@ -987,7 +1234,7 @@ ResticResult restic_list_directory(
 /* State of one streaming extraction: data goes to a temporary file that replaces the target on success */
 typedef struct {
     const WCHAR* final_path;
-    WCHAR* part_path;        /* Heap copy: <target dir>\~rp<thread id>.tmp (short, to stay below MAX_PATH) */
+    WCHAR* part_path;        /* Heap: <target dir>\~rp<thread id>[-<n>].tmp (short, to stay below MAX_PATH) */
     BOOL overwrite;
     HANDLE hLocal;           /* Handle of the temporary file (INVALID_HANDLE_VALUE until the first byte) */
     BOOL part_created;       /* TRUE while the temporary file exists on disk and must be cleaned up */
@@ -1004,33 +1251,54 @@ static BOOL is_unknown_time(const FILETIME* ft) {
     return ft->dwHighDateTime == 0xFFFFFFFF && ft->dwLowDateTime == 0xFFFFFFFE;
 }
 
+#define PARTIAL_NAME_CHARS 32 /* "~rp" + thread id + "-" + attempt + ".tmp" + NUL, rounded up */
+#define PARTIAL_ATTEMPTS   100
+
+/* Length of the directory part of path, including its trailing separator */
+static size_t dir_part_length(const WCHAR* path) {
+    size_t dir_len = 0;
+    for (size_t i = 0; path[i] != L'\0'; ++i) {
+        if (path[i] == L'\\' || path[i] == L'/') dir_len = i + 1;
+    }
+    return dir_len;
+}
+
+/* Writes the name of temporary file `attempt` ("~rp<tid>.tmp", then "~rp<tid>-<n>.tmp") into part */
+static void set_partial_name(WCHAR* part, size_t dir_len, unsigned attempt) {
+    if (attempt == 0) {
+        swprintf_s(part + dir_len, PARTIAL_NAME_CHARS, L"~rp%lx.tmp", GetCurrentThreadId());
+    } else {
+        swprintf_s(part + dir_len, PARTIAL_NAME_CHARS, L"~rp%lx-%x.tmp", GetCurrentThreadId(), attempt);
+    }
+}
+
 /* Builds "<dir of final_path>\~rp<tid>.tmp" on the heap. Returns NULL on failure. */
 static WCHAR* make_partial_path(const WCHAR* final_path) {
-    size_t len     = wcslen(final_path);
-    size_t dir_len = 0;
-    for (size_t i = 0; i < len; ++i) {
-        if (final_path[i] == L'\\' || final_path[i] == L'/') dir_len = i + 1;
-    }
-    size_t cap  = dir_len + 32;
-    WCHAR* part = (WCHAR*)malloc(cap * sizeof(WCHAR));
+    size_t dir_len = dir_part_length(final_path);
+    WCHAR* part    = (WCHAR*)malloc((dir_len + PARTIAL_NAME_CHARS) * sizeof(WCHAR));
     if (!part) return NULL;
     wmemcpy(part, final_path, dir_len);
-    swprintf_s(part + dir_len, cap - dir_len, L"~rp%lx.tmp", GetCurrentThreadId());
+    set_partial_name(part, dir_len, 0);
     return part;
 }
 
-/* Returns the open temporary file, creating it on first use. INVALID_HANDLE_VALUE on failure. */
+/*
+ * Returns the open temporary file, creating it on first use. INVALID_HANDLE_VALUE on failure.
+ * CREATE_NEW never truncates or follows anything already there (a user's file of that name, or a
+ * link planted in a shared target folder); the next name is tried instead.
+ */
 static HANDLE dump_get_partial(DumpState* st) {
     if (st->hLocal != INVALID_HANDLE_VALUE) return st->hLocal;
-    HANDLE h = CreateFileW(
-        st->part_path,
-        GENERIC_WRITE,
-        FILE_SHARE_READ,
-        NULL,
-        CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL,
-        NULL
-    );
+    size_t dir_len = dir_part_length(st->final_path);
+    HANDLE h       = INVALID_HANDLE_VALUE;
+    for (unsigned attempt = 0; attempt < PARTIAL_ATTEMPTS; ++attempt) {
+        set_partial_name(st->part_path, dir_len, attempt);
+        h = CreateFileW(st->part_path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
+                        NULL);
+        if (h != INVALID_HANDLE_VALUE) break;
+        DWORD err = GetLastError();
+        if (err != ERROR_FILE_EXISTS && err != ERROR_ALREADY_EXISTS) break;
+    }
     if (h == INVALID_HANDLE_VALUE) return INVALID_HANDLE_VALUE;
     st->hLocal       = h;
     st->part_created = TRUE;
@@ -1093,16 +1361,19 @@ static ResticResult dump_commit(DumpState* st, const FILETIME* mtime) {
     CloseHandle(hf);
     st->hLocal = INVALID_HANDLE_VALUE;
 
-    DWORD flags = 0;
+    DWORD flags          = 0;
+    DWORD read_only_attr = 0; /* Attributes of a read-only target, restored if it cannot be replaced */
     if (st->overwrite) {
         DWORD attr = GetFileAttributesW(st->final_path);
         if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_READONLY) != 0 &&
-            (attr & FILE_ATTRIBUTE_DIRECTORY) == 0) {
-            SetFileAttributesW(st->final_path, attr & ~FILE_ATTRIBUTE_READONLY);
+            (attr & FILE_ATTRIBUTE_DIRECTORY) == 0 &&
+            SetFileAttributesW(st->final_path, attr & ~FILE_ATTRIBUTE_READONLY)) {
+            read_only_attr = attr;
         }
         flags = MOVEFILE_REPLACE_EXISTING;
     }
     if (!MoveFileExW(st->part_path, st->final_path, flags)) {
+        if (read_only_attr != 0) SetFileAttributesW(st->final_path, read_only_attr);
         return RESTIC_ERR_LOCAL_WRITE;
     }
     st->part_created = FALSE;
@@ -1130,7 +1401,7 @@ ResticResult restic_dump_file(
         strlen(snapshot_id) > 64) {
         return RESTIC_ERR_INVALID_ARG;
     }
-    if (restic_exe[0] == L'\0' || wcspbrk(restic_exe, L"\\/:") == NULL) {
+    if (!config_is_absolute_path(restic_exe)) {
         return RESTIC_ERR_SPAWN_FAILED;
     }
 
@@ -1191,11 +1462,15 @@ ResticResult restic_dump_file(
 
     HANDLE out_pipe = NULL, err_pipe = NULL;
     PROCESS_INFORMATION pi;
+    ULONGLONG started = GetTickCount64();
+    log_restic_start(cmd_line, repo_target, password);
     BOOL spawned = spawn_hidden(cmd_line, env_block, &out_pipe, &err_pipe, &pi);
+    DWORD spawn_error = spawned ? 0 : GetLastError();
     SecureZeroMemory(env_block, env_chars * sizeof(WCHAR));
     free(env_block);
     free(cmd_line);
     if (!spawned) {
+        log_write(L"  could not start restic.exe (Windows error %lu)", spawn_error);
         free(st.part_path);
         free(st.chunk);
         return RESTIC_ERR_SPAWN_FAILED;
@@ -1250,9 +1525,11 @@ ResticResult restic_dump_file(
         }
     }
 
+    BOOL exited = FALSE;
+    DWORD exit_code = 1;
     if (result == RESTIC_OK) {
-        DWORD exit_code = 1;
         GetExitCodeProcess(pi.hProcess, &exit_code);
+        exited = TRUE;
         if (exit_code != 0) {
             if (out_error_msg && err_capacity > 0) {
                 ByteBuf empty_out = {0};
@@ -1287,6 +1564,7 @@ ResticResult restic_dump_file(
         DeleteFileW(st.part_path);
     }
 
+    log_restic_end(result, exited, exit_code, started, &err);
     free(st.part_path);
     free(st.chunk);
     free(err.data);

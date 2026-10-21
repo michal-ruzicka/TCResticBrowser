@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <title>TC Restic Browser (16 px)</title>
+  <!-- The same design fitted to the 16 px grid: whole-pixel shutter and label, 1 px clock hands -->
+  <path d="M2 0 H12.5 L16 3.5 V14 A2 2 0 0 1 14 16 H2 A2 2 0 0 1 0 14 V2 A2 2 0 0 1 2 0 Z" fill="#1d3557"/>
+  <rect x="4" y="0" width="7" height="5" fill="#c9d3df"/>
+  <rect x="8" y="1" width="2" height="3" fill="#1d3557"/>
+  <rect x="2" y="7" width="12" height="9" rx="1" fill="#f4c430"/>
+  <path d="M5.5 11.5 A3 3 0 1 1 6.4 13.6" fill="none" stroke="#1d3557" stroke-width="1.2"/>
+  <path d="M3.5 10.5 H7.5 L5.5 13 Z" fill="#1d3557"/>
+  <path d="M8 9 H9 V11 H10.5 V12 H8 Z" fill="#1d3557"/>
+</svg>

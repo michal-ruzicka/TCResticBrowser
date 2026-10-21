@@ -5,6 +5,7 @@
 #define _UNICODE
 #endif
 #include "config.h"
+#include "log.h"
 #if defined(_DEBUG) && !defined(__SANITIZE_ADDRESS__)
 #define _CRTDBG_MAP_ALLOC
 #include <stdlib.h>
@@ -16,8 +17,7 @@
 #include <string.h>
 
 /* Module-level directory state initialized at plugin load time */
-static WCHAR g_plugin_dir[CONFIG_MAX_PATH]   = {0};
-static WCHAR g_fallback_dir[CONFIG_MAX_PATH] = {0};
+static WCHAR g_plugin_dir[CONFIG_MAX_PATH] = {0};
 
 static BOOL is_space_char(WCHAR c) {
     return (c == L' ' || c == L'\t' || c == L'\r' || c == L'\n');
@@ -106,13 +106,53 @@ static BOOL join_path(const WCHAR* dir, const WCHAR* leaf, WCHAR* out_path, size
     }
 
     size_t dir_len = wcslen(dir);
-    BOOL has_sep = (dir[dir_len - 1] == L'\\' || dir[dir_len - 1] == L'/');
+    BOOL has_sep   = (dir[dir_len - 1] == L'\\' || dir[dir_len - 1] == L'/');
+    /* Checked first: wcscat_s on a too-small buffer would terminate Total Commander */
+    if (dir_len + (has_sep ? 0 : 1) + wcslen(leaf) >= out_capacity) return FALSE;
 
-    if (wcsncpy_s(out_path, out_capacity, dir, _TRUNCATE) != 0) return FALSE;
-    if (!has_sep) {
-        if (wcscat_s(out_path, out_capacity, L"\\") != 0) return FALSE;
+    wcscpy_s(out_path, out_capacity, dir);
+    if (!has_sep) wcscat_s(out_path, out_capacity, L"\\");
+    wcscat_s(out_path, out_capacity, leaf);
+    return TRUE;
+}
+
+BOOL config_is_absolute_path(const WCHAR* p) {
+    if (!p) return FALSE;
+    if (((p[0] >= L'A' && p[0] <= L'Z') || (p[0] >= L'a' && p[0] <= L'z')) && p[1] == L':' &&
+        (p[2] == L'\\' || p[2] == L'/')) {
+        return TRUE;
     }
-    return wcscat_s(out_path, out_capacity, leaf) == 0;
+    return (p[0] == L'\\' || p[0] == L'/') && (p[1] == L'\\' || p[1] == L'/');
+}
+
+/* TRUE when `base` (the name up to its first dot, trailing spaces ignored) is a DOS device name */
+static BOOL is_dos_device_name(const WCHAR* base, size_t len) {
+    static const WCHAR* const devices[] = {L"CON", L"PRN", L"AUX", L"NUL", L"CONIN$", L"CONOUT$"};
+    while (len > 0 && base[len - 1] == L' ') len--;
+    for (size_t i = 0; i < _countof(devices); ++i) {
+        if (len == wcslen(devices[i]) && _wcsnicmp(base, devices[i], len) == 0) return TRUE;
+    }
+    /* COM0-COM9, LPT0-LPT9 and the superscript digits 1-3 that Windows treats the same way */
+    if (len == 4 && (_wcsnicmp(base, L"COM", 3) == 0 || _wcsnicmp(base, L"LPT", 3) == 0)) {
+        WCHAR d = base[3];
+        return (d >= L'0' && d <= L'9') || d == L'\u00B9' || d == L'\u00B2' || d == L'\u00B3';
+    }
+    return FALSE;
+}
+
+BOOL config_is_plain_file_name(const WCHAR* path) {
+    if (!path) return FALSE;
+    const WCHAR* name = path;
+    for (const WCHAR* p = path; *p != L'\0'; ++p) {
+        if (*p == L'\\' || *p == L'/') name = p + 1;
+    }
+    size_t len = wcslen(name);
+    if (len == 0 || name[len - 1] == L'.' || name[len - 1] == L' ') return FALSE;
+    for (const WCHAR* p = name; *p != L'\0'; ++p) {
+        if (*p < 0x20 || wcschr(L"<>:\"|?*", *p) != NULL) return FALSE;
+    }
+    const WCHAR* dot = wcschr(name, L'.');
+    return !is_dos_device_name(name, dot ? (size_t)(dot - name) : len);
 }
 
 /* Checks whether path points to an existing regular file */
@@ -179,91 +219,168 @@ const WCHAR* config_get_plugin_dir(void) {
     return g_plugin_dir;
 }
 
-void config_set_fallback_dir(const WCHAR* dir_path) {
-    if (!dir_path) {
-        g_fallback_dir[0] = L'\0';
-        return;
+BOOL config_get_user_ini_path(WCHAR* out_path, size_t out_capacity) {
+    if (!out_path || out_capacity == 0) return FALSE;
+    out_path[0] = L'\0';
+
+    WCHAR appdata[CONFIG_MAX_PATH] = {0};
+    DWORD n = GetEnvironmentVariableW(L"APPDATA", appdata, CONFIG_MAX_PATH);
+    if (n == 0 || n >= CONFIG_MAX_PATH) return FALSE;
+    trim_whitespace(appdata);
+    strip_trailing_separators(appdata);
+    if (!config_is_absolute_path(appdata)) return FALSE; /* Never relative to the current directory */
+
+    WCHAR ghisler_dir[CONFIG_MAX_PATH] = {0};
+    if (!join_path(appdata, CONFIG_USER_SUBDIR, ghisler_dir, CONFIG_MAX_PATH) ||
+        !join_path(ghisler_dir, CONFIG_INI_FILENAME, out_path, out_capacity)) {
+        out_path[0] = L'\0';
+        return FALSE;
     }
-    wcsncpy_s(g_fallback_dir, CONFIG_MAX_PATH, dir_path, _TRUNCATE);
-    trim_whitespace(g_fallback_dir);
-    strip_quotes(g_fallback_dir);
-    strip_trailing_separators(g_fallback_dir);
-}
-
-void config_set_fallback_from_default_params(const char* default_ini_name) {
-    if (!default_ini_name || default_ini_name[0] == '\0') {
-        g_fallback_dir[0] = L'\0';
-        return;
-    }
-
-    WCHAR wide_ini_path[CONFIG_MAX_PATH] = {0};
-    int converted = MultiByteToWideChar(
-        CP_ACP,
-        0,
-        default_ini_name,
-        -1,
-        wide_ini_path,
-        CONFIG_MAX_PATH
-    );
-    if (converted <= 0) {
-        g_fallback_dir[0] = L'\0';
-        return;
-    }
-
-    WCHAR parent_dir[CONFIG_MAX_PATH] = {0};
-    extract_parent_dir(wide_ini_path, parent_dir, CONFIG_MAX_PATH);
-    config_set_fallback_dir(parent_dir);
-}
-
-const WCHAR* config_get_fallback_dir(void) {
-    return g_fallback_dir;
+    return TRUE;
 }
 
 BOOL config_resolve_ini_path(WCHAR* out_path, size_t out_capacity) {
     if (!out_path || out_capacity == 0) return FALSE;
     out_path[0] = L'\0';
 
-    WCHAR primary_candidate[CONFIG_MAX_PATH]  = {0};
-    WCHAR fallback_candidate[CONFIG_MAX_PATH] = {0};
+    /* 1. Per-user override: %APPDATA%\GHISLER\TCResticBrowser.ini */
+    WCHAR user_candidate[CONFIG_MAX_PATH] = {0};
+    if (config_get_user_ini_path(user_candidate, CONFIG_MAX_PATH) && file_exists(user_candidate)) {
+        wcsncpy_s(out_path, out_capacity, user_candidate, _TRUNCATE);
+        return TRUE;
+    }
 
-    /* 1. Existing INI in the plugin directory: <plugin_dir>\restic_plugin.ini */
+    /* 2. System-wide file shipped with the plugin: <plugin_dir>\TCResticBrowser.ini */
     if (g_plugin_dir[0] != L'\0') {
-        join_path(g_plugin_dir, CONFIG_INI_FILENAME, primary_candidate, CONFIG_MAX_PATH);
-        if (file_exists(primary_candidate)) {
-            wcsncpy_s(out_path, out_capacity, primary_candidate, _TRUNCATE);
-            return TRUE;
-        }
-    }
-
-    /* 2. Existing INI in the fallback directory: <fallback_dir>\restic_plugin.ini */
-    if (g_fallback_dir[0] != L'\0') {
-        join_path(g_fallback_dir, CONFIG_INI_FILENAME, fallback_candidate, CONFIG_MAX_PATH);
-        if (file_exists(fallback_candidate)) {
-            wcsncpy_s(out_path, out_capacity, fallback_candidate, _TRUNCATE);
-            return TRUE;
-        }
-    }
-
-    /* Report the preferred candidate path even when no INI file exists on disk */
-    if (primary_candidate[0] != L'\0') {
-        wcsncpy_s(out_path, out_capacity, primary_candidate, _TRUNCATE);
-    } else if (fallback_candidate[0] != L'\0') {
-        wcsncpy_s(out_path, out_capacity, fallback_candidate, _TRUNCATE);
+        join_path(g_plugin_dir, CONFIG_INI_FILENAME, out_path, out_capacity);
+        return file_exists(out_path);
     }
     return FALSE;
 }
 
 /*
+ * Reads a whole INI file into a heap-allocated, NUL-terminated wide string (caller frees).
+ * Encoding: a UTF-16 LE/BE or UTF-8 byte-order mark is honoured; without one the file is UTF-8,
+ * the default of today's editors. The Win32 GetPrivateProfile* APIs are not used because they
+ * read a BOM-less file in the ANSI code page and garble non-ASCII paths saved as UTF-8. A
+ * BOM-less file that is not valid UTF-8 is decoded in the ANSI code page instead, so an INI
+ * written for the 1.x plugin (which required ANSI) keeps working.
+ * Returns NULL when the file cannot be read or exceeds CONFIG_MAX_INI_BYTES.
+ */
+static WCHAR* read_ini_text(const WCHAR* path) {
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+
+    LARGE_INTEGER size = {0};
+    unsigned char* bytes = NULL;
+    DWORD got = 0;
+    if (GetFileSizeEx(h, &size) && size.QuadPart >= 0 && size.QuadPart <= CONFIG_MAX_INI_BYTES) {
+        bytes = (unsigned char*)malloc((size_t)size.QuadPart + 1);
+        if (bytes && !ReadFile(h, bytes, (DWORD)size.QuadPart, &got, NULL)) {
+            free(bytes);
+            bytes = NULL;
+        }
+    }
+    CloseHandle(h);
+    if (!bytes) return NULL;
+
+    WCHAR* text = NULL;
+    if (got >= 2 && ((bytes[0] == 0xFF && bytes[1] == 0xFE) || (bytes[0] == 0xFE && bytes[1] == 0xFF))) {
+        BOOL big_endian = (bytes[0] == 0xFE);
+        size_t count = (got - 2) / 2;
+        text = (WCHAR*)malloc((count + 1) * sizeof(WCHAR));
+        if (text) {
+            for (size_t i = 0; i < count; ++i) {
+                unsigned char b0 = bytes[2 + 2 * i], b1 = bytes[3 + 2 * i];
+                text[i] = (WCHAR)(big_endian ? ((b0 << 8) | b1) : ((b1 << 8) | b0));
+            }
+            text[count] = L'\0';
+        }
+    } else {
+        BOOL has_bom = (got >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF);
+        const char* src = (const char*)bytes + (has_bom ? 3 : 0);
+        int len = (int)got - (has_bom ? 3 : 0);
+        UINT code_page = CP_UTF8;
+        int wlen = (len > 0) ? MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, src, len, NULL, 0) : 0;
+        if (len > 0 && wlen == 0) {
+            code_page = has_bom ? CP_UTF8 : CP_ACP;
+            wlen = MultiByteToWideChar(code_page, 0, src, len, NULL, 0);
+        }
+        text = (WCHAR*)malloc(((size_t)wlen + 1) * sizeof(WCHAR));
+        if (text) {
+            if (wlen > 0 && MultiByteToWideChar(code_page, 0, src, len, text, wlen) != wlen) {
+                wlen = 0;
+            }
+            text[wlen] = L'\0';
+        }
+    }
+    free(bytes);
+    return text;
+}
+
+/*
+ * Walks "key=value" lines of INI text in place (the text is modified). Lines starting with ';'
+ * or '#' and lines without '=' are skipped; "[name]" lines change the current section. Key and
+ * value are trimmed, the value is also unquoted. Section names compare case-insensitively.
+ */
+typedef struct {
+    WCHAR*       cursor;
+    const WCHAR* section;
+} IniReader;
+
+static BOOL ini_next_entry(IniReader* r, WCHAR** key, WCHAR** value) {
+    while (r->cursor && *r->cursor != L'\0') {
+        WCHAR* line = r->cursor;
+        WCHAR* eol = line + wcscspn(line, L"\r\n");
+        r->cursor = (*eol != L'\0') ? eol + 1 : eol;
+        *eol = L'\0';
+
+        while (is_space_char(*line)) line++;
+        if (*line == L'\0' || *line == L';' || *line == L'#') continue;
+
+        if (*line == L'[') {
+            WCHAR* close = wcschr(line, L']');
+            if (close) {
+                *close = L'\0';
+                trim_whitespace(line + 1);
+                r->section = line + 1;
+            }
+            continue;
+        }
+
+        WCHAR* eq = wcschr(line, L'=');
+        if (!eq) continue;
+        *eq = L'\0';
+        trim_whitespace(line);
+        WCHAR* val = eq + 1;
+        trim_whitespace(val);
+        strip_quotes(val);
+        trim_whitespace(val);
+        *key   = line;
+        *value = val;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL ini_in_section(const IniReader* r, const WCHAR* section) {
+    return r->section && _wcsicmp(r->section, section) == 0;
+}
+
+/*
  * Looks for an executable only inside the directories listed in %PATH%. Unlike SearchPathW, the
  * current directory (which follows the Total Commander panel) is never searched, so a planted
- * "restic.exe" in a browsed folder cannot hijack the lookup. Result is an absolute path.
+ * "restic.exe" in a browsed folder cannot hijack the lookup. Entries that are not absolute (".",
+ * "bin", "C:tools", an unexpanded "%SystemRoot%\system32") would resolve against the current
+ * directory and are skipped. Result is an absolute path.
  */
 static BOOL find_in_path_env(const WCHAR* name, WCHAR* out_path, size_t out_capacity) {
     WCHAR file_name[MAX_PATH];
-    wcsncpy_s(file_name, _countof(file_name), name, _TRUNCATE);
-    if (wcschr(file_name, L'.') == NULL) {
-        wcscat_s(file_name, _countof(file_name), L".exe");
-    }
+    BOOL add_ext = wcschr(name, L'.') == NULL;
+    if (wcslen(name) + (add_ext ? 4 : 0) >= _countof(file_name)) return FALSE;
+    wcscpy_s(file_name, _countof(file_name), name);
+    if (add_ext) wcscat_s(file_name, _countof(file_name), L".exe");
 
     DWORD need = GetEnvironmentVariableW(L"PATH", NULL, 0);
     WCHAR* path_env = (need > 0) ? (WCHAR*)malloc(need * sizeof(WCHAR)) : NULL;
@@ -279,7 +396,7 @@ static BOOL find_in_path_env(const WCHAR* name, WCHAR* out_path, size_t out_capa
         WCHAR candidate[CONFIG_MAX_PATH];
         trim_whitespace(dir);
         strip_quotes(dir);
-        if (dir[0] != L'\0' && join_path(dir, file_name, candidate, CONFIG_MAX_PATH) &&
+        if (config_is_absolute_path(dir) && join_path(dir, file_name, candidate, CONFIG_MAX_PATH) &&
             file_exists(candidate)) {
             DWORD len = GetFullPathNameW(candidate, (DWORD)out_capacity, out_path, NULL);
             found = (len > 0 && len < out_capacity);
@@ -295,36 +412,35 @@ BOOL config_resolve_restic_path(const WCHAR* ini_path, WCHAR* out_path, size_t o
 
     WCHAR configured_val[CONFIG_MAX_PATH] = {0};
 
-    /* Read [Settings] ResticPath if an existing INI file is provided */
-    if (ini_path && file_exists(ini_path)) {
-        WCHAR full_ini[CONFIG_MAX_PATH] = {0};
-        if (GetFullPathNameW(ini_path, CONFIG_MAX_PATH, full_ini, NULL) == 0) {
-            wcsncpy_s(full_ini, CONFIG_MAX_PATH, ini_path, _TRUNCATE);
+    /* Read [Settings] ResticPath (first occurrence) if an existing INI file is provided */
+    WCHAR* ini_text = (ini_path && file_exists(ini_path)) ? read_ini_text(ini_path) : NULL;
+    if (ini_text) {
+        IniReader reader = {ini_text, NULL};
+        WCHAR *key = NULL, *value = NULL;
+        while (ini_next_entry(&reader, &key, &value)) {
+            if (ini_in_section(&reader, L"Settings") && _wcsicmp(key, L"ResticPath") == 0) {
+                /* An over-long value is ignored rather than truncated into a different path */
+                if (wcslen(value) < CONFIG_MAX_PATH) {
+                    wcsncpy_s(configured_val, CONFIG_MAX_PATH, value, _TRUNCATE);
+                }
+                break;
+            }
         }
-
-        GetPrivateProfileStringW(
-            L"Settings",
-            L"ResticPath",
-            L"",
-            configured_val,
-            CONFIG_MAX_PATH,
-            full_ini
-        );
-        trim_whitespace(configured_val);
-        strip_quotes(configured_val);
-        trim_whitespace(configured_val);
+        free(ini_text);
     }
 
     /* 1. Explicit [Settings] ResticPath priority */
     if (configured_val[0] != L'\0' && _wcsicmp(configured_val, CONFIG_DEFAULT_RESTIC_EXE) != 0) {
         if (has_path_component(configured_val)) {
+            /* "C:restic.exe" and "\\tools\\restic.exe" depend on the current drive or directory:
+               neither absolute nor relative to the plugin folder, they are ignored */
             WCHAR candidate[CONFIG_MAX_PATH] = {0};
-            if (is_relative_path(configured_val) && g_plugin_dir[0] != L'\0') {
-                join_path(g_plugin_dir, configured_val, candidate, CONFIG_MAX_PATH);
-            } else {
+            if (config_is_absolute_path(configured_val)) {
                 wcsncpy_s(candidate, CONFIG_MAX_PATH, configured_val, _TRUNCATE);
+            } else if (is_relative_path(configured_val) && g_plugin_dir[0] != L'\0') {
+                join_path(g_plugin_dir, configured_val, candidate, CONFIG_MAX_PATH);
             }
-            if (file_exists(candidate)) {
+            if (candidate[0] != L'\0' && file_exists(candidate)) {
                 wcsncpy_s(out_path, out_capacity, candidate, _TRUNCATE);
                 return TRUE;
             }
@@ -398,16 +514,37 @@ static BOOL upsert_repo_entry(
     return TRUE;
 }
 
+/* Parses a plain decimal number of seconds (digits only, at most 4294967295) */
+static BOOL parse_seconds(const WCHAR* text, DWORD* out) {
+    if (!text || text[0] == L'\0') return FALSE;
+    unsigned long long value = 0;
+    for (const WCHAR* p = text; *p; ++p) {
+        if (*p < L'0' || *p > L'9') return FALSE;
+        value = value * 10 + (unsigned long long)(*p - L'0');
+        if (value > 0xFFFFFFFFull) return FALSE;
+    }
+    *out = (DWORD)value;
+    return TRUE;
+}
+
+/* TRUE for yes/true/on/1 (case-insensitive); FALSE for no/false/off/0 and anything else */
+static BOOL parse_yes(const WCHAR* text) {
+    return text && (_wcsicmp(text, L"yes") == 0 || _wcsicmp(text, L"true") == 0 || _wcsicmp(text, L"on") == 0 ||
+                    wcscmp(text, L"1") == 0);
+}
+
 BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
     if (!out_config) return FALSE;
     memset(out_config, 0, sizeof(ResticConfig));
+    wcsncpy_s(out_config->root_name, MAX_PATH, CONFIG_DEFAULT_ROOT_NAME, _TRUNCATE);
+    out_config->password_timeout_s = CONFIG_DEFAULT_PASSWORD_TIMEOUT_S;
 
     if (!ini_path || ini_path[0] == L'\0') {
         config_resolve_restic_path(NULL, out_config->restic_path, CONFIG_MAX_PATH);
         return FALSE;
     }
 
-    /* Normalize INI path so Win32 Profile APIs do not default to %WINDIR% */
+    /* Normalize the INI path (a relative one is resolved against the current directory) */
     if (GetFullPathNameW(ini_path, CONFIG_MAX_PATH, out_config->ini_path, NULL) == 0) {
         wcsncpy_s(out_config->ini_path, CONFIG_MAX_PATH, ini_path, _TRUNCATE);
     }
@@ -417,75 +554,71 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
     if (!file_exists(out_config->ini_path)) {
         return FALSE;
     }
-
-    /* Read [Repositories] section with dynamic buffer expansion */
-    DWORD buf_cap = 16384;
-    WCHAR* section_buf = NULL;
-    DWORD chars_read = 0;
-
-    while (buf_cap <= 262144) {
-        WCHAR* new_buf = (WCHAR*)realloc(section_buf, buf_cap * sizeof(WCHAR));
-        if (!new_buf) {
-            free(section_buf);
-            return FALSE;
-        }
-        section_buf = new_buf;
-
-        chars_read = GetPrivateProfileSectionW(
-            L"Repositories",
-            section_buf,
-            buf_cap,
-            out_config->ini_path
-        );
-        if (chars_read < buf_cap - 2) {
-            break;
-        }
-        buf_cap *= 2;
+    WCHAR* ini_text = read_ini_text(out_config->ini_path);
+    if (!ini_text) {
+        return FALSE;
     }
 
+    /* Every [Repositories] line is "<Alias>=<Target>"; a repeated alias updates the earlier entry */
     size_t repo_capacity = 0;
-    const WCHAR* cursor = section_buf;
-
-    while (chars_read > 0 && *cursor != L'\0') {
-        size_t line_len = wcslen(cursor);
-        WCHAR line[CONFIG_MAX_PATH * 2];
-        wcsncpy_s(line, _countof(line), cursor, _TRUNCATE);
-        cursor += line_len + 1;
-
-        trim_whitespace(line);
-        if (line[0] == L'\0' || line[0] == L';' || line[0] == L'#') {
+    BOOL root_name_seen = FALSE;
+    BOOL log_path_seen = FALSE;
+    BOOL timeout_seen = FALSE;
+    BOOL reset_seen = FALSE;
+    IniReader reader = {ini_text, NULL};
+    WCHAR *alias = NULL, *target = NULL;
+    while (ini_next_entry(&reader, &alias, &target)) {
+        if (ini_in_section(&reader, L"Settings") && _wcsicmp(alias, L"RootName") == 0) {
+            /* First occurrence wins; an empty, over-long or invalid name keeps the default */
+            if (!root_name_seen && is_valid_alias(target) && wcslen(target) < MAX_PATH) {
+                wcsncpy_s(out_config->root_name, MAX_PATH, target, _TRUNCATE);
+            }
+            root_name_seen = TRUE;
             continue;
         }
-
-        WCHAR* eq = wcschr(line, L'=');
-        if (!eq) {
+        if (ini_in_section(&reader, L"Settings") && _wcsicmp(alias, L"PasswordTimeoutSeconds") == 0) {
+            /* First occurrence wins; anything but a plain decimal number keeps the default */
+            DWORD seconds = 0;
+            if (!timeout_seen && parse_seconds(target, &seconds)) {
+                out_config->password_timeout_s = seconds;
+            }
+            timeout_seen = TRUE;
             continue;
         }
-
-        *eq = L'\0';
-        WCHAR* alias  = line;
-        WCHAR* target = eq + 1;
-
-        trim_whitespace(alias);
+        if (ini_in_section(&reader, L"Settings") && _wcsicmp(alias, L"PasswordTimeoutResetOnUse") == 0) {
+            /* First occurrence wins; anything but a recognised "yes" keeps the default (no) */
+            if (!reset_seen) out_config->password_timeout_reset_on_use = parse_yes(target);
+            reset_seen = TRUE;
+            continue;
+        }
+        if (ini_in_section(&reader, L"Logging") && _wcsicmp(alias, L"LogPath") == 0) {
+            /* First occurrence wins; an over-long path leaves logging off */
+            if (!log_path_seen && wcslen(target) < CONFIG_MAX_PATH) {
+                wcsncpy_s(out_config->log_path, CONFIG_MAX_PATH, target, _TRUNCATE);
+            }
+            log_path_seen = TRUE;
+            continue;
+        }
+        if (!ini_in_section(&reader, L"Repositories")) {
+            continue;
+        }
         strip_quotes(alias);
         trim_whitespace(alias);
 
-        trim_whitespace(target);
-        strip_quotes(target);
-        trim_whitespace(target);
-
-        if (!is_valid_alias(alias) || target[0] == L'\0') {
+        /* Over-long entries are skipped: truncating a target could name a different repository */
+        if (!is_valid_alias(alias) || target[0] == L'\0' ||
+            wcslen(alias) >= MAX_PATH || wcslen(target) >= CONFIG_MAX_PATH) {
             continue;
         }
 
         if (!upsert_repo_entry(out_config, &repo_capacity, alias, target)) {
-            free(section_buf);
+            free(ini_text);
             config_free(out_config);
             return FALSE;
         }
     }
 
-    free(section_buf);
+    free(ini_text);
     return TRUE;
 }
 
@@ -495,7 +628,9 @@ BOOL config_load(ResticConfig* out_config) {
 
     WCHAR resolved_ini[CONFIG_MAX_PATH] = {0};
     config_resolve_ini_path(resolved_ini, CONFIG_MAX_PATH);
-    return config_load_from_file(resolved_ini, out_config);
+    BOOL ok = config_load_from_file(resolved_ini, out_config);
+    log_configure(out_config->log_path);
+    return ok;
 }
 
 const ResticRepoEntry* config_find_repo(const ResticConfig* config, const WCHAR* alias) {

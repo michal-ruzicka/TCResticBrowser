@@ -1,107 +1,32 @@
-# ==========================================================
-#  test-py template — .gitignore
-# ==========================================================
+# Build output
+/build/
+/dist/
 
-build/
-MEMORY.md
+# Live-test inputs and fixtures (tmp\restic.exe, tmp\test_fixture\)
+/tmp/
 
-# --- Secrets & ambiente locale (MAI committare) -----------
-.env
-.env.*
-py_var.sh
-key.json
-*.pem
+# MSVC / Visual Studio
+.vs/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.idb
+*.res
 
-# --- Python virtual environments --------------------------
-.venv/
-venv/
-env/
-py-env/
-conda-env/
+# Final artifacts (built into build\, but guard against stray copies)
+*.wfx
+*.wfx64
+*.exe
+*.dll
+*.zip
 
-# --- Bytecode / cache Python ------------------------------
-__pycache__/
-*.py[codz]
-*$py.class
-.ruff_cache/
-.pytest_cache/
-.mypy_cache/
-.hypothesis/
-
-# --- Testing & coverage -----------------------------------
-.coverage
-.coverage.*
-htmlcov/
-.tox/
-.nox/
-
-# --- Jupyter / notebook artifacts -------------------------
-.ipynb_checkpoints/
-.marimo/
-
-# --- Log & artefatti runtime ------------------------------
-*.log
-tmp/
-.pi-subagents/artifacts/
-
-# --- Editor / OS ------------------------------------------
-.DS_Store
+# Editors and OS
 .idea/
 .vscode/
-uv.lock
-
-# Prerequisites
-*.d
-
-# Object files
-*.o
-*.ko
-*.obj
-*.elf
-
-# Linker output
-*.ilk
-*.map
-*.exp
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Libraries
-*.lib
-*.a
-*.la
-*.lo
-
-# Shared objects (inc. Windows DLLs)
-*.dll
-*.so
-*.so.*
-*.dylib
-
-# Executables
-*.exe
-*.out
-*.app
-*.i*86
-*.x86_64
-*.hex
-
-# Debug files
-*.dSYM/
-*.su
-*.idb
-*.pdb
-
-# Kernel Module Compile Results
-*.mod*
-*.cmd
-.tmp_versions/
-modules.order
-Module.symvers
-Mkfile.old
-dkms.conf
-
-# debug information files
-*.dwo
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.swp
+*~

@@ -1,0 +1,51 @@
+/*
+ * Windows Resource Script for Restic Total Commander WFX Plugin (TCResticBrowser.wfx / TCResticBrowser.wfx64)
+ *
+ * 1. Icon resource (ID 1): Total Commander loads the FIRST icon resource (by index)
+ *    found in the WFX DLL and displays it next to "TCResticBrowser" in Network Neighborhood.
+ * 2. Version resource (VS_VERSION_INFO): displayed in Windows Explorer / Total Commander
+ *    file properties ("Details" tab).
+ */
+
+/* UTF-8 source: the copyright notice below contains non-ASCII characters */
+#pragma code_page(65001)
+
+#include <winver.h>
+#include "version.h"
+
+1 ICON "TCResticBrowser.ico"
+
+#ifdef _DEBUG
+#define VER_FILEFLAGS VS_FF_DEBUG
+#else
+#define VER_FILEFLAGS 0x0L
+#endif
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     RESTIC_WFX_VERSION_CSV
+PRODUCTVERSION  RESTIC_WFX_VERSION_CSV
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       VER_FILEFLAGS
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_DLL
+FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "Michal Růžička Hobby Development\0"
+            VALUE "FileDescription",  "TCResticBrowser – Restic backup browser for Total Commander (WFX)\0"
+            VALUE "FileVersion",      RESTIC_WFX_VERSION_STR "\0"
+            VALUE "InternalName",     RESTIC_WFX_FILE_NAME "\0"
+            VALUE "LegalCopyright",   "Copyright (c) 2026 Pietro Partescano, 2026 Michal Růžička. Licensed under the MIT License.\0"
+            VALUE "OriginalFilename", RESTIC_WFX_FILE_NAME "\0"
+            VALUE "ProductName",      "TCResticBrowser\0"
+            VALUE "ProductVersion",   RESTIC_WFX_PRODUCT_VER "\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END
