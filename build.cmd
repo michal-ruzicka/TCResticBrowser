@@ -19,6 +19,9 @@ REM
 REM   src\                              (all source files — committed)
 REM   tmp\restic.exe                    (optional, git-ignored: enables the
 REM                                      live tests against a real restic)
+REM   build\fingerprint-x64.txt         (toolchain, libraries, options and
+REM   build\fingerprint-x86.txt          hashes of one build, for comparing
+REM                                      two builds; see CONTRIBUTING.md)
 REM   build\stage\                      (transient staging for ZIP contents)
 REM     TCResticBrowser.wfx             (32-bit plugin DLL)
 REM     TCResticBrowser.wfx64           (64-bit plugin DLL)
@@ -123,6 +126,10 @@ call :run_tests "%BUILD%\x64"
 if errorlevel 1 goto :error
 
 echo.
+echo === Fingerprint (x64) ===
+call :fingerprint x64
+
+echo.
 echo === Configure + build (x86) ===
 call "%VSDEVCMD%" -startdir=none -arch=x86 -host_arch=x64 -vcvars_ver=%CMAKE_T%
 if errorlevel 1 goto :error
@@ -136,6 +143,10 @@ echo === Test (x86) ===
 REM The 32-bit tests run under WOW64 and load the 32-bit plugin DLL.
 call :run_tests "%BUILD%\x86"
 if errorlevel 1 goto :error
+
+echo.
+echo === Fingerprint (x86) ===
+call :fingerprint x86
 
 echo.
 echo === Stage ===
@@ -268,6 +279,17 @@ if errorlevel 1 goto :error
 echo.
 echo === All checks passed ===
 goto :eof
+
+:fingerprint
+REM Writes build\fingerprint-%1.txt and prints it: everything that decides the
+REM bytes of the plugin DLL, with machine-specific folders hidden, so that the
+REM fingerprints of two builds can be compared line by line (fc). A failure
+REM only warns: the fingerprint is a diagnostic, not part of the release.
+REM -ExecutionPolicy Bypass applies to this one process, which runs a script
+REM from this repository; the default policy on Windows clients refuses .ps1.
+powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\build-fingerprint.ps1" -BuildDir "%BUILD%\%~1" -SourceDir "%SRC%" -OutFile "%BUILD%\fingerprint-%~1.txt"
+if errorlevel 1 echo WARNING: could not write build\fingerprint-%~1.txt
+exit /b 0
 
 :run_tests
 REM Runs every test program in %1 from the repository root, where the live

@@ -46,6 +46,7 @@ linked against the static MSVC runtime, and contains no third-party code.
 | `.gitignore` | Excludes build output and `tmp\` from version control |
 | `.vsconfig` | Visual Studio component selection; pins the MSVC toolset and Windows SDK versions for the CI workflow and `setup-build-environment-example.cmd` |
 | `build.cmd` | Top-level build driver |
+| `build-fingerprint.ps1` | Describes one build for comparing two of them (see [When the hashes differ](#when-the-hashes-differ)); called by `build.cmd` |
 | `setup-build-environment-example.cmd` | Builds from scratch on a fresh Windows installation |
 | `AGENT.md` | Technical specification and coding-agent instructions; bundled in every release ZIP |
 | `CHANGELOG.md` | Release notes in Keep a Changelog format; bundled in every release ZIP |
@@ -197,6 +198,32 @@ If all three match, the released ZIP is identical to what the source builds.
 `sha256sums.sha256` inside the ZIP is useful as a convenience check after
 extraction — to confirm that an individual file was not corrupted during
 download or extraction — but it is not an independent trust anchor.
+
+#### When the hashes differ
+
+After each bitness, `build.cmd` runs `build-fingerprint.ps1`, which writes
+`build\fingerprint-x64.txt` and `build\fingerprint-x86.txt` and prints them
+into the log; the CI workflow also uploads them as the
+`TCResticBrowser-fingerprints` artifact. A fingerprint lists everything that
+decides the bytes of the plugin DLL, with machine-specific folders replaced by
+placeholders (`<VS>`, `<VCTools>`, `<WindowsSdkDir>`, `<src>`, `<build>`), so
+two builds of the same commit should have identical fingerprints apart from
+the lines marked *informational*. Compare a local one with the one from CI:
+
+```
+fc build\fingerprint-x64.txt %USERPROFILE%\Downloads\TCResticBrowser-fingerprints\fingerprint-x64.txt
+```
+
+Read the differences from the top; the first section that differs is usually
+the cause:
+
+| Section | What a difference means |
+|---|---|
+| `[toolchain]` | Another Visual Studio, MSVC toolset or Windows SDK build. The same version number with another hash of `cl.exe`, `c1.dll`, `c2.dll` or `link.exe` means a serviced toolset. Install the same Visual Studio version on both sides; a Visual Studio update can update the Windows SDK too. |
+| `[libraries]` | The static C runtime (`libcmt.lib` and `libvcruntime.lib` from the toolset, `libucrt.lib` from the Windows SDK) or an import library differs, and their code is linked into the DLL. `libucrt.lib` changes with the SDK revision (10.0.26100.*x*), which the SDK folder name `10.0.26100.0` does not show. |
+| `[options]` | CMake generated other compiler, resource compiler or linker options: another CMake version, or a changed `CMakeLists.txt`. |
+| `[objects]` | The toolchain and options are the same but an object file is not: the headers differ (another SDK revision) or the sources do. |
+| `[dll]` | Only the linked result differs: the linker or a library. The section hashes narrow it down (`.text` code, `.rdata` constants and the import table, `.rsrc` the icon and version resource). The `rich:` lines (the Rich header) list, per tool build, how many linked-in objects it produced: a library built by another compiler shows up as another `build` number. |
 
 #### Upgrading the pinned toolchain
 

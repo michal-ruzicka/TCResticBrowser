@@ -80,6 +80,18 @@ jobs:
         shell: cmd
         run: build.cmd
 
+      # The fingerprints describe toolchain, libraries, options and hashes of
+      # each bitness; compare them with a local build's when the ZIP hashes
+      # differ (CONTRIBUTING.md, "When the hashes differ").
+      - name: Upload build fingerprints
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: TCResticBrowser-fingerprints
+          path: build\fingerprint-*.txt
+          if-no-files-found: warn
+          retention-days: 90
+
       # Debug build with the CRT leak checker, MSVC /analyze, and the unit
       # tests under AddressSanitizer (x64).
       - name: Extra checks (Debug, /analyze, AddressSanitizer)
