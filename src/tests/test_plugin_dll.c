@@ -1371,6 +1371,11 @@ static void test_live_end_to_end_navigation(void) {
                 p.execute_w(NULL, some_file, chmod_verb) == FS_EXEC_ERROR &&
                 p.execute_w(NULL, some_file, quote_verb) == FS_EXEC_ERROR,
                 "properties is a no-op, chmod and quote commands are refused");
+    WCHAR mode_binary[] = L"MODE I", mode_text[] = L"mode A", mode_auto[] = L"MODE X *.txt *.ini", modem[] = L"modem";
+    WCHAR repo_dir[] = L"\\MainRepo";
+    EXPECT_TRUE(p.execute_w(NULL, repo_dir, mode_binary) == FS_EXEC_OK && p.execute_w(NULL, repo_dir, mode_text) == FS_EXEC_OK &&
+                p.execute_w(NULL, repo_dir, mode_auto) == FS_EXEC_OK && p.execute_w(NULL, repo_dir, modem) == FS_EXEC_ERROR,
+                "The toolbar's transfer modes are accepted and ignored (files are copied byte for byte)");
     EXPECT_TRUE(p.find_first_w(forget, &fd) == INVALID_HANDLE_VALUE, "The forget entry is not a folder");
 
     /* [Logging] LogPath: restic runs, exit codes and prompts are logged; passwords never are */

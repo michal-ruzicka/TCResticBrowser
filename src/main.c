@@ -1246,6 +1246,15 @@ int __stdcall FsExecuteFileW(HWND MainWin, WCHAR* RemoteName, WCHAR* Verb) {
         return FS_EXEC_SYMLINK;
     }
     if (_wcsicmp(Verb, L"properties") == 0) return FS_EXEC_OK;
+    /*
+     * The transfer mode of the connections toolbar (undocumented verb "MODE I", "MODE A", or
+     * "MODE X <text-file extensions>" for automatic): Total Commander only tells the plugin, and
+     * restic dump always delivers the bytes unchanged, so every mode is accepted and ignored
+     */
+    if (_wcsnicmp(Verb, L"mode", 4) == 0 && (Verb[4] == L'\0' || Verb[4] == L' ')) {
+        log_write(L"Transfer mode '%ls' ignored: files are always copied byte for byte", Verb);
+        return FS_EXEC_OK;
+    }
     return FS_EXEC_ERROR;
 }
 
