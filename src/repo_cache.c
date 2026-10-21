@@ -69,7 +69,22 @@ typedef struct {
 
 static SRWLOCK    g_CacheLock       = SRWLOCK_INIT;
 static RepoEntry* g_Repos           = NULL;
-static ULONGLONG  g_CacheGeneration = 0; /* Incremented by every forget/clear */
+/*
+ * Generations: repo_cache_generation() hands out the current value of a counter that every forget
+ * and clear advances. Data read under generation g is still good for alias A unless A was
+ * forgotten (g_ForgottenAt) or everything was cleared (g_ClearedAt) at or after g, so forgetting
+ * one repository leaves the work in progress for the others alone.
+ */
+typedef struct ForgetMark ForgetMark;
+struct ForgetMark {
+    WCHAR alias[MAX_PATH];
+    ULONGLONG at;
+    ForgetMark* next;
+};
+
+static ULONGLONG   g_CacheGeneration = 1; /* Advanced by every forget and clear */
+static ULONGLONG   g_ClearedAt       = 0;
+static ForgetMark* g_ForgottenAt     = NULL;
 static size_t     g_IndexLimit      = (size_t)CONFIG_DEFAULT_SNAPSHOT_CACHE_MB * 1024u * 1024u;
 static size_t     g_IndexBytes      = 0; /* Memory of all ready listings */
 static volatile LONG g_LoadsRunning = 0; /* Only through Interlocked*: workers change it without the lock */
@@ -101,6 +116,15 @@ static void report(const WCHAR* alias, const WCHAR* format, ...) {
     _vsnwprintf_s(text + n, _countof(text) - (size_t)n, _TRUNCATE, format, args);
     va_end(args);
     proc(text);
+}
+
+/* TRUE while data read under `generation` may still be kept for `alias`; caller holds g_CacheLock */
+static BOOL generation_valid_locked(const WCHAR* alias, ULONGLONG generation) {
+    if (generation <= g_ClearedAt) return FALSE;
+    for (const ForgetMark* m = g_ForgottenAt; m; m = m->next) {
+        if (_wcsicmp(m->alias, alias) == 0) return generation > m->at;
+    }
+    return TRUE;
 }
 
 /* Caller holds g_CacheLock */
@@ -207,6 +231,7 @@ static void make_room_locked(size_t need, const IndexEntry* keep) {
  */
 typedef struct {
     ULONGLONG generation;
+    const WCHAR* alias;
     const LoadJob* job;          /* NULL for a snapshot-list re-read */
     const SnapshotIndex* index;
     ULONGLONG started, reported;
@@ -215,7 +240,7 @@ typedef struct {
 static BOOL load_cancelled(void* ctx) {
     LoadCancel* c = (LoadCancel*)ctx;
     AcquireSRWLockShared(&g_CacheLock);
-    BOOL gone = c->generation != g_CacheGeneration;
+    BOOL gone = !generation_valid_locked(c->alias, c->generation);
     ReleaseSRWLockShared(&g_CacheLock);
     ULONGLONG now = GetTickCount64();
     if (!gone && c->job && c->index && now - c->reported >= PROGRESS_REPORT_MS) {
@@ -229,7 +254,7 @@ static BOOL load_cancelled(void* ctx) {
 /* Stores the outcome of a load; returns the state kept, or INDEX_LOADING when it was discarded */
 static IndexState finish_load(const LoadJob* job, SnapshotIndex* index, IndexState state) {
     AcquireSRWLockExclusive(&g_CacheLock);
-    IndexEntry* e = job->generation == g_CacheGeneration
+    IndexEntry* e = generation_valid_locked(job->alias, job->generation)
                         ? find_index_locked(find_repo_locked(job->alias, job->target), job->snapshot_id)
                         : NULL; /* Forgotten meanwhile: the entry is gone and the result discarded */
     if (e && state == INDEX_READY) {
@@ -295,7 +320,7 @@ static VOID CALLBACK load_index_worker(PTP_CALLBACK_INSTANCE instance, PVOID con
 
     if (job->password_source(job->alias, password, _countof(password)) &&
         (index = snapshot_index_new(limit)) != NULL) {
-        LoadCancel cancel = {job->generation, job, index, started, started};
+        LoadCancel cancel = {job->generation, job->alias, job, index, started, started};
         ResticExecOptions opts;
         memset(&opts, 0, sizeof(opts));
         opts.cancel_proc = load_cancelled;
@@ -430,7 +455,7 @@ static VOID CALLBACK refresh_tree_worker(PTP_CALLBACK_INSTANCE instance, PVOID c
     ULONGLONG started = GetTickCount64();
 
     if (job->password_source(job->alias, password, _countof(password))) {
-        LoadCancel cancel = {job->generation, NULL, NULL, started, started};
+        LoadCancel cancel = {job->generation, job->alias, NULL, NULL, started, started};
         ResticExecOptions opts;
         memset(&opts, 0, sizeof(opts));
         opts.cancel_proc = load_cancelled;
@@ -546,7 +571,7 @@ void repo_cache_put_tree(const WCHAR* alias, const WCHAR* target, const char* ti
         return;
     }
     AcquireSRWLockExclusive(&g_CacheLock);
-    RepoEntry* r = generation == g_CacheGeneration ? get_repo_locked(alias, target) : NULL;
+    RepoEntry* r = generation_valid_locked(alias, generation) ? get_repo_locked(alias, target) : NULL;
     if (r) {
         snapshot_tree_free(r->tree);
         r->tree    = tree;
@@ -560,7 +585,18 @@ void repo_cache_put_tree(const WCHAR* alias, const WCHAR* target, const char* ti
 
 void repo_cache_forget(const WCHAR* alias) {
     AcquireSRWLockExclusive(&g_CacheLock);
-    g_CacheGeneration++;
+    ForgetMark* m = g_ForgottenAt;
+    while (m && _wcsicmp(m->alias, alias) != 0) m = m->next;
+    if (!m && wcslen(alias) < MAX_PATH && (m = (ForgetMark*)calloc(1, sizeof(ForgetMark))) != NULL) {
+        wcscpy_s(m->alias, MAX_PATH, alias);
+        m->next       = g_ForgottenAt;
+        g_ForgottenAt = m;
+    }
+    if (m) {
+        m->at = g_CacheGeneration++;
+    } else {
+        g_ClearedAt = g_CacheGeneration++; /* Cannot record it for the alias: invalidate everything */
+    }
     for (RepoEntry** link = &g_Repos; *link;) {
         RepoEntry* r = *link;
         if (_wcsicmp(r->alias, alias) == 0) {
@@ -575,7 +611,12 @@ void repo_cache_forget(const WCHAR* alias) {
 
 void repo_cache_clear(void) {
     AcquireSRWLockExclusive(&g_CacheLock);
-    g_CacheGeneration++;
+    g_ClearedAt = g_CacheGeneration++;
+    while (g_ForgottenAt) { /* All older than g_ClearedAt now */
+        ForgetMark* m = g_ForgottenAt;
+        g_ForgottenAt = m->next;
+        free(m);
+    }
     while (g_Repos) {
         RepoEntry* r = g_Repos;
         g_Repos = r->next;

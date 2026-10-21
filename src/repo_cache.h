@@ -84,6 +84,7 @@ BOOL repo_cache_wait_idle(DWORD timeout_ms);
 /*
  * The value to pass to repo_cache_put_tree() for data read from now on: a repository forgotten
  * after this call does not get its data back from a restic call that was already running.
+ * Forgetting one repository does not affect what is read for the others.
  */
 ULONGLONG repo_cache_generation(void);
 

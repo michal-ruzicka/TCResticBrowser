@@ -18,6 +18,7 @@
 #include <wchar.h>
 #include "fsplugin.h"
 #include "restic_cli.h"
+#include "repo_cache.h"
 
 static int g_tests_run    = 0;
 static int g_tests_failed = 0;
@@ -568,6 +569,37 @@ static void test_exec_large_output_and_long_args(void) {
     free(args);
     EXPECT_TRUE(res == RESTIC_OK && out.length >= 6000, "Command line beyond the old 2048-character limit");
     restic_free_command_output(&out);
+}
+
+/* The cache keeps what was read for one repository when another one is forgotten meanwhile */
+static void test_repo_cache_generations(void) {
+    const char* fmt = SNAPSHOT_TREE_DEFAULT_TIME_FORMAT;
+    SnapshotTree *t1 = NULL, *t2 = NULL, *t3 = NULL, *t4 = NULL;
+    EXPECT_TRUE(snapshot_tree_build("null", 4, NULL, &t1) == SNAPSHOT_TREE_OK && snapshot_tree_build("null", 4, NULL, &t2) == SNAPSHOT_TREE_OK &&
+                snapshot_tree_build("null", 4, NULL, &t3) == SNAPSHOT_TREE_OK && snapshot_tree_build("null", 4, NULL, &t4) == SNAPSHOT_TREE_OK,
+                "Trees to cache");
+    repo_cache_clear();
+    ULONGLONG age = 0, g = repo_cache_generation();
+    repo_cache_forget(L"Other");                         /* E.g. its password timed out meanwhile */
+    repo_cache_put_tree(L"RepoB", L"C:\\b", fmt, t1, g); /* Read for RepoB before that */
+    repo_cache_put_tree(L"other", L"C:\\o", fmt, t2, g); /* Read for the forgotten one before that */
+    const SnapshotTree* b = repo_cache_lock_tree(L"RepoB", L"C:\\b", fmt, &age);
+    if (b) repo_cache_unlock();
+    const SnapshotTree* o = repo_cache_lock_tree(L"Other", L"C:\\o", fmt, &age);
+    if (o) repo_cache_unlock();
+    EXPECT_TRUE(b == t1, "Forgetting one repository keeps what is read for another");
+    EXPECT_TRUE(o == NULL, "...but discards what was read for the forgotten one (alias case ignored)");
+    repo_cache_put_tree(L"Other", L"C:\\o", fmt, t3, repo_cache_generation());
+    o = repo_cache_lock_tree(L"Other", L"C:\\o", fmt, &age);
+    if (o) repo_cache_unlock();
+    EXPECT_TRUE(o == t3, "Data read after the forget is kept");
+    g = repo_cache_generation();
+    repo_cache_clear();
+    repo_cache_put_tree(L"RepoB", L"C:\\b", fmt, t4, g);
+    b = repo_cache_lock_tree(L"RepoB", L"C:\\b", fmt, &age);
+    if (b) repo_cache_unlock();
+    EXPECT_TRUE(b == NULL, "Clearing discards what any repository read before it");
+    repo_cache_clear();
 }
 
 /* Counts the lines a line consumer receives, checking that they arrive whole and in order */
@@ -1194,6 +1226,7 @@ int main(void) {
     test_exec_limits_and_failures();
     test_exec_large_output_and_long_args();
     test_exec_line_streaming();
+    test_repo_cache_generations();
     test_dump_with_fake_restic();
     test_live_restic_cli();
 
