@@ -99,7 +99,7 @@ entries pointing there need to be recreated.
 
 ### Key Features
 
-- **Fast Browsing of Large and Remote Repositories:** Every `restic` run costs about a second before it prints anything (deriving the key from the password and loading the repository index), more for big or remote (e.g. S3) repositories. The plugin therefore reads each repository's snapshot list once and answers from it at once, re-reading it in the background once it is a minute old (as often as `restic mount` does), and when you enter a snapshot it reads the list of *all* its files and folders in the background with a single `restic ls`. Until that is done, each folder is listed on its own (`restic ls <snapshot> <path>`), as fast as before; afterwards every folder of the snapshot opens instantly and `restic` runs only to copy or view files. See [Snapshot Cache](#snapshot-cache).
+- **Fast Browsing of Large and Remote Repositories:** Every `restic` run costs about a second before it prints anything (deriving the key from the password and loading the repository index), more for big or remote (e.g. S3) repositories. The plugin therefore reads each repository's snapshot list once and answers from it at once, re-reading it in the background once it is a minute old (as often as `restic mount` does), and when you enter a snapshot it reads the list of *all* its files and folders in the background with a single `restic ls`. Until that is done, each folder is listed on its own (`restic ls <snapshot> <path>`), as fast as before; afterwards every folder of the snapshot opens instantly and `restic` runs only to copy or view files. See [What Is Instant and What Takes a While](#what-is-instant-and-what-takes-a-while) and [Snapshot Cache](#snapshot-cache).
 - **Native File & Folder Extraction (`F5`, `F3`, `Ctrl+Q`):**
   - Copy individual files or entire directory trees out of any snapshot using **`F5`** (preserving original modification timestamps and 64-bit file sizes).
   - Inspect files directly with Total Commander's **Lister (`F3`)** or **Quick View (`Ctrl+Q`)**.
@@ -213,6 +213,29 @@ documentation.
 | **View File (`F3` / `Ctrl+Q`)** | Press **`F3`** (Lister) or **`Ctrl+Q`** (Quick View) on any file to stream it to a temporary location and view its contents. |
 | **Restore / Extract (`F5`)** | Select one or more files or directories and press **`F5`** to copy them to the target panel, preserving original `LastWriteTime` timestamps. Standard Total Commander overwrite prompts are supported. |
 | **Cancel Operation (`ESC`)** | Press **`ESC`** in Total Commander's progress dialog to terminate the underlying `restic.exe` child process and clean up any temporary file. |
+
+### What Is Instant and What Takes a While
+
+Every run of `restic` costs about a second before it shows anything (it
+derives the key from the password and loads the repository index), and
+much longer for a big or remote repository. The plugin runs it as rarely as
+it can, so the same folder can take a moment once and open instantly later:
+
+| You open | What happens |
+| --- | --- |
+| A repository for the first time (or after its password was forgotten) | Waits for `restic snapshots`. |
+| `snapshots`, `hosts`, `tags`, `ids` and the folders below them | Instant, from the snapshot list read before. When that list is older than a minute (`SnapshotListRefreshSeconds=`), a new one is read in the background; `Ctrl+R` a moment later shows snapshots taken meanwhile. |
+| The first folders inside a snapshot | Each one waits for its own `restic ls`, as long as for the repository. Entering the snapshot also starts reading the list of *all* its files in the background. |
+| Any folder of that snapshot once the background read is done | Instant, from memory. The read takes from seconds to minutes depending on the number of files, and runs while you browse. |
+| A snapshot with more files than `SnapshotCacheMB=` holds | Every folder waits for its own `restic ls`; it is never read as a whole. |
+| A file you view (`F3`, `Ctrl+Q`) or copy (`F5`) | Always runs `restic dump`, about a second per file plus the transfer. |
+
+After the password timeout (30 minutes by default) or `🗑 Forget N
+Passwords`, everything read from that repository is dropped, so the next
+visit starts from the top of the table again. Total Commander shows its
+progress dialog, with `ESC` to cancel, only for operations that take more
+than a few seconds. The [diagnostic log](#logging) records every restic run
+and background read with its duration.
 
 ### File Names from Other Systems
 
