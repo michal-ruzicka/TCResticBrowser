@@ -300,7 +300,7 @@ static void test_time_formats(void) {
         {"DD.MM.YYYY hh-mm", "02.01.2026 03-04|08.07.2026 09-10|31.12.1999 23-59|latest|latest \xe2\x86\x92 " "08.07.2026 09-10|latest \xe2\x86\x92 " "cccccccc"},
         {"YYYY", "1999|2026|2026-1|latest|latest \xe2\x86\x92 " "2026-1|latest \xe2\x86\x92 " "cccccccc"},
         {"Y-Mon h.s z", "Y-Mon h.s z|Y-Mon h.s z-1|Y-Mon h.s z-2|latest"}, /* No full placeholder... */
-        {"Záloha YYYY-MM-DD", "Záloha 1999-12-31|Záloha 2026-01-02|Záloha 2026-07-08|latest|latest \xe2\x86\x92 " "Záloha 2026-07-08|latest \xe2\x86\x92 " "cccccccc"},
+        {"Café YYYY-MM-DD", "Café 1999-12-31|Café 2026-01-02|Café 2026-07-08|latest|latest \xe2\x86\x92 " "Café 2026-07-08|latest \xe2\x86\x92 " "cccccccc"},
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
         SnapshotTree* tree = NULL;

@@ -51,7 +51,7 @@ to list and extract data and never modifies a repository.
 │   │   └── e5f60718\
 │   ├── snapshots\
 │   │   ├── 2026-10-17_21-15-42\
-│   │   ├── 2026-10-18_09-30-00\             <-- A snapshot (named by its time)
+│   │   ├── 2026-10-18_09-30-00\            <-- A snapshot (named by its time)
 │   │   │   └── C\
 │   │   │       └── Users\
 │   │   │           └── alice\
@@ -241,7 +241,8 @@ run with its duration.
 
 ### Connection Log
 
-With `ConnectionLog=yes` under `[Settings]` the plugin announces itself as a
+With `ConnectionLog=yes` under `[Settings]` (also `true`, `on` or `1`;
+anything else, or no setting, means no) the plugin announces itself as a
 connection once a repository's password is accepted, as an FTP plugin
 announces a server, and Total Commander shows its FTP connections toolbar
 with two buttons that matter here:
@@ -265,8 +266,8 @@ with two buttons that matter here:
 There is one connection for all repositories, so one Disconnect is always
 enough. Only Disconnect closes it: `🗑 Forget N Passwords` or a password
 timeout forget the passwords but cannot close Total Commander's toolbar, so
-it stays (the log says so) until you press Disconnect or enter a
-repository again, which reuses it. That is why the toolbar is off by
+it stays (the log says so) until you press Disconnect; the next accepted
+password reuses it. That is why the toolbar is off by
 default.
 
 The toolbar is Total Commander's own FTP toolbar, so it says *FTP* and has
@@ -336,7 +337,8 @@ first accepted them, then wiped; the next access asks again. Using a
 repository does not extend the time. `PasswordTimeoutSeconds=` under
 `[Settings]` changes it, `0` keeps passwords until Total Commander exits.
 
-With `PasswordTimeoutResetOnUse=yes` every operation that uses a password
+With `PasswordTimeoutResetOnUse=yes` (also `true`, `on` or `1`; anything
+else means no) every operation that uses a password
 starts the interval again: while you work with a repository you are not
 asked again, and once you leave it alone the password goes soon. A short
 timeout suits this best:
@@ -366,8 +368,9 @@ not cached at all - its folders are then simply listed one by one, as
 before, and the diagnostic log says so - and `0` turns the cache off.
 Nothing is written to disk; unlike passwords, the lists (names, sizes and
 times of files) are not encrypted in memory. They are dropped together with
-the repository's password (timeout, `🗑 Forget N Passwords`, a wrong
-password), so what was read with a password is never shown without it.
+the repository's password (timeout, `🗑 Forget N Passwords`, Disconnect
+in the connection log, a wrong password), so what was read with a password
+is never shown without it.
 
 #### Snapshot List Refresh
 
@@ -494,6 +497,10 @@ ResticPath=C:\Program Files\Restic\restic.exe
 ; Optional name of the plugin's folder in Network Neighborhood
 ; (default: TCResticBrowser; read only when the plugin is installed).
 RootName=Backups
+; Optional: how long a password is remembered, in seconds (default: 1800).
+PasswordTimeoutSeconds=600
+; Optional: Total Commander's connections toolbar with a log (default: no).
+ConnectionLog=yes
 ; Optional snapshot folder names (default: YYYY-MM-DD_hh-mm-ss).
 SnapshotTimeFormat=YYYY-MM-DDThh.mm.ss
 ; Optional: re-read the snapshot list in the background once it is this many
@@ -604,7 +611,7 @@ How the reader is tested:
 
 ## Expected Future Work
 
-Planned for versions after 2.0.0, in no particular order:
+Planned for later versions, in no particular order:
 
 - **S3 credentials asked for like the repository password.** Instead of
   relying on `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` in Total
@@ -621,8 +628,9 @@ Planned for versions after 2.0.0, in no particular order:
   the password.
 - **Stop restic's helper processes on `ESC`.** Cancelling terminates
   `restic.exe`, but an `rclone` or `ssh` process it started lives on until
-  it notices the closed pipe. A job object with `KILL_ON_JOB_CLOSE` would
-  end the whole process tree at once.
+  it notices the closed pipe; so does a `restic` still reading a snapshot in
+  the background when Total Commander exits. A job object with
+  `KILL_ON_JOB_CLOSE` would end the whole process tree at once.
 - **Check the restic version.** Tell the user when `restic.exe` is older
   than 0.17.1 instead of misreading its exit codes and output.
 

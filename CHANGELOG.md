@@ -7,26 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
+### Added
 
-- **Snapshots are arranged as `restic mount` shows them.** A repository now
-  holds `ids`, `snapshots`, `hosts` and `tags`, with snapshots by short ID,
-  by time, by host and by tag, and `latest` in every folder of snapshots,
-  following the rules of `restic mount` exactly (names `-1`, `-2`... for
-  equal times, tags such as `a/b` as `a_b`), plus `latest → <folder>` and
-  `latest → <short ID>` next to every `latest`, the same snapshot named by
-  where `restic mount`'s `latest` link points and by its ID. Folder names
-  use the time template restic suggests for file systems without colons,
-  `2006-01-02_15-04-05`, or the format set by the new `SnapshotTimeFormat=`
-  setting (placeholders `YYYY`, `YY`, `MM`, `DD`, `hh`, `mm`, `ss` and the
-  zone `zzzz`, documented in the sample `TCResticBrowser.ini`). The
-  snapshot list is read once per repository and then answered from
-  memory; once it is older than a minute (like `restic mount`, configurable
-  with the new `SnapshotListRefreshSeconds=`) it is re-read in the
-  background while the old list stays in use, so moving between these
-  folders never waits for restic again. The snapshot folders of version 2.0
-  (`<time>_[<short id>]`) are gone, so history and hotlist entries that
-  point into them need to be recreated.
+- **Folders of a snapshot open instantly once it has been read.** Every
+  `restic` run spends about a second (more on big or remote repositories)
+  before it lists anything, so entering a snapshot now also starts one
+  `restic ls` of the whole snapshot in the background; when it is done,
+  every folder of that snapshot is listed from memory without running
+  restic. Until then folders are listed one by one as before. The new
+  `SnapshotCacheMB=` setting limits the memory (default 512 MiB, about
+  five million files, `0` turns it off); the lists are dropped with the
+  repository's password.
+- **Configurable snapshot folder names.** `SnapshotTimeFormat=` sets the
+  time format of the snapshot folders, with the placeholders `YYYY`, `YY`,
+  `MM`, `DD`, `hh`, `mm`, `ss` and the zone `zzzz`, documented in the sample
+  `TCResticBrowser.ini`; the default is restic's colon-free
+  `2006-01-02_15-04-05`.
 - **Optional connection log.** With the new `ConnectionLog=yes`, the plugin
   appears in Total Commander's FTP connections toolbar once a password is
   accepted: its log window shows the background work (reading a whole
@@ -38,16 +34,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`<alias> - Restic repository password`), so password managers that
   choose an entry by window title, such as KeePassXC Auto-Type, can fill
   in the right password.
-- **Folders of a snapshot open instantly once it has been read.** Every
-  `restic` run spends about a second (more on big or remote repositories)
-  before it lists anything, so entering a snapshot now also starts one
-  `restic ls` of the whole snapshot in the background; when it is done,
-  every folder of that snapshot is listed from memory without running
-  restic. Until then folders are listed one by one as before. The new
-  `SnapshotCacheMB=` setting limits the memory (default 512 MiB, about
-  five million files, `0` turns it off); the lists are dropped with the
-  repository's password.
 
+### Changed
+
+- **Snapshots are arranged as `restic mount` shows them.** A repository now
+  holds `ids`, `snapshots`, `hosts` and `tags`, with snapshots by short ID,
+  by time, by host and by tag, and `latest` in every folder of snapshots,
+  following the rules of `restic mount` exactly (names `-1`, `-2`... for
+  equal times, tags such as `a/b` as `a_b`), plus `latest → <folder>` and
+  `latest → <short ID>` next to every `latest`, the same snapshot named by
+  where `restic mount`'s `latest` link points and by its ID. The snapshot
+  list is read once per repository and then answered from memory; once it
+  is older than a minute (like `restic mount`, configurable with the new
+  `SnapshotListRefreshSeconds=`) it is re-read in the background while the
+  old list stays in use, so moving between these folders waits for restic
+  only for a snapshot the cached list does not know yet. The snapshot
+  folders of version 2.0 (`<time>_[<short id>]`) are gone, so history and
+  hotlist entries that point into them need to be recreated.
 - **A `ResticPath=` that does not work is now an error.** When the
   configured `restic.exe` did not exist, the plugin silently fell back to
   `restic.exe` in the plugin folder or in `PATH`, so a different restic
@@ -251,6 +254,6 @@ by Pietro Partescano, the base of this fork was commit [c8481b43c9ab2867eee82471
   block.
 
 
-[Unreleased]: https://github.com/michal-ruzicka/TCResticBrowser/compare/v2.0.0...restic-mount-like-tree-layout
+[Unreleased]: https://github.com/michal-ruzicka/TCResticBrowser/compare/v2.0.0...HEAD
 [v2.0.0]: https://github.com/michal-ruzicka/TCResticBrowser/compare/c8481b43c9ab2867eee824719e3a9c6785db6c61...v2.0.0
 [v1.0.0]: https://github.com/goldfix/Restic_WFX_Plugin/tree/1.0.0

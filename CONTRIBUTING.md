@@ -68,7 +68,7 @@ build.cmd
 The script locates Visual Studio Build Tools via `vswhere` and activates the
 compiler environment itself — no Developer Command Prompt is needed. It drives
 CMake (NMake Makefiles generator) for both bitnesses (x86 and x64) using the
-sources under `src\`, **runs the four test programs for each bitness** (a
+sources under `src\`, **runs the five test programs for each bitness** (a
 failing test fails the build), and packages the artifacts into
 `dist\TCResticBrowser.v<version>.zip` — the same auto-install bundle
 described in *Installation*. The version is read from `src\pluginst.inf` as
@@ -395,9 +395,10 @@ Total Commander process
     │                                replace of the target (F5, F3, Ctrl+Q)
     ├── RequestProcW (TC callback)   repository password, kept in memory
     │                                per alias, passed as RESTIC_PASSWORD
-    └── LogProcW (TC callback)       CONNECT \<alias> once the password is accepted,
+    └── LogProcW (TC callback)       with ConnectionLog=yes: one CONNECT \ for all
+                                     repositories once a password is accepted,
                                      background work as MSGTYPE_DETAILS;
-                                     FsDisconnectW forgets password and cache
+                                     FsDisconnectW forgets every password and cache
 ```
 
 | Source | Responsibility |
