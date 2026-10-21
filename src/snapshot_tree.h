@@ -19,7 +19,8 @@
  * - snapshots are inserted in ascending order of time, ties broken by ID, and a name already taken
  *   in a folder gets "-1", "-2", ... appended, so the older snapshot keeps the plain name;
  * - "latest" in a folder of snapshots is the one inserted last with the newest time; next to it
- *   "latest → <short id>" shows the same snapshot and tells which one it is (restic's latest is a
+ *   "latest → <folder>" (restic's link target, the snapshot's own folder name) and
+ *   "latest → <short id>" show the same snapshot and tell which one it is (restic's latest is a
  *   symlink, whose target Total Commander would not show);
  * - the time is the snapshot's own wall-clock time (the zone it was taken in), and the four
  *   top-level folders exist even when the repository has no snapshots.
@@ -35,7 +36,8 @@
 #define SNAPSHOT_TREE_SHORT_ID_CHARS 8
 /* A full snapshot ID: 64 hexadecimal characters */
 #define SNAPSHOT_TREE_ID_CHARS 64
-/* "latest → " (U+2192 RIGHTWARDS ARROW between spaces), followed by the short ID of the latest snapshot */
+/* "latest → " (U+2192 RIGHTWARDS ARROW between spaces), followed by the latest snapshot's folder name
+   or short ID */
 #define SNAPSHOT_TREE_LATEST_LINK_PREFIX "latest \xe2\x86\x92 "
 
 /*

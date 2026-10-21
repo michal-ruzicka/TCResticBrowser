@@ -180,21 +180,23 @@ static void test_layout(void) {
     EXPECT_TRUE(strcmp(names(walk(tree, "ids")), "aaaaaaaa|bbbbbbbb|cccccccc") == 0, "ids/ holds the short IDs");
     EXPECT_TRUE(is_snapshot(walk(tree, "ids/bbbbbbbb"), ID("b")), "ids/<short> is the snapshot with the full ID");
     EXPECT_TRUE(strcmp(names(walk(tree, "snapshots")),
-                       "2026-10-18_22-15-30|2026-10-19_08-00-00|2026-10-20_01-02-03|latest|latest \xe2\x86\x92 " "cccccccc") == 0,
+                       "2026-10-18_22-15-30|2026-10-19_08-00-00|2026-10-20_01-02-03|latest|latest \xe2\x86\x92 " "2026-10-20_01-02-03|latest \xe2\x86\x92 " "cccccccc") == 0,
                 "snapshots/ named by the time in the snapshot's own zone, plus latest");
     EXPECT_TRUE(is_snapshot(walk(tree, "snapshots/latest"), ID("c")), "latest is the newest snapshot");
     EXPECT_TRUE(is_snapshot(walk(tree, "snapshots/latest \xe2\x86\x92 " "cccccccc"), ID("c")) &&
                 walk(tree, "snapshots/latest \xe2\x86\x92 " "cccccccc")->time == walk(tree, "snapshots/latest")->time,
                 "latest → <short id> is the same snapshot and says which");
+    EXPECT_TRUE(is_snapshot(walk(tree, "snapshots/latest \xe2\x86\x92 2026-10-20_01-02-03"), ID("c")),
+                "latest → <folder> names restic mount's link target, the latest snapshot's folder");
     EXPECT_TRUE(is_snapshot(walk(tree, "hosts/server/latest \xe2\x86\x92 " "aaaaaaaa"), ID("a")) &&
                 walk(tree, "ids/latest \xe2\x86\x92 " "cccccccc") == NULL, "Wherever latest is, and only there");
     EXPECT_TRUE(walk(tree, "snapshots/latest")->time == ticks_utc(2026, 10, 20, 8, 2, 3), "latest has its time (UTC)");
     EXPECT_TRUE(strcmp(names(walk(tree, "hosts")), "laptop|server") == 0, "hosts/");
-    EXPECT_TRUE(strcmp(names(walk(tree, "hosts/laptop")), "2026-10-19_08-00-00|2026-10-20_01-02-03|latest|latest \xe2\x86\x92 " "cccccccc") == 0,
+    EXPECT_TRUE(strcmp(names(walk(tree, "hosts/laptop")), "2026-10-19_08-00-00|2026-10-20_01-02-03|latest|latest \xe2\x86\x92 " "2026-10-20_01-02-03|latest \xe2\x86\x92 " "cccccccc") == 0,
                 "hosts/laptop/");
     EXPECT_TRUE(is_snapshot(walk(tree, "hosts/server/latest"), ID("a")), "hosts/server/latest");
     EXPECT_TRUE(strcmp(names(walk(tree, "tags")), "daily|home") == 0, "tags/, untagged snapshot absent");
-    EXPECT_TRUE(strcmp(names(walk(tree, "tags/daily")), "2026-10-19_08-00-00|2026-10-20_01-02-03|latest|latest \xe2\x86\x92 " "cccccccc") == 0,
+    EXPECT_TRUE(strcmp(names(walk(tree, "tags/daily")), "2026-10-19_08-00-00|2026-10-20_01-02-03|latest|latest \xe2\x86\x92 " "2026-10-20_01-02-03|latest \xe2\x86\x92 " "cccccccc") == 0,
                 "tags/daily/");
     EXPECT_TRUE(is_snapshot(walk(tree, "tags/home/2026-10-19_08-00-00"), ID("b")) &&
                 is_snapshot(walk(tree, "tags/home/latest"), ID("b")), "A snapshot with two tags is in both");
@@ -221,7 +223,7 @@ static void test_name_collisions(void) {
     EXPECT_TRUE(tree != NULL, "Built");
     /* Sorted: ...33 (09:00 UTC), ...00 and ...22 (10:00:00.1, by ID), ...11 (10:00:00.9) */
     EXPECT_TRUE(strcmp(names(walk(tree, "snapshots")),
-                       "2026-10-18_10-00-00|2026-10-18_10-00-00-1|2026-10-18_10-00-00-2|2026-10-18_10-00-00-3|latest|latest \xe2\x86\x92 " "12345678") == 0,
+                       "2026-10-18_10-00-00|2026-10-18_10-00-00-1|2026-10-18_10-00-00-2|2026-10-18_10-00-00-3|latest|latest \xe2\x86\x92 " "12345678|latest \xe2\x86\x92 " "2026-10-18_10-00-00-3") == 0,
                 "Taken names get -1, -2, ... as in restic");
     EXPECT_TRUE(is_snapshot(walk(tree, "snapshots/2026-10-18_10-00-00"), "1234567833") &&
                 is_snapshot(walk(tree, "snapshots/2026-10-18_10-00-00-1"), "1234567800") &&
@@ -251,13 +253,13 @@ static void test_sanitized_names(void) {
     EXPECT_TRUE(tree != NULL, "Built");
     EXPECT_TRUE(strcmp(names(walk(tree, "hosts")), "_|a_b_c_d_e_f_g_h_i_j") == 0,
                 "Separators and Windows-reserved characters become '_'; missing and empty host names are '_'");
-    EXPECT_TRUE(walk(tree, "hosts/_")->child_count == 4, "Both nameless snapshots under '_' (plus both latest)");
+    EXPECT_TRUE(walk(tree, "hosts/_")->child_count == 5, "Both nameless snapshots under '_' (plus latest and its two aliases)");
     EXPECT_TRUE(strcmp(names(walk(tree, "tags")), "_|__|caf\xc3\xa9|tab_here|trail__|x_y|\xf0\x9f\x98\x80") == 0,
                 "restic's tag rules: '' and '.' -> '_', '..' -> '__', '/' -> '_'; control characters and trailing "
                 "dots/spaces replaced; non-ASCII kept; non-string tags ignored");
-    EXPECT_TRUE(strcmp(names(walk(tree, "tags/x_y")), "2026-10-18_10-00-00|2026-10-18_10-00-00-1|latest|latest \xe2\x86\x92 " "11111111") == 0,
+    EXPECT_TRUE(strcmp(names(walk(tree, "tags/x_y")), "2026-10-18_10-00-00|2026-10-18_10-00-00-1|latest|latest \xe2\x86\x92 " "11111111|latest \xe2\x86\x92 " "2026-10-18_10-00-00-1") == 0,
                 "Tags that map to the same name share the folder, as in restic");
-    EXPECT_TRUE(strcmp(names(walk(tree, "tags/_")), "2026-10-18_10-00-00|2026-10-18_10-00-00-1|latest|latest \xe2\x86\x92 " "11111111") == 0,
+    EXPECT_TRUE(strcmp(names(walk(tree, "tags/_")), "2026-10-18_10-00-00|2026-10-18_10-00-00-1|latest|latest \xe2\x86\x92 " "11111111|latest \xe2\x86\x92 " "2026-10-18_10-00-00-1") == 0,
                 "'' and '.' share '_'");
     snapshot_tree_free(tree);
 
@@ -292,13 +294,13 @@ static void test_time_formats(void) {
         "{\"time\":\"1999-12-31T23:59:58-08:00\",\"id\":\"" ID("b") "\"},"
         "{\"time\":\"2026-07-08T09:10:11Z\",\"id\":\"" ID("c") "\"}]";
     static const struct { const char* format; const char* names; } cases[] = {
-        {"YYYY-MM-DD_hh-mm-ss", "1999-12-31_23-59-58|2026-01-02_03-04-05|2026-07-08_09-10-11|latest|latest \xe2\x86\x92 " "cccccccc"},
-        {"YYYY-MM-DDThh.mm.ss", "1999-12-31T23.59.58|2026-01-02T03.04.05|2026-07-08T09.10.11|latest|latest \xe2\x86\x92 " "cccccccc"},
-        {"YYMMDD-hhmmss zzzz", "260102-030405 +0530|260708-091011 +0000|991231-235958 -0800|latest|latest \xe2\x86\x92 " "cccccccc"},
-        {"DD.MM.YYYY hh-mm", "02.01.2026 03-04|08.07.2026 09-10|31.12.1999 23-59|latest|latest \xe2\x86\x92 " "cccccccc"},
-        {"YYYY", "1999|2026|2026-1|latest|latest \xe2\x86\x92 " "cccccccc"},
+        {"YYYY-MM-DD_hh-mm-ss", "1999-12-31_23-59-58|2026-01-02_03-04-05|2026-07-08_09-10-11|latest|latest \xe2\x86\x92 " "2026-07-08_09-10-11|latest \xe2\x86\x92 " "cccccccc"},
+        {"YYYY-MM-DDThh.mm.ss", "1999-12-31T23.59.58|2026-01-02T03.04.05|2026-07-08T09.10.11|latest|latest \xe2\x86\x92 " "2026-07-08T09.10.11|latest \xe2\x86\x92 " "cccccccc"},
+        {"YYMMDD-hhmmss zzzz", "260102-030405 +0530|260708-091011 +0000|991231-235958 -0800|latest|latest \xe2\x86\x92 " "260708-091011 +0000|latest \xe2\x86\x92 " "cccccccc"},
+        {"DD.MM.YYYY hh-mm", "02.01.2026 03-04|08.07.2026 09-10|31.12.1999 23-59|latest|latest \xe2\x86\x92 " "08.07.2026 09-10|latest \xe2\x86\x92 " "cccccccc"},
+        {"YYYY", "1999|2026|2026-1|latest|latest \xe2\x86\x92 " "2026-1|latest \xe2\x86\x92 " "cccccccc"},
         {"Y-Mon h.s z", "Y-Mon h.s z|Y-Mon h.s z-1|Y-Mon h.s z-2|latest"}, /* No full placeholder... */
-        {"Záloha YYYY-MM-DD", "Záloha 1999-12-31|Záloha 2026-01-02|Záloha 2026-07-08|latest|latest \xe2\x86\x92 " "cccccccc"},
+        {"Záloha YYYY-MM-DD", "Záloha 1999-12-31|Záloha 2026-01-02|Záloha 2026-07-08|latest|latest \xe2\x86\x92 " "Záloha 2026-07-08|latest \xe2\x86\x92 " "cccccccc"},
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
         SnapshotTree* tree = NULL;
@@ -367,8 +369,8 @@ static void test_many_snapshots(void) {
     int sorted = 1;
     for (size_t i = 1; i < ids->child_count; ++i) sorted &= strcmp(ids->children[i - 1]->name, ids->children[i]->name) < 0;
     EXPECT_TRUE(sorted, "Children sorted and unique");
-    EXPECT_TRUE(walk(tree, "snapshots")->child_count == n + 2 && walk(tree, "tags/t")->child_count == n + 2,
-                "snapshots/ and tags/t/ hold every snapshot plus both latest");
+    EXPECT_TRUE(walk(tree, "snapshots")->child_count == n + 3 && walk(tree, "tags/t")->child_count == n + 3,
+                "snapshots/ and tags/t/ hold every snapshot plus latest and its two aliases");
     EXPECT_TRUE(walk(tree, "hosts")->child_count == 7, "Seven hosts");
     EXPECT_TRUE(snapshot_tree_child(ids, "000003e7") != NULL && snapshot_tree_child(ids, "000003e7-19") != NULL &&
                 snapshot_tree_child(ids, "000003e7-20") == NULL, "Twenty snapshots share each short ID");

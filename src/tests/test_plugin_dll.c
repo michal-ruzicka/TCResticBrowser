@@ -472,7 +472,7 @@ static DWORD WINAPI mt_list_worker(LPVOID param) {
         int entries = 1;
         while (job->plugin->find_next_w(h, &fd)) entries++;
         job->plugin->find_close(h);
-        if (entries != 4) InterlockedIncrement(&g_e2e_mt_failures); /* Two snapshots, latest, latest → <id> */
+        if (entries != 5) InterlockedIncrement(&g_e2e_mt_failures); /* Two snapshots, latest and its two aliases */
     }
     return 0;
 }
@@ -1018,7 +1018,7 @@ static void test_live_end_to_end_navigation(void) {
     WCHAR latest_snap[MAX_PATH] = {0};
     size_t snap_count = 0;
     BOOL has_latest = FALSE;
-    WCHAR latest_link[MAX_PATH] = {0};
+    WCHAR latest_link[MAX_PATH] = {0}, latest_folder_link[MAX_PATH] = {0};
     do {
         snap_count++;
         EXPECT_TRUE((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 && fd.ftLastWriteTime.dwHighDateTime != 0xFFFFFFFF,
@@ -1026,14 +1026,17 @@ static void test_live_end_to_end_navigation(void) {
         if (wcscmp(fd.cFileName, L"latest") == 0) {
             has_latest = TRUE;
         } else if (wcsncmp(fd.cFileName, L"latest \u2192 ", 9) == 0) {
-            wcsncpy_s(latest_link, MAX_PATH, fd.cFileName, _TRUNCATE);
+            /* latest → <short id> (8 characters) or latest → <the latest snapshot's folder> */
+            wcsncpy_s(wcslen(fd.cFileName) == 17 ? latest_link : latest_folder_link, MAX_PATH, fd.cFileName, _TRUNCATE);
         } else if (wcscmp(fd.cFileName, latest_snap) > 0) {
             wcsncpy_s(latest_snap, MAX_PATH, fd.cFileName, _TRUNCATE); /* Names sort by time */
         }
     } while (p.find_next_w(h, &fd));
     p.find_close(h);
-    EXPECT_TRUE(snap_count == 4 && has_latest && wcslen(latest_link) == 17,
-                "Both fixture snapshots, latest and latest → <short id> in snapshots/");
+    EXPECT_TRUE(snap_count == 5 && has_latest && wcslen(latest_link) == 17,
+                "Both fixture snapshots, latest, latest → <short id> and latest → <folder> in snapshots/");
+    EXPECT_TRUE(wcscmp(latest_folder_link + 9, latest_snap) == 0,
+                "latest → <folder> names the newest snapshot's folder, as restic mount's latest link does");
     EXPECT_TRUE(latest_snap[4] == L'-' && latest_snap[10] == L'T' && latest_snap[13] == L'.' && wcslen(latest_snap) >= 19,
                 "Named by [Settings] SnapshotTimeFormat=YYYY-MM-DDThh.mm.ss");
     EXPECT_TRUE(list_names(&p, L"\\MainRepo\\ids", names, _countof(names)) && wcslen(names) == 17 && names[8] == L'|',
@@ -1461,7 +1464,7 @@ static void test_live_paths_with_spaces(void) {
         char msg[160];
         snprintf(msg, sizeof(msg), "Snapshots listed through alias #%u (path with spaces), one prompt, no error",
                  (unsigned)i);
-        EXPECT_TRUE(snaps == 4 && g_e2e_pwd_prompts == 1 && g_e2e_msg_dialogs == 0, msg); /* Two, both latest */
+        EXPECT_TRUE(snaps == 5 && g_e2e_pwd_prompts == 1 && g_e2e_msg_dialogs == 0, msg); /* Two, latest, aliases */
     }
 
     /* PasswordTimeoutSeconds=5: reused within the timeout (counted from when restic first accepted
@@ -1517,11 +1520,11 @@ static void test_live_paths_with_spaces(void) {
     g_e2e_pwd_prompts = 0;
     size_t before = 0, stale = 0, after = 0;
     count_entries(&p, L"\\Fresh\\snapshots", &before);
-    EXPECT_TRUE(before == 4 && g_e2e_pwd_prompts == 1, "Two snapshots, latest and latest → <short id>");
+    EXPECT_TRUE(before == 5 && g_e2e_pwd_prompts == 1, "Two snapshots, latest and its two aliases");
     EXPECT_TRUE(run_restic_backup(exe, repo), "Another snapshot taken by restic itself");
     Sleep(1500);
     count_entries(&p, L"\\Fresh\\snapshots", &stale);
-    EXPECT_TRUE(stale == 4, "The outdated list is shown at once");
+    EXPECT_TRUE(stale == 5, "The outdated list is shown at once");
     BOOL reread = FALSE;
     for (int i = 0; i < 300 && !reread; ++i) {
         char* text = read_text_file(log_file);
@@ -1531,7 +1534,7 @@ static void test_live_paths_with_spaces(void) {
     }
     EXPECT_TRUE(reread, "Meanwhile restic re-read it in the background");
     count_entries(&p, L"\\Fresh\\snapshots", &after);
-    EXPECT_TRUE(after == 5 && g_e2e_pwd_prompts == 1, "The next listing shows the new snapshot, without a prompt");
+    EXPECT_TRUE(after == 6 && g_e2e_pwd_prompts == 1, "The next listing shows the new snapshot, without a prompt");
 
     unload_plugin_copy(&p, dir);
     DeleteFileW(ini);

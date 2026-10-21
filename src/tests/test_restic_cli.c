@@ -857,7 +857,7 @@ static void test_live_restic_cli(void) {
     res = restic_list_snapshots(restic_bin, repo, password, NULL, NULL, &tree, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_OK && snapshot_tree_snapshot_count(tree) == 2, "Two snapshots listed");
     const SnapshotNode* by_time = snapshot_tree_child(snapshot_tree_root(tree), "snapshots");
-    EXPECT_TRUE(by_time && by_time->child_count == 4 && strcmp(by_time->children[2]->name, "latest") == 0,
+    EXPECT_TRUE(by_time && by_time->child_count == 5 && strcmp(by_time->children[2]->name, "latest") == 0,
                 "snapshots/ holds both snapshots and latest");
     const SnapshotNode* latest = by_time->children[2];
     EXPECT_TRUE(latest->snapshot_id && strlen(latest->snapshot_id) == 64, "Full snapshot IDs");

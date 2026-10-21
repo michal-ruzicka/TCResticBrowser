@@ -115,7 +115,7 @@ are not shipped in the ZIP) and run from the repository root:
 | Program | Scope |
 |---|---|
 | `test_json` | The JSON reader on its own: malformed input, escapes, surrogates, exact 64-bit integers, the nesting limit, real Restic output, pinned JSONTestSuite edge cases |
-| `test_snapshot_tree` | RFC 3339 timestamps, the `restic mount` folder tree and the whole-snapshot index (portable C, also builds with gcc/clang and sanitizers): naming, `SnapshotTimeFormat`, `-1` suffixes, `latest` and `latest → <short ID>`, host and tag names made Windows-safe, the index's walk order, limits and lookups |
+| `test_snapshot_tree` | RFC 3339 timestamps, the `restic mount` folder tree and the whole-snapshot index (portable C, also builds with gcc/clang and sanitizers): naming, `SnapshotTimeFormat`, `-1` suffixes, `latest`, `latest → <folder>` and `latest → <short ID>`, host and tag names made Windows-safe, the index's walk order, limits and lookups |
 | `test_config` | `TCResticBrowser.ini` lookup and parsing, `restic.exe` resolution (never from the current directory), root listing, the inert plugin without an INI |
 | `test_restic_cli` | `ls` parser, argument quoting, child-process handling with `cmd.exe` and a fake `restic` stand-in (`fake_restic.exe`), line streaming, and live tests against `tmp\restic.exe` (including every folder listed identically from the whole-snapshot index and from `restic ls`) |
 | `test_plugin_dll` | Loads the built DLL like Total Commander does: exact export surface, icon and version resources, INI lookup, and live navigation (the `restic mount` folders, background listings and refreshes) and extraction through the WFX API |

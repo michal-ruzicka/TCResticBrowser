@@ -17,6 +17,7 @@ struct BuildNode {
     BuildNode** kids;
     size_t kid_count, kid_cap;
     const SnapshotNode** view; /* pub.children: the kids as SnapshotNode pointers */
+    const BuildNode* target;   /* "latest": the snapshot folder it stands for (restic's link target) */
 };
 
 /* One usable entry of the snapshots array */
@@ -232,6 +233,7 @@ static int add_snapshot(NodeIndex* idx, BuildNode* dir, const char* base, const 
         if (!latest) return 0;
         latest->pub.snapshot_id = id;
         latest->pub.time = rec->time.utc_ticks;
+        latest->target = leaf;
     }
     return 1;
 }
@@ -336,25 +338,32 @@ static void time_name(const Timestamp* t, const char* format, char* out) {
     *o = '\0';
 }
 
-/*
- * Next to the latest folder of `dir`, if it has one, a folder named "latest → <short id>" that shows
- * the same snapshot: restic mount's latest is a symlink whose target `ls -l` shows, and Total
- * Commander shows no link targets, so the name says it
- */
-static int add_latest_link(NodeIndex* idx, BuildNode* dir) {
-    BuildNode** slot = index_slot(idx, dir, "latest");
-    const BuildNode* latest = *slot;
-    if (!latest || !latest->pub.snapshot_id) return 1;
-    char name[sizeof(SNAPSHOT_TREE_LATEST_LINK_PREFIX) + SNAPSHOT_TREE_SHORT_ID_CHARS];
+/* A folder "latest → <what>" in `dir` that shows the same snapshot as `latest` */
+static int add_latest_alias(NodeIndex* idx, BuildNode* dir, const BuildNode* latest, const char* what, size_t len) {
+    char name[sizeof(SNAPSHOT_TREE_LATEST_LINK_PREFIX) + MAX_COMPONENT_UTF16 + 32];
     size_t prefix = sizeof(SNAPSHOT_TREE_LATEST_LINK_PREFIX) - 1;
+    if (len > sizeof(name) - prefix - 1) len = sizeof(name) - prefix - 1;
     memcpy(name, SNAPSHOT_TREE_LATEST_LINK_PREFIX, prefix);
-    memcpy(name + prefix, latest->pub.snapshot_id, SNAPSHOT_TREE_SHORT_ID_CHARS);
-    name[prefix + SNAPSHOT_TREE_SHORT_ID_CHARS] = '\0';
-    BuildNode* link = get_child(idx, dir, name, NULL);
+    memcpy(name + prefix, what, len);
+    name[prefix + len] = '\0';
+    BuildNode* link = get_child(idx, dir, name, NULL); /* An existing one (same text) is the same snapshot */
     if (!link) return 0;
     link->pub.snapshot_id = latest->pub.snapshot_id;
     link->pub.time        = latest->pub.time;
     return 1;
+}
+
+/*
+ * Next to the latest folder of `dir`, if it has one, the same snapshot as "latest → <folder>" and
+ * "latest → <short id>": restic mount's latest is a symlink to the folder <folder>, whose target
+ * `ls -l` shows, and Total Commander shows no link targets, so the names say it
+ */
+static int add_latest_link(NodeIndex* idx, BuildNode* dir) {
+    BuildNode** slot = index_slot(idx, dir, "latest");
+    const BuildNode* latest = *slot;
+    if (!latest || !latest->pub.snapshot_id || !latest->target) return 1;
+    return add_latest_alias(idx, dir, latest, latest->target->name, strlen(latest->target->name)) &&
+           add_latest_alias(idx, dir, latest, latest->pub.snapshot_id, SNAPSHOT_TREE_SHORT_ID_CHARS);
 }
 
 static SnapshotTreeStatus build_from_records(const SnapshotRecord* records, size_t count, const char* time_format,

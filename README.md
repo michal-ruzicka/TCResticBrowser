@@ -44,6 +44,7 @@ to list and extract data and never modifies a repository.
 │   │       ├── 2026-10-17_21-15-42\
 │   │       ├── 2026-10-18_09-30-00\
 │   │       ├── latest\
+│   │       ├── latest → 2026-10-18_09-30-00\
 │   │       └── latest → a1b2c3d4\
 │   ├── ids\
 │   │   ├── a1b2c3d4\
@@ -56,11 +57,13 @@ to list and extract data and never modifies a repository.
 │   │   │           └── alice\
 │   │   │               └── report.pdf      <-- The backed-up files
 │   │   ├── latest\                         <-- The newest snapshot
-│   │   └── latest → a1b2c3d4\              <-- The same, saying which one it is
+│   │   ├── latest → 2026-10-18_09-30-00\   <-- The same, saying which folder it is
+│   │   └── latest → a1b2c3d4\              <-- The same, saying which snapshot ID
 │   └── tags\
 │       └── daily\
 │           ├── 2026-10-18_09-30-00\
 │           ├── latest\
+│           ├── latest → 2026-10-18_09-30-00\
 │           └── latest → a1b2c3d4\
 └── CloudS3Backup\
 ```
@@ -77,11 +80,15 @@ works here too:
   you can choose another one, see [Snapshot Folder Names](#snapshot-folder-names).
   Two snapshots with the same name get `-1`, `-2`, ... appended, the older
   one keeping the plain name, as in `restic mount`.
-- **`latest`** is the newest snapshot of its folder. `restic mount` makes it
-  a link, whose target `ls -l` shows; Total Commander cannot show where a
+- **`latest`** is the newest snapshot of its folder, exactly as in
+  `restic mount`: in `snapshots` the newest of the whole repository, whatever
+  host took it; in `hosts\<host>` and `tags\<tag>` the newest of that host
+  or tag; `ids` has none. `restic mount` makes it a link to the snapshot's
+  folder, whose target `ls -l` shows; Total Commander cannot show where a
   link points, so next to `latest` (which keeps its name, for scripts and
-  hotlist entries) the plugin lists the same snapshot once more as
-  `latest → <short ID>`, which tells which snapshot it is.
+  hotlist entries) the plugin lists the same snapshot twice more, as
+  `latest → <folder>` - the link target, e.g.
+  `latest → 2026-10-18_09-30-00` - and as `latest → <short ID>`.
 - **Host names and tags** that contain characters Windows does not allow in
   file names (`\ / : * ? " < > |`, or a dot or space at the end) show them
   as `_`, as `restic mount` does with `/` in tags.
