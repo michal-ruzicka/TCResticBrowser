@@ -937,10 +937,12 @@ static void test_e2e_snapshot_cache(const Plugin* p, const WCHAR* dir, const WCH
     WCHAR forget[] = L"\\\U0001F5D1 Forget 1 Password", open_verb[] = L"open";
     g_e2e_msg_dialogs = 0;
     EXPECT_TRUE(p->execute_w(NULL, forget, open_verb) == FS_EXEC_SYMLINK, "Forget the passwords");
+    EXPECT_TRUE(conn_log_count(L"2:DISCONNECT \\MainRepo\n") == 1, "...which ends the repository's connection");
     g_e2e_pwd_mode = 1;
     EXPECT_TRUE(list_names(p, data_path, names_again, _countof(names_again)) && wcscmp(names, names_again) == 0,
                 "Listed again after a password prompt, with the same entries");
     EXPECT_TRUE(g_e2e_pwd_prompts == 1 && count_restic_runs(log_file) > runs, "Asked for the password and ran restic");
+    EXPECT_TRUE(conn_log_count(L"1:CONNECT \\MainRepo\n") == 2, "...and connected again");
     g_e2e_pwd_prompts = 0;
     g_e2e_msg_dialogs = 0;
 }
@@ -1163,8 +1165,9 @@ static void test_live_end_to_end_navigation(void) {
     EXPECT_TRUE(g_e2e_pwd_prompts == 1, "Alternating between two panels' repositories never re-prompts");
 
     /* Each repository is a connection of Total Commander's connections toolbar, announced once */
-    EXPECT_TRUE(conn_log_count(L"1:CONNECT \\MainRepo\n") == 1 && conn_log_count(L"1:CONNECT \\SecondRepo\n") == 1,
-                "A repository is announced as a connection (MSGTYPE_CONNECT) once restic accepted its password");
+    EXPECT_TRUE(conn_log_count(L"1:CONNECT \\MainRepo\n") == 2 && conn_log_count(L"1:CONNECT \\SecondRepo\n") == 1,
+                "A repository is announced as a connection (MSGTYPE_CONNECT) once restic accepted its password "
+                "(MainRepo twice: the forget entry disconnected it in between)");
     /* Its Disconnect button forgets the password and what was read: the next visit asks again */
     EXPECT_TRUE(p.disconnect_w != NULL && p.disconnect_w(L"\\SecondRepo"), "FsDisconnectW succeeds");
     EXPECT_TRUE(conn_log_count(L"2:DISCONNECT \\SecondRepo\n") == 1 &&

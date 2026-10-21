@@ -451,6 +451,27 @@ static void connection_announce(const WCHAR* alias) {
     g_LogProc(g_PluginNr, MSGTYPE_CONNECT, text);
 }
 
+/*
+ * Logs MSGTYPE_DISCONNECT for every announced connection and forgets them, so the next accepted
+ * password announces its repository again: the forget entry ends all connections the way the
+ * Disconnect button ends one. (Whether Total Commander then closes its toolbar is up to it.)
+ */
+static void connection_close_all(void) {
+    /* Copied out, because LogProc is never called with the lock held */
+    WCHAR(*closing)[MAX_PATH] = (WCHAR(*)[MAX_PATH])malloc(sizeof(g_Connections));
+    AcquireSRWLockExclusive(&g_ConnectionLock);
+    size_t n = closing ? g_ConnectionCount : 0;
+    for (size_t i = 0; i < n; ++i) wcscpy_s(closing[i], MAX_PATH, g_Connections[i]);
+    g_ConnectionCount = 0;
+    ReleaseSRWLockExclusive(&g_ConnectionLock);
+    for (size_t i = 0; i < n && g_LogProc; ++i) {
+        WCHAR text[MAX_PATH + 16];
+        _snwprintf_s(text, _countof(text), _TRUNCATE, L"DISCONNECT \\%ls", closing[i]);
+        g_LogProc(g_PluginNr, MSGTYPE_DISCONNECT, text);
+    }
+    free(closing);
+}
+
 /* RepoStatusProc: background work reported in the connection log */
 static void report_status(const WCHAR* text) {
     tLogProcW log_proc = g_LogProc;
@@ -1231,6 +1252,7 @@ int __stdcall FsExecuteFileW(HWND MainWin, WCHAR* RemoteName, WCHAR* Verb) {
         clear_password_session();
         log_write(L"Forget All Passwords: %u cached password(s) wiped", n);
         report_status(L"All remembered passwords and cached listings forgotten");
+        connection_close_all();
         if (g_RequestProc) {
             WCHAR msg[128], title[MAX_PATH], unused[4] = {0};
             if (n == 0) {

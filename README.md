@@ -266,8 +266,10 @@ a transfer mode list; the mode has no effect here: files always come out
 of the snapshot byte for byte, whatever it says, and the plugin changes no
 setting of Total Commander.
 
-A connection stays listed until you disconnect it, also after its password
-timed out: the plugin cannot remove it from the toolbar by itself. Entering
+`🗑 Forget N Passwords` ends every connection the way Disconnect ends one
+(the log says `DISCONNECT`). Otherwise a connection stays listed until you
+disconnect it, also after its password timed out: the plugin cannot remove
+it from the toolbar by itself. Entering
 the repository again then just asks for the password.
 
 ### File Names from Other Systems
