@@ -35,7 +35,7 @@ BEGIN
         BLOCK "040904B0"
         BEGIN
             VALUE "CompanyName",      "Michal Růžička Hobby Development\0"
-            VALUE "FileDescription",  "TCResticBrowser - Restic backup browser for Total Commander (WFX)\0"
+            VALUE "FileDescription",  "TCResticBrowser – Restic backup browser for Total Commander (WFX)\0"
             VALUE "FileVersion",      RESTIC_WFX_VERSION_STR "\0"
             VALUE "InternalName",     RESTIC_WFX_FILE_NAME "\0"
             VALUE "LegalCopyright",   "Copyright (c) 2026 Pietro Partescano, 2026 Michal Růžička. Licensed under the MIT License.\0"
