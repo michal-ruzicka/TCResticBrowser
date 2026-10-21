@@ -115,10 +115,10 @@ are not shipped in the ZIP) and run from the repository root:
 | Program | Scope |
 |---|---|
 | `test_json` | The JSON reader on its own: malformed input, escapes, surrogates, exact 64-bit integers, the nesting limit, real Restic output, pinned JSONTestSuite edge cases |
-| `test_snapshot_tree` | RFC 3339 timestamps and the `restic mount` folder tree (portable C, also builds with gcc/clang and sanitizers): naming, `-1` suffixes, `latest`, host and tag names made Windows-safe |
+| `test_snapshot_tree` | RFC 3339 timestamps, the `restic mount` folder tree and the whole-snapshot index (portable C, also builds with gcc/clang and sanitizers): naming, `SnapshotTimeFormat`, `-1` suffixes, `latest` and `latest → <short ID>`, host and tag names made Windows-safe, the index's walk order, limits and lookups |
 | `test_config` | `TCResticBrowser.ini` lookup and parsing, `restic.exe` resolution (never from the current directory), root listing, the inert plugin without an INI |
-| `test_restic_cli` | Snapshot and `ls` parsers, argument quoting, child-process handling with `cmd.exe` and a fake `restic` stand-in (`fake_restic.exe`), and live tests against `tmp\restic.exe` |
-| `test_plugin_dll` | Loads the built DLL like Total Commander does: exact export surface, icon and version resources, INI lookup, and live navigation and extraction through the WFX API |
+| `test_restic_cli` | `ls` parser, argument quoting, child-process handling with `cmd.exe` and a fake `restic` stand-in (`fake_restic.exe`), line streaming, and live tests against `tmp\restic.exe` (including every folder listed identically from the whole-snapshot index and from `restic ls`) |
+| `test_plugin_dll` | Loads the built DLL like Total Commander does: exact export surface, icon and version resources, INI lookup, and live navigation (the `restic mount` folders, background listings and refreshes) and extraction through the WFX API |
 
 [AGENT.md](AGENT.md#87-test-suites-srctests) lists every case. Run them
 manually after a build:
@@ -382,9 +382,13 @@ child process and parses its JSON output.
 ```
 Total Commander process
 └── TCResticBrowser.wfx[64]
-    ├── FsFindFirstW / FsFindNextW   \                     -> aliases from TCResticBrowser.ini
-    │                                \<alias>              -> restic snapshots --json
-    │                                \<alias>\<snapshot>\… -> restic ls --json (one level)
+    ├── FsFindFirstW / FsFindNextW   \                   -> aliases from TCResticBrowser.ini
+    │                                \<alias>\{ids,snapshots,hosts,tags}\…
+    │                                    -> restic mount's tree from `restic snapshots --json`,
+    │                                       cached, re-read in the background after 60 s
+    │                                …\<snapshot>\…      -> restic ls --json (one level) until
+    │                                    the background `restic ls` of the whole snapshot is
+    │                                    read, then from memory
     ├── FsGetFileW                   restic dump -> temporary file -> atomic
     │                                replace of the target (F5, F3, Ctrl+Q)
     └── RequestProcW (TC callback)   repository password, kept in memory
@@ -395,7 +399,11 @@ Total Commander process
 |---|---|
 | `main.c` | `DllMain`, the exported WFX entry points, virtual path routing, password sessions |
 | `config.c` | `TCResticBrowser.ini` lookup and parsing, `restic.exe` resolution |
-| `restic_cli.c` | `CreateProcessW` with an explicit handle list and environment block, pipes, timeouts and cancellation, snapshot and `ls` parsing |
+| `restic_cli.c` | `CreateProcessW` with an explicit handle list and environment block, pipes (also streamed line by line), timeouts and cancellation, `ls` parsing |
+| `repo_cache.c` | Per-repository cache: snapshot trees and whole-snapshot listings, background workers, dropped with the password |
+| `snapshot_tree.c` | The `restic mount` folder tree from `restic snapshots --json` (portable C11, no Win32) |
+| `snapshot_index.c` | Compact listing of a whole snapshot from streamed `restic ls --json` (portable C11, no Win32) |
+| `timestamp.c` | RFC 3339 timestamps as restic writes them (portable C11, no Win32) |
 | `json.c` | Strict read-only JSON reader (portable C11, no Win32) |
 | `log.c` | Optional diagnostic log (`[Logging] LogPath`), credential masking |
 

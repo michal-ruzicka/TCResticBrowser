@@ -67,28 +67,32 @@ to list and extract data and never modifies a repository.
 
 The folders above the snapshots are the ones `restic mount` creates, with the
 same names and the same rules, so a path you know from a mounted repository
-works here too. The one difference is the time in the folder names:
-`restic mount` writes `2026-10-18T09:30:00+02:00` by default, but Windows
-does not allow colons in file names, so the plugin uses the colon-free form
-restic itself suggests (`--time-template "2006-01-02_15-04-05"`); the time is
-the one the snapshot was taken in, in that computer's time zone, and its
-format can be changed with `SnapshotTimeFormat=` (see the comments in the
-sample `TCResticBrowser.ini`; e.g. `YYYY-MM-DDThh.mm.ss` gives
-`2026-10-18T09.30.00`). Two
-snapshots with the same name get `-1`, `-2`, ... appended. `restic mount`
-shows `latest` as a link to the newest snapshot's folder; Total Commander
-cannot show where a link points, so next to `latest` (which keeps its name
-for scripts and hotlist entries) the plugin lists the same snapshot once
-more as `latest → <short ID>`, which tells which snapshot it is, and host names or
-tags containing characters Windows does not allow (`\ / : * ? " < > |`, or a
-dot or space at the end) show them as `_`. Paths saved by version 2.0
-(`2026-10-18_09-30-00_[a1b2c3d4]` directly in the repository) no longer
-exist; Total Commander's history and hotlist entries pointing there need to
-be recreated.
+works here too:
+
+- **Snapshot folder names** are the time the snapshot was taken, in the time
+  zone of the computer that took it. `restic mount` writes
+  `2026-10-18T09:30:00+02:00` by default, but Windows does not allow colons
+  in file names, so the plugin uses the colon-free form restic itself
+  suggests (`--time-template "2006-01-02_15-04-05"`), `2026-10-18_09-30-00`;
+  you can choose another one, see [Snapshot Folder Names](#snapshot-folder-names).
+  Two snapshots with the same name get `-1`, `-2`, ... appended, the older
+  one keeping the plain name, as in `restic mount`.
+- **`latest`** is the newest snapshot of its folder. `restic mount` makes it
+  a link, whose target `ls -l` shows; Total Commander cannot show where a
+  link points, so next to `latest` (which keeps its name, for scripts and
+  hotlist entries) the plugin lists the same snapshot once more as
+  `latest → <short ID>`, which tells which snapshot it is.
+- **Host names and tags** that contain characters Windows does not allow in
+  file names (`\ / : * ? " < > |`, or a dot or space at the end) show them
+  as `_`, as `restic mount` does with `/` in tags.
+
+Paths saved by version 2.0 (`2026-10-18_09-30-00_[a1b2c3d4]` directly in
+the repository) no longer exist; Total Commander's history and hotlist
+entries pointing there need to be recreated.
 
 ### Key Features
 
-- **Fast Browsing of Large and Remote Repositories:** Every `restic` run costs about a second before it prints anything (deriving the key from the password and loading the repository index), more for big or remote (e.g. S3) repositories. The plugin therefore reads each repository's snapshot list once and reuses it for a minute, as `restic mount` does, and when you enter a snapshot it reads the list of *all* its files and folders in the background with a single `restic ls`. Until that is done, each folder is listed on its own (`restic ls <snapshot> <path>`), as fast as before; afterwards every folder of the snapshot opens instantly and `restic` runs only to copy or view files. See [Snapshot Cache](#snapshot-cache).
+- **Fast Browsing of Large and Remote Repositories:** Every `restic` run costs about a second before it prints anything (deriving the key from the password and loading the repository index), more for big or remote (e.g. S3) repositories. The plugin therefore reads each repository's snapshot list once and answers from it at once, re-reading it in the background once it is a minute old (as often as `restic mount` does), and when you enter a snapshot it reads the list of *all* its files and folders in the background with a single `restic ls`. Until that is done, each folder is listed on its own (`restic ls <snapshot> <path>`), as fast as before; afterwards every folder of the snapshot opens instantly and `restic` runs only to copy or view files. See [Snapshot Cache](#snapshot-cache).
 - **Native File & Folder Extraction (`F5`, `F3`, `Ctrl+Q`):**
   - Copy individual files or entire directory trees out of any snapshot using **`F5`** (preserving original modification timestamps and 64-bit file sizes).
   - Inspect files directly with Total Commander's **Lister (`F3`)** or **Quick View (`Ctrl+Q`)**.
@@ -198,7 +202,7 @@ documentation.
 | **List Repositories** | Open **Network Neighborhood** (`\\\`) -> **`TCResticBrowser`**. Changes to `TCResticBrowser.ini` take effect immediately on panel refresh (`Ctrl+R` / `F2`). |
 | **Browse Snapshots** | Enter a repository folder (`\<Alias>`). Prompted once for the repository password; once restic accepts it, it is kept in RAM (encrypted) for that alias across both panels for 30 minutes (see [Password Timeout](#password-timeout)). Up to 3 password attempts are allowed. The dialog's title starts with the repository alias (`MyLocalBackup - Restic repository password`), so a password manager that picks an entry by the title of the active window, such as KeePassXC Auto-Type, can offer the right password. |
 | **Forget Passwords** | While passwords are remembered, the plugin's root folder starts with **`🗑 Forget N Passwords`** (N is their number; `🗑 Forget 1 Password` for one). Press **Enter** on it to wipe them all at once; a message says how many were forgotten, the root folder is then re-read without the entry, and the next access asks again. The entry is not removed by itself when the passwords expire; it disappears the next time the root folder is read (`Ctrl+R`). |
-| **Explore Files** | Enter a snapshot through `snapshots`, `ids`, `hosts` or `tags` (or `latest`) and navigate the backed-up directory tree. The snapshot list is read once and then shown at once from memory; when it is older than a minute (`SnapshotListRefreshSeconds=`), as `restic mount` would re-read it, restic reads a new one in the background and the next listing (`Ctrl+R`) shows any new snapshots. |
+| **Explore Files** | Enter a snapshot through `snapshots`, `ids`, `hosts` or `tags` (or `latest`) and navigate the backed-up directory tree. The snapshot list is read once and then shown at once from memory; when it is older than a minute (`SnapshotListRefreshSeconds=`), as `restic mount` would re-read it, restic reads a new one in the background and the next listing (`Ctrl+R`) shows any new snapshots (see [Snapshot List Refresh](#snapshot-list-refresh)). |
 | **View File (`F3` / `Ctrl+Q`)** | Press **`F3`** (Lister) or **`Ctrl+Q`** (Quick View) on any file to stream it to a temporary location and view its contents. |
 | **Restore / Extract (`F5`)** | Select one or more files or directories and press **`F5`** to copy them to the target panel, preserving original `LastWriteTime` timestamps. Standard Total Commander overwrite prompts are supported. |
 | **Cancel Operation (`ESC`)** | Press **`ESC`** in Total Commander's progress dialog to terminate the underlying `restic.exe` child process and clean up any temporary file. |
@@ -291,10 +295,59 @@ per file, 18 MB for those 200,000 files.
 `SnapshotCacheMB=` under `[Settings]` sets how much memory these lists may
 take (default 512 MiB, about five million files); the least recently used
 snapshots make room for new ones, a snapshot larger than the whole limit is
-simply not cached, and `0` turns the cache off. Nothing is written to disk.
-The lists are dropped together with the repository's password (timeout,
-`🗑 Forget N Passwords`, a wrong password), so what was read with a password
-is never shown without it.
+not cached at all - its folders are then simply listed one by one, as
+before, and the diagnostic log says so - and `0` turns the cache off.
+Nothing is written to disk; unlike passwords, the lists (names, sizes and
+times of files) are not encrypted in memory. They are dropped together with
+the repository's password (timeout, `🗑 Forget N Passwords`, a wrong
+password), so what was read with a password is never shown without it.
+
+#### Snapshot List Refresh
+
+The list of a repository's snapshots (`restic snapshots`) is read once and
+then shown at once from memory, also when it is old: when you open
+`snapshots`, `hosts`, `tags` or `ids` and the list is older than
+`SnapshotListRefreshSeconds=` (default 60, as often as `restic mount`
+re-reads it), restic reads a new one in the background, and the next
+listing (`Ctrl+R`) shows snapshots taken meanwhile. You wait for restic
+only on the first visit, for a folder name the old list does not know, and
+after typing a password, which restic has to check. `0` re-reads the list
+on every visit, still in the background. Inside a snapshot folder,
+including `latest`, you stay in the snapshot the folder showed when you
+entered it.
+
+#### Snapshot Folder Names
+
+`SnapshotTimeFormat=` under `[Settings]` sets how the snapshot folders
+under `snapshots`, `hosts\<host>` and `tags\<tag>` are named, like
+`restic mount --time-template` but with simpler placeholders:
+
+| Placeholder | Meaning | Example |
+| --- | --- | --- |
+| `YYYY` | Year | `2026` |
+| `YY` | Year without the century | `26` |
+| `MM` | Month, `01`-`12` | `10` |
+| `DD` | Day of the month, `01`-`31` | `18` |
+| `hh` | Hour, `00`-`23` | `09` |
+| `mm` | Minute | `30` |
+| `ss` | Second | `00` |
+| `zzzz` | Time zone offset | `+0200`, `-0500`, `+0000` |
+
+Placeholders are case-sensitive (`MM` is the month, `mm` the minute) and
+every other character is copied as it is. The time is the snapshot's own,
+in the time zone it was taken in; add `zzzz` if your backups come from
+several time zones. The default is `YYYY-MM-DD_hh-mm-ss`
+(`2026-10-18_09-30-00`); for example `YYYY-MM-DDThh.mm.ss` gives
+`2026-10-18T09.30.00` and `YYYY-MM-DD` gives one folder per day, with
+`-1`, `-2`, ... for further snapshots of that day. A format needs at least
+one placeholder, at most 64 bytes, none of the characters Windows forbids
+in file names (`\ / : * ? " < > |`), and must not end with a dot or space;
+otherwise the default is used and the diagnostic log says so.
+
+```ini
+[Settings]
+SnapshotTimeFormat=YYYY-MM-DDThh.mm.ss
+```
 
 #### Root Folder Name
 
@@ -350,8 +403,10 @@ LogPath=%TEMP%\TCResticBrowser.log
 ```
 
 The log records each `restic` command line with its exit code, duration and
-error output, the configuration in use, password prompts and the error
-messages shown. It never contains a password, only how many characters were
+error output, the configuration in use, password prompts, the error
+messages shown, and the snapshot lists and whole-snapshot listings read in
+the background (how many entries, how much memory, how long it took, or
+why one was not kept). It never contains a password, only how many characters were
 entered and whether the entry starts or ends with whitespace or contains
 invisible characters (the password prompt after a wrong password points
 these out too), and credentials in repository URLs are masked. Clear the value to
@@ -372,6 +427,13 @@ ResticPath=C:\Program Files\Restic\restic.exe
 ; Optional name of the plugin's folder in Network Neighborhood
 ; (default: TCResticBrowser; read only when the plugin is installed).
 RootName=Backups
+; Optional snapshot folder names (default: YYYY-MM-DD_hh-mm-ss).
+SnapshotTimeFormat=YYYY-MM-DDThh.mm.ss
+; Optional: re-read the snapshot list in the background once it is this many
+; seconds old (default: 60).
+SnapshotListRefreshSeconds=600
+; Optional memory for complete snapshot listings in MiB (default: 512, 0 = off).
+SnapshotCacheMB=1024
 
 [Repositories]
 ; Format: <Alias>=<Repository Path or URL>
@@ -447,8 +509,8 @@ sizes as exact 64-bit integers instead of going through floating point.
 
 The reader is generic: it understands any valid JSON, not just a list of
 expected keywords. The plugin looks up the few fields it uses (`id`,
-`short_id`, `time`, `name`, `type`, `size`, `mtime`, `atime`, `ctime`,
-`path`, `message_type`, `message`), so fields and message types that a newer
+`time`, `hostname`, `tags`, `name`, `type`, `size`, `mtime`, `atime`,
+`ctime`, `path`, `message_type`, `message`), so fields and message types that a newer
 Restic adds are simply ignored; a missing field skips the entry or leaves its
 size or time unknown, and a line that is not valid JSON fails the listing
 instead of being guessed at.
