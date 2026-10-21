@@ -42,7 +42,7 @@ linked against the static MSVC runtime, and contains no third-party code.
 | `dist\` | Released ZIP bundles (gitignored) |
 | `logo\` | SVG sources of the plugin icon `src\TCResticBrowser.ico` (see [Plugin Icon](#plugin-icon)) |
 | `src\` | C sources and headers, `CMakeLists.txt`, `.def`/`.rc`/`.ico`, `pluginst.inf`, the sample `TCResticBrowser.ini` |
-| `src\tests\` | Test programs and the JSON fuzz target |
+| `src\tests\` | Test programs and the libFuzzer targets |
 | `tmp\` | Optional live-test input `restic.exe` and the generated test repository (gitignored) |
 | `.gitattributes` | Line-ending normalization rules |
 | `.gitignore` | Excludes build output and `tmp\` from version control |
@@ -128,9 +128,11 @@ build\x64\test_plugin_dll.exe
 build\x86\test_plugin_dll.exe
 ```
 
-`src\tests\fuzz_json.c` is a libFuzzer target for the JSON reader. It is
-not part of `build.cmd` because it needs a fuzzing-capable compiler; its
-header shows how to build and run it with clang.
+`src\tests\fuzz_json.c` is a libFuzzer target for the JSON reader, and
+`src\tests\fuzz_snapshot.c` one for the parsers that turn restic's output
+into the snapshot tree and the whole-snapshot index. They are not part of
+`build.cmd` because they need a fuzzing-capable compiler; their headers show
+how to build and run them with clang.
 
 ### Reproducible Builds
 

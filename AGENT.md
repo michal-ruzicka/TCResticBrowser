@@ -27,7 +27,7 @@ The primary goal is interactive, read-only browsing of **Restic** backup reposit
    - A minimal, strict, read-only JSON reader of the project's own (`src/json.c`, `src/json.h`, ~370 lines), written for exactly what Restic prints. No third-party JSON library: the plugin parses untrusted repository content inside Total Commander's process, and a reader that does only what is needed is code that can be read in full.
    - Strict RFC 8259 (no comments, trailing commas, leading zeros), nesting limited to `JSON_MAX_DEPTH` (64), strings containing `\u0000` rejected so every decoded string is a plain C string, lone surrogate escapes decoded as U+FFFD. Integers are read exactly (`json_u64`), so file sizes above 2^53 are not rounded through a `double`. One arena per document: a single `json_free()` releases everything.
    - Portable C11 without Win32: `src/tests/test_json.c` builds with any hosted compiler (e.g. `gcc -fsanitize=address,undefined`), not only MSVC.
-   - Verified beyond the unit tests: the full JSONTestSuite (all n_ rejected, all y_ accepted except the two with `\u0000`), differential testing against Python's `json`, and coverage-guided fuzzing (`src/tests/fuzz_json.c`). Re-run the fuzz target after any change to `json.c`.
+   - Verified beyond the unit tests: the full JSONTestSuite (all n_ rejected, all y_ accepted except the two with `\u0000`), differential testing against Python's `json`, and coverage-guided fuzzing (`src/tests/fuzz_json.c`). Re-run the fuzz target after any change to `json.c`; likewise `src/tests/fuzz_snapshot.c` after changes to `snapshot_tree.c`, `snapshot_index.c` or `timestamp.c`, which parse restic's output into the browsing structures.
    - Uses line-by-line NDJSON streaming/parsing for `restic ls --json` output.
 
 4. **Caching Policy**
@@ -203,7 +203,8 @@ TCResticBrowser/
 │       ├── test_restic_cli.c   # Parsers, quoting, process execution (cmd.exe stand-in) + live restic.exe tests
 │       ├── fake_restic.c       # Stand-in restic.exe for test_restic_cli's dump tests (exit codes, timeouts)
 │       ├── test_plugin_dll.c   # Black-box smoke test: LoadLibrary(plugin) + exported WFX surface
-│       └── fuzz_json.c         # libFuzzer target for the JSON reader (clang; not part of build.cmd)
+│       ├── fuzz_json.c         # libFuzzer target for the JSON reader (clang; not part of build.cmd)
+│       └── fuzz_snapshot.c     # libFuzzer target for the snapshot tree and index parsers (likewise)
 ├── build/                      # (git-ignored) build/x64, build/x86, build/check-*, build/stage
 └── dist/                       # (git-ignored) TCResticBrowser.v<version>.zip
 ```
