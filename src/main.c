@@ -333,12 +333,15 @@ static BOOL session_get(const WCHAR* alias, WCHAR* out_pwd, size_t cap, ULONGLON
     return found;
 }
 
-/* Stores (or replaces) the password of `alias`; the least recently cached slot makes room if needed */
-static void session_put(const WCHAR* alias, const WCHAR* password) {
+/*
+ * Stores (or replaces) the password of `alias`; the least recently cached slot makes room if
+ * needed. FALSE when it could not be kept.
+ */
+static BOOL session_put(const WCHAR* alias, const WCHAR* password) {
     AcquireSRWLockExclusive(&g_SessionLock);
     if (!session_table_locked()) {
         ReleaseSRWLockExclusive(&g_SessionLock);
-        return;
+        return FALSE;
     }
     SessionSlot* slot = session_find_locked(alias);
     for (int i = 0; !slot && i < SESSION_SLOTS; ++i) {
@@ -363,14 +366,26 @@ static void session_put(const WCHAR* alias, const WCHAR* password) {
     wcsncpy_s(slot->alias, MAX_PATH, alias, _TRUNCATE);
     wcsncpy_s(slot->password, SESSION_MAX_PASSWORD, password, _TRUNCATE);
     slot->cached_at = GetTickCount64();
+    BOOL kept = TRUE;
     if (!CryptProtectMemory(slot->password, (DWORD)sizeof(slot->password), CRYPTPROTECTMEMORY_SAME_PROCESS)) {
         DWORD err = GetLastError();
         SecureZeroMemory(slot, sizeof(*slot)); /* Never keep a plaintext password */
         repo_cache_forget(alias);              /* Nor what was read with it */
         log_write(L"Password for '%ls' not cached: CryptProtectMemory failed (Windows error %lu)", alias, err);
+        kept = FALSE;
     }
     session_expire_locked(); /* Arms the timer for this password's expiry */
     ReleaseSRWLockExclusive(&g_SessionLock);
+    return kept;
+}
+
+/* TRUE while a password is cached for `alias` */
+static BOOL session_exists(const WCHAR* alias) {
+    AcquireSRWLockExclusive(&g_SessionLock);
+    session_expire_locked();
+    BOOL found = session_find_locked(alias) != NULL;
+    ReleaseSRWLockExclusive(&g_SessionLock);
+    return found;
 }
 
 /*
@@ -818,6 +833,8 @@ static ResticResult run_with_password(
     WCHAR password[SESSION_MAX_PASSWORD] = {0}; /* Local copy, wiped before returning */
     WCHAR wrong_hint[PASSWORD_HINT_CHARS] = {0}; /* What looked odd in a rejected password */
     ULONGLONG cached_generation          = 0;
+    /* Before the password is taken: if it is wiped meanwhile, nothing read with it is cached */
+    ULONGLONG cache_generation = repo_cache_generation();
     BOOL have_password = session_get(repo->alias, password, _countof(password), &cached_generation);
     BOOL from_cache    = have_password; /* Cached: not stored again (see session_touch) */
     ResticResult res   = RESTIC_ERR_WRONG_PASSWORD;
@@ -833,7 +850,7 @@ static ResticResult run_with_password(
         }
 
         err_msg[0] = L'\0';
-        RepoCall call = {cfg, repo, password, from_cache, exec, repo_cache_generation(), err_msg, err_cap};
+        RepoCall call = {cfg, repo, password, from_cache, exec, cache_generation, err_msg, err_cap};
         res = op(&call, ctx);
 
         if (res == RESTIC_ERR_WRONG_PASSWORD) {
@@ -846,15 +863,22 @@ static ResticResult run_with_password(
         break;
     }
 
+    BOOL kept = from_cache;
     if (have_password && password_worth_caching(res)) {
         if (from_cache) {
             session_touch(repo->alias, cached_generation);
         } else {
-            session_put(repo->alias, password);
-            connection_announce();
+            kept = session_put(repo->alias, password);
+            if (kept) connection_announce();
         }
     }
     SecureZeroMemory(password, sizeof(password));
+    /*
+     * A typed-in password that is not kept (ESC, a timeout or a local write error before restic
+     * proved it right, or no memory to keep it in) takes along what the operation cached with it,
+     * unless another thread has cached a password for the repository meanwhile
+     */
+    if (have_password && !kept && !session_exists(repo->alias)) repo_cache_forget(repo->alias);
     return res;
 }
 
