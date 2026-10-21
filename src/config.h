@@ -1,5 +1,6 @@
 #pragma once
 #include <windows.h>
+#include "snapshot_tree.h"
 #include <stddef.h>
 
 /* Configuration file name and default binary name */
@@ -33,6 +34,8 @@ typedef struct {
     DWORD password_timeout_s;            /* [Settings] PasswordTimeoutSeconds; 0 = keep until exit */
     BOOL password_timeout_reset_on_use;  /* [Settings] PasswordTimeoutResetOnUse (default FALSE) */
     DWORD snapshot_cache_mb;             /* [Settings] SnapshotCacheMB: whole-snapshot listings; 0 = off */
+    char snapshot_time_format[SNAPSHOT_TREE_TIME_FORMAT_MAX + 1]; /* [Settings] SnapshotTimeFormat, UTF-8, always valid */
+    BOOL snapshot_time_format_invalid;   /* The INI had an unusable SnapshotTimeFormat (default used) */
     ResticRepoEntry* repos;              /* Heap-allocated array of repository entries */
     size_t repo_count;                   /* Number of repositories in repos */
 } ResticConfig;
@@ -116,7 +119,9 @@ BOOL config_is_plain_file_name(const WCHAR* path);
  * not such a number. password_timeout_reset_on_use is [Settings] PasswordTimeoutResetOnUse
  * (yes/no, true/false, on/off, 1/0; FALSE when missing or anything else). snapshot_cache_mb is
  * [Settings] SnapshotCacheMB (a decimal number of MiB, 0 = no whole-snapshot listings), or
- * CONFIG_DEFAULT_SNAPSHOT_CACHE_MB when it is missing or not such a number.
+ * CONFIG_DEFAULT_SNAPSHOT_CACHE_MB when it is missing or not such a number. snapshot_time_format
+ * is [Settings] SnapshotTimeFormat when snapshot_tree_time_format_valid() accepts it, otherwise
+ * SNAPSHOT_TREE_DEFAULT_TIME_FORMAT (and snapshot_time_format_invalid is set if one was given).
  * Caller must release allocated resources via config_free().
  */
 BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config);

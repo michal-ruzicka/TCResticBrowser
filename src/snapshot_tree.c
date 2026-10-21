@@ -258,23 +258,86 @@ static size_t collect_records(const JsonValue* array, SnapshotRecord* records) {
     return n;
 }
 
-/* "2006-01-02_15-04-05": restic mount's colon-free time template, in the snapshot's own zone */
-static void time_name(const Timestamp* t, char* out) {
-    int v[6] = {t->year, t->month, t->day, t->hour, t->minute, t->second};
-    static const char seps[6] = {'-', '-', '_', '-', '-', '\0'};
-    char* p = out;
-    for (int i = 0; i < 6; ++i) {
-        int width = i == 0 ? 4 : 2;
-        for (int d = width - 1; d >= 0; --d) {
-            p[d] = (char)('0' + v[i] % 10);
-            v[i] /= 10;
+/* The placeholders of a time format, longest first where one is a prefix of another */
+typedef enum { TF_YEAR4, TF_YEAR2, TF_MONTH, TF_DAY, TF_HOUR, TF_MINUTE, TF_SECOND, TF_ZONE, TF_NONE } TimeField;
+
+static const struct {
+    const char* text;
+    TimeField field;
+} TIME_PLACEHOLDERS[] = {
+    {"YYYY", TF_YEAR4}, {"YY", TF_YEAR2}, {"MM", TF_MONTH}, {"DD", TF_DAY},
+    {"hh", TF_HOUR},    {"mm", TF_MINUTE}, {"ss", TF_SECOND}, {"zzzz", TF_ZONE},
+};
+
+/* The placeholder at `p`, its length in *len; TF_NONE for a literal character */
+static TimeField placeholder_at(const char* p, size_t* len) {
+    for (size_t i = 0; i < sizeof(TIME_PLACEHOLDERS) / sizeof(TIME_PLACEHOLDERS[0]); ++i) {
+        size_t n = strlen(TIME_PLACEHOLDERS[i].text);
+        if (strncmp(p, TIME_PLACEHOLDERS[i].text, n) == 0) {
+            *len = n;
+            return TIME_PLACEHOLDERS[i].field;
         }
-        p += width;
-        *p++ = seps[i];
     }
+    *len = 1;
+    return TF_NONE;
 }
 
-static SnapshotTreeStatus build_from_records(const SnapshotRecord* records, size_t count, SnapshotTree* tree) {
+int snapshot_tree_time_format_valid(const char* format) {
+    if (!format || format[0] == '\0' || strlen(format) > SNAPSHOT_TREE_TIME_FORMAT_MAX) return 0;
+    int placeholders = 0;
+    for (const char* p = format; *p;) {
+        size_t len = 0;
+        if (placeholder_at(p, &len) != TF_NONE) {
+            placeholders++;
+            p += len;
+            continue;
+        }
+        size_t n = utf8_sequence_length((const unsigned char*)p);
+        if (n == 0) return 0;
+        if (n == 1 && ((unsigned char)*p < 0x20 || *p == 0x7F || strchr("\\/:*?\"<>|", *p))) return 0;
+        p += n;
+    }
+    char last = format[strlen(format) - 1];
+    return placeholders > 0 && last != '.' && last != ' ';
+}
+
+static char* put_digits(char* p, int value, int width) {
+    for (int d = width - 1; d >= 0; --d) {
+        p[d] = (char)('0' + value % 10);
+        value /= 10;
+    }
+    return p + width;
+}
+
+/* The snapshot's own wall-clock time written by `format` (valid, see snapshot_tree.h) */
+static void time_name(const Timestamp* t, const char* format, char* out) {
+    char* o = out;
+    for (const char* p = format; *p;) {
+        size_t len = 0;
+        switch (placeholder_at(p, &len)) {
+            case TF_YEAR4: o = put_digits(o, t->year, 4); break;
+            case TF_YEAR2: o = put_digits(o, t->year % 100, 2); break;
+            case TF_MONTH: o = put_digits(o, t->month, 2); break;
+            case TF_DAY: o = put_digits(o, t->day, 2); break;
+            case TF_HOUR: o = put_digits(o, t->hour, 2); break;
+            case TF_MINUTE: o = put_digits(o, t->minute, 2); break;
+            case TF_SECOND: o = put_digits(o, t->second, 2); break;
+            case TF_ZONE: {
+                int off = t->offset_minutes < 0 ? -t->offset_minutes : t->offset_minutes;
+                *o++ = t->offset_minutes < 0 ? '-' : '+';
+                o = put_digits(o, off / 60, 2);
+                o = put_digits(o, off % 60, 2);
+                break;
+            }
+            default: *o++ = *p; break; /* A literal byte (multi-byte characters byte by byte) */
+        }
+        p += len;
+    }
+    *o = '\0';
+}
+
+static SnapshotTreeStatus build_from_records(const SnapshotRecord* records, size_t count, const char* time_format,
+                                             SnapshotTree* tree) {
     NodeIndex idx = {NULL, 0, 0};
     SnapshotTreeStatus status = SNAPSHOT_TREE_NO_MEMORY;
     BuildNode* root = (BuildNode*)calloc(1, sizeof(BuildNode));
@@ -297,8 +360,8 @@ static SnapshotTreeStatus build_from_records(const SnapshotRecord* records, size
         memcpy(id, rec->id, id_len + 1);
         tree->ids[tree->snapshot_count++] = id;
 
-        char when[24], short_id[SNAPSHOT_TREE_SHORT_ID_CHARS + 1];
-        time_name(&rec->time, when);
+        char when[SNAPSHOT_TREE_TIME_FORMAT_MAX * 2 + 1], short_id[SNAPSHOT_TREE_SHORT_ID_CHARS + 1];
+        time_name(&rec->time, time_format, when);
         memcpy(short_id, id, SNAPSHOT_TREE_SHORT_ID_CHARS);
         short_id[SNAPSHOT_TREE_SHORT_ID_CHARS] = '\0';
 
@@ -324,9 +387,11 @@ done:
     return status;
 }
 
-SnapshotTreeStatus snapshot_tree_build(const char* json, size_t len, SnapshotTree** out) {
+SnapshotTreeStatus snapshot_tree_build(const char* json, size_t len, const char* time_format, SnapshotTree** out) {
     if (!out) return SNAPSHOT_TREE_BAD_JSON;
     *out = NULL;
+    if (!time_format) time_format = SNAPSHOT_TREE_DEFAULT_TIME_FORMAT;
+    if (!snapshot_tree_time_format_valid(time_format)) return SNAPSHOT_TREE_BAD_FORMAT;
     if (!json) return SNAPSHOT_TREE_BAD_JSON;
     JsonDoc* doc = json_parse(json, len);
     if (!doc) return SNAPSHOT_TREE_BAD_JSON;
@@ -343,7 +408,7 @@ SnapshotTreeStatus snapshot_tree_build(const char* json, size_t len, SnapshotTre
     SnapshotTreeStatus status = SNAPSHOT_TREE_NO_MEMORY;
     if (tree && (n == 0 || records)) {
         size_t count = n ? collect_records(root, records) : 0;
-        status = build_from_records(records, count, tree);
+        status = build_from_records(records, count, time_format, tree);
     }
     free(records);
     json_free(doc);

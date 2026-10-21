@@ -994,6 +994,7 @@ ResticResult restic_list_snapshots(
     const WCHAR* restic_exe,
     const WCHAR* repo_target,
     const WCHAR* password,
+    const char* time_format,
     const ResticExecOptions* options,
     SnapshotTree** out_tree,
     WCHAR* out_error_msg,
@@ -1010,9 +1011,10 @@ ResticResult restic_list_snapshots(
                                      options, &cmd_out, out_error_msg, err_capacity);
     if (res != RESTIC_OK) return res;
 
-    switch (snapshot_tree_build(cmd_out.output, cmd_out.length, out_tree)) {
+    switch (snapshot_tree_build(cmd_out.output, cmd_out.length, time_format, out_tree)) {
         case SNAPSHOT_TREE_OK: res = RESTIC_OK; break;
         case SNAPSHOT_TREE_NO_MEMORY: res = RESTIC_ERR_OUT_OF_MEMORY; break;
+        case SNAPSHOT_TREE_BAD_FORMAT: res = RESTIC_ERR_INVALID_ARG; break;
         default: res = RESTIC_ERR_JSON_PARSE; break;
     }
     restic_free_command_output(&cmd_out);

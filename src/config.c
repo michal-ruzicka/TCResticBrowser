@@ -582,6 +582,8 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
     wcsncpy_s(out_config->root_name, MAX_PATH, CONFIG_DEFAULT_ROOT_NAME, _TRUNCATE);
     out_config->password_timeout_s = CONFIG_DEFAULT_PASSWORD_TIMEOUT_S;
     out_config->snapshot_cache_mb  = CONFIG_DEFAULT_SNAPSHOT_CACHE_MB;
+    strcpy_s(out_config->snapshot_time_format, sizeof(out_config->snapshot_time_format),
+             SNAPSHOT_TREE_DEFAULT_TIME_FORMAT);
 
     if (!ini_path || ini_path[0] == L'\0') {
         config_resolve_restic_path(NULL, out_config->restic_path, CONFIG_MAX_PATH, out_config->restic_path_error,
@@ -612,6 +614,7 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
     BOOL timeout_seen = FALSE;
     BOOL reset_seen = FALSE;
     BOOL cache_seen = FALSE;
+    BOOL format_seen = FALSE;
     IniReader reader = {ini_text, NULL};
     WCHAR *alias = NULL, *target = NULL;
     while (ini_next_entry(&reader, &alias, &target)) {
@@ -630,6 +633,20 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
                 out_config->password_timeout_s = seconds;
             }
             timeout_seen = TRUE;
+            continue;
+        }
+        if (ini_in_section(&reader, L"Settings") && _wcsicmp(alias, L"SnapshotTimeFormat") == 0) {
+            /* First occurrence wins; an unusable format keeps the default and is reported */
+            char format[SNAPSHOT_TREE_TIME_FORMAT_MAX * 4 + 1];
+            if (!format_seen) {
+                int n = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, target, -1, format, (int)sizeof(format), NULL, NULL);
+                if (n > 0 && snapshot_tree_time_format_valid(format)) {
+                    strcpy_s(out_config->snapshot_time_format, sizeof(out_config->snapshot_time_format), format);
+                } else {
+                    out_config->snapshot_time_format_invalid = TRUE;
+                }
+            }
+            format_seen = TRUE;
             continue;
         }
         if (ini_in_section(&reader, L"Settings") && _wcsicmp(alias, L"SnapshotCacheMB") == 0) {

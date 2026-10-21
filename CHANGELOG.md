@@ -15,7 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   following the rules of `restic mount` exactly (names `-1`, `-2`... for
   equal times, tags such as `a/b` as `a_b`). Folder names use the time
   template restic suggests for file systems without colons,
-  `2006-01-02_15-04-05`. The snapshot list is read once per repository and
+  `2006-01-02_15-04-05`, or the format set by the new `SnapshotTimeFormat=`
+  setting (placeholders `YYYY`, `YY`, `MM`, `DD`, `hh`, `mm`, `ss` and the
+  zone `zzzz`, documented in the sample `TCResticBrowser.ini`). The snapshot list is read once per repository and
   reused for a minute, like `restic mount` does, so moving between these
   folders runs restic only once. The snapshot folders of version 2.0
   (`<time>_[<short id>]`) are gone, so history and hotlist entries that

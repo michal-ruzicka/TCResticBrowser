@@ -45,6 +45,7 @@ struct RepoEntry {
     WCHAR alias[MAX_PATH];
     WCHAR target[CONFIG_MAX_PATH];
     SnapshotTree* tree;
+    char tree_format[SNAPSHOT_TREE_TIME_FORMAT_MAX + 1]; /* The time format its folders are named by */
     ULONGLONG tree_at; /* GetTickCount64() when the snapshots were listed */
     IndexEntry* indexes;
     RepoEntry* next;
@@ -121,10 +122,11 @@ static IndexEntry* find_index_locked(const RepoEntry* r, const char* snapshot_id
     return NULL;
 }
 
-const SnapshotTree* repo_cache_lock_tree(const WCHAR* alias, const WCHAR* target, ULONGLONG* out_age_ms) {
+const SnapshotTree* repo_cache_lock_tree(const WCHAR* alias, const WCHAR* target, const char* time_format,
+                                         ULONGLONG* out_age_ms) {
     AcquireSRWLockShared(&g_CacheLock);
     const RepoEntry* r = find_repo_locked(alias, target);
-    if (!r || !r->tree) {
+    if (!r || !r->tree || strcmp(r->tree_format, time_format) != 0) { /* SnapshotTimeFormat changed */
         ReleaseSRWLockShared(&g_CacheLock);
         return NULL;
     }
@@ -361,14 +363,20 @@ ULONGLONG repo_cache_generation(void) {
     return g;
 }
 
-void repo_cache_put_tree(const WCHAR* alias, const WCHAR* target, SnapshotTree* tree, ULONGLONG generation) {
+void repo_cache_put_tree(const WCHAR* alias, const WCHAR* target, const char* time_format, SnapshotTree* tree,
+                         ULONGLONG generation) {
     if (!tree) return;
+    if (strlen(time_format) > SNAPSHOT_TREE_TIME_FORMAT_MAX) {
+        snapshot_tree_free(tree);
+        return;
+    }
     AcquireSRWLockExclusive(&g_CacheLock);
     RepoEntry* r = generation == g_CacheGeneration ? get_repo_locked(alias, target) : NULL;
     if (r) {
         snapshot_tree_free(r->tree);
         r->tree    = tree;
         r->tree_at = GetTickCount64();
+        strcpy_s(r->tree_format, sizeof(r->tree_format), time_format);
         tree       = NULL;
     }
     ReleaseSRWLockExclusive(&g_CacheLock);

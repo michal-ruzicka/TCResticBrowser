@@ -1008,6 +1008,27 @@ static void test_password_timeout_setting(void) {
         EXPECT_TRUE(got == cache[i].expected, cache[i].what);
     }
 
+    /* [Settings] SnapshotTimeFormat: first usable occurrence, anything unusable keeps the default */
+    static const struct { const char* ini; const char* expected; BOOL invalid; const char* what; } formats[] = {
+        {"[Settings]\r\nResticPath=restic.exe\r\n", "YYYY-MM-DD_hh-mm-ss", FALSE, "SnapshotTimeFormat default"},
+        {"[Settings]\r\nSnapshotTimeFormat=YYYY-MM-DDThh.mm.ss\r\n", "YYYY-MM-DDThh.mm.ss", FALSE, "Custom format"},
+        {"[settings]\r\n snapshottimeformat = DD.MM.YYYY hh-mm \r\nSnapshotTimeFormat=YYYY\r\n", "DD.MM.YYYY hh-mm",
+         FALSE, "First occurrence, trimmed, inner spaces kept"},
+        {"[Settings]\r\nSnapshotTimeFormat=\"Z\xc3\xa1loha YYYY\"\r\n", "Z\xc3\xa1loha YYYY", FALSE, "Non-ASCII literal (UTF-8 INI)"},
+        {"[Settings]\r\nSnapshotTimeFormat=YYYY-MM-DDThh:mm:ss\r\n", "YYYY-MM-DD_hh-mm-ss", TRUE, "Colons refused"},
+        {"[Settings]\r\nSnapshotTimeFormat=backup\r\n", "YYYY-MM-DD_hh-mm-ss", TRUE, "No placeholder refused"},
+        {"[Settings]\r\nSnapshotTimeFormat=YYYY.\r\nSnapshotTimeFormat=YYYY\r\n", "YYYY-MM-DD_hh-mm-ss", TRUE,
+         "An unusable first occurrence is not replaced by a later one"},
+    };
+    for (size_t i = 0; i < _countof(formats); ++i) {
+        write_text_file(ini_path, formats[i].ini);
+        config_load(&cfg);
+        BOOL ok = strcmp(cfg.snapshot_time_format, formats[i].expected) == 0 &&
+                  cfg.snapshot_time_format_invalid == formats[i].invalid;
+        config_free(&cfg);
+        EXPECT_TRUE(ok, formats[i].what);
+    }
+
     DeleteFileW(ini_path);
     RemoveDirectoryW(plugin_dir);
 }

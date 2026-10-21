@@ -20,11 +20,12 @@
 #define REPO_CACHE_TREE_TTL_MS (60u * 1000u)
 
 /*
- * Returns the cached tree of the repository and keeps it readable (a shared lock) until
- * repo_cache_unlock(); NULL when nothing is cached (no lock is then held). `*out_age_ms` receives
- * how long ago restic listed the snapshots.
+ * Returns the cached tree of the repository, built with `time_format`, and keeps it readable (a
+ * shared lock) until repo_cache_unlock(); NULL when no such tree is cached (no lock is then held).
+ * `*out_age_ms` receives how long ago restic listed the snapshots.
  */
-const SnapshotTree* repo_cache_lock_tree(const WCHAR* alias, const WCHAR* target, ULONGLONG* out_age_ms);
+const SnapshotTree* repo_cache_lock_tree(const WCHAR* alias, const WCHAR* target, const char* time_format,
+                                         ULONGLONG* out_age_ms);
 
 /*
  * Returns the complete listing of a snapshot when it has been read, and keeps it readable until
@@ -65,9 +66,10 @@ BOOL repo_cache_wait_idle(DWORD timeout_ms);
  */
 ULONGLONG repo_cache_generation(void);
 
-/* Caches `tree` (ownership passes to the cache, also when it is dropped) unless a repository was
- * forgotten since `generation` was obtained */
-void repo_cache_put_tree(const WCHAR* alias, const WCHAR* target, SnapshotTree* tree, ULONGLONG generation);
+/* Caches `tree`, built with `time_format` (ownership passes to the cache, also when it is dropped)
+ * unless a repository was forgotten since `generation` was obtained */
+void repo_cache_put_tree(const WCHAR* alias, const WCHAR* target, const char* time_format, SnapshotTree* tree,
+                         ULONGLONG generation);
 
 /* Drops everything cached for the alias (any target), e.g. when its password is wiped */
 void repo_cache_forget(const WCHAR* alias);

@@ -891,7 +891,8 @@ static ResticResult resolve_repo_path(const RepoCall* call, const WCHAR* rest, B
 
     if (call->trusted) {
         ULONGLONG age = 0;
-        const SnapshotTree* cached = repo_cache_lock_tree(call->repo->alias, call->repo->target, &age);
+        const SnapshotTree* cached =
+            repo_cache_lock_tree(call->repo->alias, call->repo->target, call->cfg->snapshot_time_format, &age);
         if (cached) {
             ResticResult res = walk_tree(cached, rest, want_items, out);
             repo_cache_unlock();
@@ -906,12 +907,12 @@ static ResticResult resolve_repo_path(const RepoCall* call, const WCHAR* rest, B
     }
 
     SnapshotTree* tree = NULL;
-    ResticResult res = restic_list_snapshots(call->cfg->restic_path, call->repo->target, call->password, call->exec,
-                                             &tree, call->err, call->err_cap);
+    ResticResult res = restic_list_snapshots(call->cfg->restic_path, call->repo->target, call->password,
+                                             call->cfg->snapshot_time_format, call->exec, &tree, call->err, call->err_cap);
     if (res != RESTIC_OK) return res;
     log_write(L"Snapshots of '%ls': %u", call->repo->alias, (unsigned)snapshot_tree_snapshot_count(tree));
     res = walk_tree(tree, rest, want_items, out);
-    repo_cache_put_tree(call->repo->alias, call->repo->target, tree, call->generation);
+    repo_cache_put_tree(call->repo->alias, call->repo->target, call->cfg->snapshot_time_format, tree, call->generation);
     return res;
 }
 
@@ -1074,6 +1075,11 @@ static void log_configuration(const ResticConfig* cfg) {
         log_write(L"  ResticPath resolved to: %ls", cfg->restic_path);
     }
     log_write(L"  RootName: %ls; LogPath: %ls", cfg->root_name, log_path);
+    WCHAR time_format[SNAPSHOT_TREE_TIME_FORMAT_MAX + 1] = {0};
+    MultiByteToWideChar(CP_UTF8, 0, cfg->snapshot_time_format, -1, time_format, (int)_countof(time_format));
+    log_write(L"  SnapshotTimeFormat: %ls%ls; SnapshotCacheMB: %lu", time_format,
+              cfg->snapshot_time_format_invalid ? L" (the configured one is unusable, default used)" : L"",
+              (unsigned long)cfg->snapshot_cache_mb);
     log_write(L"  %u repositories:", (unsigned)cfg->repo_count);
     for (size_t i = 0; i < cfg->repo_count; ++i) {
         WCHAR target[CONFIG_MAX_PATH];

@@ -12,8 +12,9 @@
  *   tags/<tag>/<time>/         per tag (a snapshot with several tags is in each), plus latest/
  *
  * This is restic mount's default set of path templates ("ids/%i", "snapshots/%T", "hosts/%h/%T",
- * "tags/%t/%T") with restic's own colon-free time template "2006-01-02_15-04-05" (see `restic help
- * mount`), because Windows file names cannot contain the colons of the default RFC 3339 one. As in
+ * "tags/%t/%T"). The time is written by a configurable format (snapshot_tree_build), by default
+ * restic's own colon-free time template "2006-01-02_15-04-05" (see `restic help mount`), because
+ * Windows file names cannot contain the colons of the default RFC 3339 one. As in
  * restic (internal/fuse/snapshots_dirstruct.go):
  * - snapshots are inserted in ascending order of time, ties broken by ID, and a name already taken
  *   in a folder gets "-1", "-2", ... appended, so the older snapshot keeps the plain name;
@@ -33,6 +34,22 @@
 /* A full snapshot ID: 64 hexadecimal characters */
 #define SNAPSHOT_TREE_ID_CHARS 64
 
+/*
+ * Time format of the snapshot folders: placeholders YYYY (year), YY (year without century), MM
+ * (month), DD (day), hh (hour, 00-23), mm (minute), ss (second), all zero-padded, and zzzz (the
+ * zone offset, "+0200", "-0500", "+0000"), case-sensitive; everything else is copied as it is.
+ * The time is the snapshot's own wall-clock time, in the zone it was taken in.
+ */
+#define SNAPSHOT_TREE_DEFAULT_TIME_FORMAT "YYYY-MM-DD_hh-mm-ss" /* restic's 2006-01-02_15-04-05 */
+#define SNAPSHOT_TREE_TIME_FORMAT_MAX 64                           /* Bytes of UTF-8 */
+
+/*
+ * 1 when `format` can name folders: valid UTF-8 of 1 to SNAPSHOT_TREE_TIME_FORMAT_MAX bytes with at
+ * least one placeholder, none of \ / : * ? " < > | or control characters, not ending in a dot or
+ * space (Win32 strips those)
+ */
+int snapshot_tree_time_format_valid(const char* format);
+
 typedef struct SnapshotNode SnapshotNode;
 struct SnapshotNode {
     const char* name;                    /* UTF-8, one Windows-safe path component */
@@ -46,17 +63,19 @@ struct SnapshotNode {
 typedef enum {
     SNAPSHOT_TREE_OK = 0,
     SNAPSHOT_TREE_BAD_JSON,  /* Not the JSON array (or null) `restic snapshots --json` prints */
-    SNAPSHOT_TREE_NO_MEMORY
+    SNAPSHOT_TREE_NO_MEMORY,
+    SNAPSHOT_TREE_BAD_FORMAT /* time_format fails snapshot_tree_time_format_valid() */
 } SnapshotTreeStatus;
 
 typedef struct SnapshotTree SnapshotTree;
 
 /*
  * Builds the tree from `len` bytes of `restic snapshots --json` output (a literal null is an empty
- * repository). Entries without a valid time or a hexadecimal ID of 8 to 64 characters are skipped.
- * Release the tree with snapshot_tree_free().
+ * repository), naming the snapshot folders by `time_format` (NULL: the default). Entries without
+ * a valid time or a hexadecimal ID of 8 to 64 characters are skipped. Release the tree with
+ * snapshot_tree_free().
  */
-SnapshotTreeStatus snapshot_tree_build(const char* json, size_t len, SnapshotTree** out);
+SnapshotTreeStatus snapshot_tree_build(const char* json, size_t len, const char* time_format, SnapshotTree** out);
 
 /* Releases a tree and every node obtained from it. NULL is accepted. */
 void snapshot_tree_free(SnapshotTree* tree);

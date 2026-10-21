@@ -68,7 +68,10 @@ works here too. The one difference is the time in the folder names:
 `restic mount` writes `2026-10-18T09:30:00+02:00` by default, but Windows
 does not allow colons in file names, so the plugin uses the colon-free form
 restic itself suggests (`--time-template "2006-01-02_15-04-05"`); the time is
-the one the snapshot was taken in, in that computer's time zone. Two
+the one the snapshot was taken in, in that computer's time zone, and its
+format can be changed with `SnapshotTimeFormat=` (see the comments in the
+sample `TCResticBrowser.ini`; e.g. `YYYY-MM-DDThh.mm.ss` gives
+`2026-10-18T09.30.00`). Two
 snapshots with the same name get `-1`, `-2`, ... appended, and host names or
 tags containing characters Windows does not allow (`\ / : * ? " < > |`, or a
 dot or space at the end) show them as `_`. Paths saved by version 2.0

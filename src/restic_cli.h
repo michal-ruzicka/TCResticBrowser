@@ -149,13 +149,15 @@ void restic_free_command_output(ResticCommandOutput* result);
 
 /**
  * Runs `restic snapshots --json --no-lock` and builds the restic mount folder tree from it
- * (snapshot_tree.h); release it with snapshot_tree_free(). On failure `out_error_msg` (optional)
- * receives the reason reported by Restic.
+ * (snapshot_tree.h), naming snapshot folders by `time_format` (UTF-8, NULL: the default); release
+ * it with snapshot_tree_free(). On failure `out_error_msg` (optional) receives the reason reported
+ * by Restic.
  */
 ResticResult restic_list_snapshots(
     const WCHAR* restic_exe,
     const WCHAR* repo_target,
     const WCHAR* password,
+    const char* time_format,
     const ResticExecOptions* options,
     SnapshotTree** out_tree,
     WCHAR* out_error_msg,

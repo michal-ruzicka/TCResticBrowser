@@ -824,7 +824,7 @@ static void test_live_restic_cli(void) {
 
     /* Error mapping before the repository exists */
     SnapshotTree* tree = NULL;
-    res = restic_list_snapshots(restic_bin, repo, password, NULL, &tree, err, _countof(err));
+    res = restic_list_snapshots(restic_bin, repo, password, NULL, NULL, &tree, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_REPO_NOT_FOUND && tree == NULL, "Missing repository -> RESTIC_ERR_REPO_NOT_FOUND");
     EXPECT_TRUE(err[0] != L'\0', "Missing repository reports a reason");
 
@@ -834,11 +834,11 @@ static void test_live_restic_cli(void) {
     EXPECT_TRUE(res == RESTIC_OK, "restic init with a password containing quotes, %PATH% and CJK text");
     restic_free_command_output(&out);
 
-    res = restic_list_snapshots(restic_bin, repo, L"wrong password", NULL, &tree, err, _countof(err));
+    res = restic_list_snapshots(restic_bin, repo, L"wrong password", NULL, NULL, &tree, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_WRONG_PASSWORD, "Wrong password -> RESTIC_ERR_WRONG_PASSWORD");
     EXPECT_TRUE(wcsstr(err, L"password") != NULL, "Wrong password reason mentions the password");
 
-    res = restic_list_snapshots(restic_bin, repo, password, NULL, &tree, err, _countof(err));
+    res = restic_list_snapshots(restic_bin, repo, password, NULL, NULL, &tree, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_OK && snapshot_tree_snapshot_count(tree) == 0, "Empty repository -> no snapshots");
     EXPECT_TRUE(snapshot_tree_root(tree)->child_count == 4, "...but the four restic mount folders");
     snapshot_tree_free(tree);
@@ -854,7 +854,7 @@ static void test_live_restic_cli(void) {
     restic_free_command_output(&out);
     free(q_data);
 
-    res = restic_list_snapshots(restic_bin, repo, password, NULL, &tree, err, _countof(err));
+    res = restic_list_snapshots(restic_bin, repo, password, NULL, NULL, &tree, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_OK && snapshot_tree_snapshot_count(tree) == 2, "Two snapshots listed");
     const SnapshotNode* by_time = snapshot_tree_child(snapshot_tree_root(tree), "snapshots");
     EXPECT_TRUE(by_time && by_time->child_count == 3 && strcmp(by_time->children[2]->name, "latest") == 0,

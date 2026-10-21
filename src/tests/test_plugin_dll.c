@@ -938,7 +938,8 @@ static void test_live_end_to_end_navigation(void) {
     int ini_len = snprintf(
         ini_text,
         sizeof(ini_text),
-        "[Settings]\r\nResticPath=%s\r\n[Logging]\r\nLogPath=%s\\log dir\\e2e.log\r\n"
+        "[Settings]\r\nResticPath=%s\r\nSnapshotTimeFormat=YYYY-MM-DDThh.mm.ss\r\n"
+        "[Logging]\r\nLogPath=%s\\log dir\\e2e.log\r\n"
         "[Repositories]\r\nMainRepo=%s\r\nSecondRepo=%s\r\nThirdRepo=%s\r\n"
         "ExtractRepo=%s\r\nHintRepo=%s\r\n"
         "MissingRepo=C:\\no_such_restic_repo_999\r\n%s=C:\\no_such_restic_repo_999\r\n",
@@ -995,8 +996,8 @@ static void test_live_end_to_end_navigation(void) {
     } while (p.find_next_w(h, &fd));
     p.find_close(h);
     EXPECT_TRUE(snap_count == 3 && has_latest, "Both fixture snapshots and latest in snapshots/");
-    EXPECT_TRUE(latest_snap[4] == L'-' && latest_snap[10] == L'_' && latest_snap[13] == L'-' && wcslen(latest_snap) >= 19,
-                "Named by restic mount's colon-free time template 2006-01-02_15-04-05");
+    EXPECT_TRUE(latest_snap[4] == L'-' && latest_snap[10] == L'T' && latest_snap[13] == L'.' && wcslen(latest_snap) >= 19,
+                "Named by [Settings] SnapshotTimeFormat=YYYY-MM-DDThh.mm.ss");
     EXPECT_TRUE(list_names(&p, L"\\MainRepo\\ids", names, _countof(names)) && wcslen(names) == 17 && names[8] == L'|',
                 "ids/ holds two 8-character short IDs");
     WCHAR short_id[9] = {0};

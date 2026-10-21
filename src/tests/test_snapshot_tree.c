@@ -100,7 +100,7 @@ static void test_timestamp_compare(void) {
 
 static SnapshotTree* build(const char* json) {
     SnapshotTree* tree = NULL;
-    if (snapshot_tree_build(json, strlen(json), &tree) != SNAPSHOT_TREE_OK) return NULL;
+    if (snapshot_tree_build(json, strlen(json), NULL, &tree) != SNAPSHOT_TREE_OK) return NULL;
     return tree;
 }
 
@@ -162,9 +162,9 @@ static void test_empty_repository(void) {
     snapshot_tree_free(tree);
 
     SnapshotTree* out = (SnapshotTree*)1;
-    EXPECT_TRUE(snapshot_tree_build("{}", 2, &out) == SNAPSHOT_TREE_BAD_JSON && out == NULL, "Object refused");
-    EXPECT_TRUE(snapshot_tree_build("[1,", 3, &out) == SNAPSHOT_TREE_BAD_JSON, "Malformed JSON refused");
-    EXPECT_TRUE(snapshot_tree_build(NULL, 0, &out) == SNAPSHOT_TREE_BAD_JSON, "NULL refused");
+    EXPECT_TRUE(snapshot_tree_build("{}", 2, NULL, &out) == SNAPSHOT_TREE_BAD_JSON && out == NULL, "Object refused");
+    EXPECT_TRUE(snapshot_tree_build("[1,", 3, NULL, &out) == SNAPSHOT_TREE_BAD_JSON, "Malformed JSON refused");
+    EXPECT_TRUE(snapshot_tree_build(NULL, 0, NULL, &out) == SNAPSHOT_TREE_BAD_JSON, "NULL refused");
     snapshot_tree_free(NULL);
 }
 
@@ -280,6 +280,46 @@ static void test_sanitized_names(void) {
     snapshot_tree_free(tree);
 }
 
+/* [Settings] SnapshotTimeFormat: placeholders, literals, the zone, and what is refused */
+static void test_time_formats(void) {
+    static const char* const json =
+        "[{\"time\":\"2026-01-02T03:04:05.9+05:30\",\"id\":\"" ID("a") "\"},"
+        "{\"time\":\"1999-12-31T23:59:58-08:00\",\"id\":\"" ID("b") "\"},"
+        "{\"time\":\"2026-07-08T09:10:11Z\",\"id\":\"" ID("c") "\"}]";
+    static const struct { const char* format; const char* names; } cases[] = {
+        {"YYYY-MM-DD_hh-mm-ss", "1999-12-31_23-59-58|2026-01-02_03-04-05|2026-07-08_09-10-11|latest"},
+        {"YYYY-MM-DDThh.mm.ss", "1999-12-31T23.59.58|2026-01-02T03.04.05|2026-07-08T09.10.11|latest"},
+        {"YYMMDD-hhmmss zzzz", "260102-030405 +0530|260708-091011 +0000|991231-235958 -0800|latest"},
+        {"DD.MM.YYYY hh-mm", "02.01.2026 03-04|08.07.2026 09-10|31.12.1999 23-59|latest"},
+        {"YYYY", "1999|2026|2026-1|latest"},
+        {"Y-Mon h.s z", "Y-Mon h.s z|Y-Mon h.s z-1|Y-Mon h.s z-2|latest"}, /* No full placeholder... */
+        {"Záloha YYYY-MM-DD", "Záloha 1999-12-31|Záloha 2026-01-02|Záloha 2026-07-08|latest"},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        SnapshotTree* tree = NULL;
+        SnapshotTreeStatus st = snapshot_tree_build(json, strlen(json), cases[i].format, &tree);
+        if (i == 5) { /* ...is refused: every snapshot would get the same name */
+            EXPECT_TRUE(st == SNAPSHOT_TREE_BAD_FORMAT && tree == NULL, "A format without a placeholder is refused");
+            continue;
+        }
+        EXPECT_TRUE(st == SNAPSHOT_TREE_OK, cases[i].format);
+        if (strcmp(names(walk(tree, "snapshots")), cases[i].names) != 0) printf("       got: %s\n", names(walk(tree, "snapshots")));
+        EXPECT_TRUE(strcmp(names(walk(tree, "snapshots")), cases[i].names) == 0, cases[i].format);
+        snapshot_tree_free(tree);
+    }
+    static const char* const bad[] = {
+        "", "YYYY:MM", "YYYY/MM", "YYYY\\MM", "YYYY*", "YYYY?", "YYYY\"", "YYYY<", "YYYY>", "YYYY|",
+        "YYYY\t", "YYYY.", "YYYY ", "literal only", "bad \xff YYYY",
+        "YYYY-MM-DD_hh-mm-ss_YYYY-MM-DD_hh-mm-ss_YYYY-MM-DD_hh-mm-ss_YYYY-", /* 65 bytes */
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
+        EXPECT_TRUE(!snapshot_tree_time_format_valid(bad[i]), "Unusable time format refused");
+    }
+    EXPECT_TRUE(!snapshot_tree_time_format_valid(NULL), "NULL refused");
+    EXPECT_TRUE(snapshot_tree_time_format_valid("YYYY-MM-DD_hh-mm-ss_YYYY-MM-DD_hh-mm-ss_YYYY-MM-DD_hh-mm-ss_YYYY"),
+                "64 bytes accepted");
+}
+
 static void test_skipped_entries(void) {
     SnapshotTree* tree = build(
         "[1,\"x\",null,{},"
@@ -314,7 +354,7 @@ static void test_many_snapshots(void) {
     json[len++] = ']';
     json[len] = '\0';
     SnapshotTree* tree = NULL;
-    EXPECT_TRUE(snapshot_tree_build(json, strlen(json), &tree) == SNAPSHOT_TREE_OK, "Built");
+    EXPECT_TRUE(snapshot_tree_build(json, strlen(json), NULL, &tree) == SNAPSHOT_TREE_OK, "Built");
     free(json);
     EXPECT_TRUE(snapshot_tree_snapshot_count(tree) == n, "All snapshots");
     const SnapshotNode* ids = walk(tree, "ids");
@@ -480,6 +520,7 @@ int main(void) {
     test_layout();
     test_name_collisions();
     test_sanitized_names();
+    test_time_formats();
     test_skipped_entries();
     test_many_snapshots();
     test_index_listing();
