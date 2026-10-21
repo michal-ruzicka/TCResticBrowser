@@ -19,6 +19,7 @@
 #else
 #include <stdlib.h>
 #endif
+#include <stdarg.h>
 #include <stdio.h>
 #include <wchar.h>
 #include <string.h>
@@ -52,6 +53,7 @@ static tRequestProcW  g_RequestProc  = NULL;
 /* Total Commander's connection log (see connection_announce) */
 static volatile LONG g_ConnectionLogOn = FALSE; /* [Settings] ConnectionLog, applied by load_config */
 static volatile LONG g_Connected       = FALSE; /* The connection was announced and not disconnected */
+static void conn_log(BOOL deferred, const WCHAR* alias, const WCHAR* format, ...);
 
 /*
  * In-memory credential sessions, one slot per repository alias (two panels can browse two
@@ -272,6 +274,8 @@ static void session_expire_locked(void) {
         if (age >= g_PasswordTimeoutMs) {
             log_write(L"Cached password for '%ls' forgotten: PasswordTimeoutSeconds (%llu s) elapsed",
                       slot->alias, g_PasswordTimeoutMs / 1000);
+            conn_log(TRUE, slot->alias, L"Password forgotten after PasswordTimeoutSeconds (%llu s), and what was read "
+                                        L"with it", g_PasswordTimeoutMs / 1000);
             session_wipe_slot_locked(slot);
             continue;
         }
@@ -358,6 +362,8 @@ static BOOL session_put(const WCHAR* alias, const WCHAR* password) {
         }
     }
     if (slot->used && _wcsicmp(slot->alias, alias) != 0) {
+        conn_log(TRUE, slot->alias, L"Password forgotten, and what was read with it, to make room for another "
+                                    L"repository's (%d are remembered at most)", SESSION_SLOTS);
         session_wipe_slot_locked(slot); /* Recycled: the other repository's data goes with it */
     }
     SecureZeroMemory(slot, sizeof(*slot));
@@ -415,17 +421,20 @@ static void session_forget(const WCHAR* alias, ULONGLONG generation) {
 
 
 /*
- * Total Commander's connection log ([Settings] ConnectionLog=yes). Once restic accepted a typed-in
- * password, the plugin announces one connection for all its repositories (LogProc MSGTYPE_CONNECT,
- * "CONNECT \\", the WFX SDK's root "for a single possible connection"): Total Commander then shows
- * its FTP connections toolbar with a log window, where the background work is reported
- * (MSGTYPE_DETAILS), and a Disconnect button, which calls FsDisconnectW.
+ * Total Commander's connection log ([Settings] ConnectionLog=yes). When a repository is first used,
+ * before its password is asked for (as an FTP plugin announces a connection when it starts
+ * connecting, so that the log shows how it went), the plugin announces one connection for all its
+ * repositories (LogProc MSGTYPE_CONNECT, "CONNECT \\", the WFX SDK's root "for a single possible
+ * connection"): Total Commander then shows its FTP connections toolbar with a log window, where
+ * passwords accepted, refused and forgotten, snapshot lists and folders read by restic, files
+ * copied (MSGTYPE_TRANSFERCOMPLETE) and the background work are reported (MSGTYPE_DETAILS), and a
+ * Disconnect button, which calls FsDisconnectW.
  *
  * Only Total Commander can end a connection, one per click of Disconnect, each time switching the
  * panel back to where it was before; logging MSGTYPE_DISCONNECT alone changes nothing. A single
  * connection therefore needs one click, whatever the number of repositories in use, and it is
  * announced only once until FsDisconnectW or FsInitW: a password that times out, and the forget
- * entry, leave it listed, and the next accepted password reuses it.
+ * entry, leave it listed, and the next use of a repository reuses it.
  *
  * LogProc is never called with a lock of the plugin held, nor from the password timer, whose
  * callbacks DLL unload waits for.
@@ -443,6 +452,26 @@ static void connection_announce(void) {
 static void report_status(const WCHAR* text) {
     tLogProcW log_proc = g_LogProc;
     if (log_proc && InterlockedCompareExchange(&g_Connected, 0, 0)) log_proc(g_PluginNr, MSGTYPE_DETAILS, (WCHAR*)text);
+}
+
+/*
+ * "[<alias>] <message>" in the connection log, while there is one. `deferred` for callers holding
+ * a lock or running in the password timer: a thread-pool worker logs it for them.
+ */
+static void conn_log(BOOL deferred, const WCHAR* alias, const WCHAR* format, ...) {
+    if (!InterlockedCompareExchange(&g_Connected, 0, 0) || !g_LogProc) return;
+    WCHAR text[1024];
+    int n = _snwprintf_s(text, _countof(text), _TRUNCATE, L"[%ls] ", alias);
+    if (n < 0) return;
+    va_list args;
+    va_start(args, format);
+    _vsnwprintf_s(text + n, _countof(text) - (size_t)n, _TRUNCATE, format, args);
+    va_end(args);
+    if (deferred) {
+        repo_cache_report_async(text);
+    } else {
+        report_status(text);
+    }
 }
 
 /* TRUE for a root entry name that is the forget command (also used to reserve such aliases) */
@@ -835,6 +864,8 @@ static ResticResult run_with_password(
     ULONGLONG cached_generation          = 0;
     /* Before the password is taken: if it is wiped meanwhile, nothing read with it is cached */
     ULONGLONG cache_generation = repo_cache_generation();
+    /* As an FTP plugin announces a connection when it starts connecting: the log then shows how it went */
+    connection_announce();
     BOOL have_password = session_get(repo->alias, password, _countof(password), &cached_generation);
     BOOL from_cache    = have_password; /* Cached: not stored again (see session_touch) */
     ResticResult res   = RESTIC_ERR_WRONG_PASSWORD;
@@ -854,7 +885,12 @@ static ResticResult run_with_password(
         res = op(&call, ctx);
 
         if (res == RESTIC_ERR_WRONG_PASSWORD) {
-            if (from_cache) session_forget(repo->alias, cached_generation);
+            if (from_cache) {
+                session_forget(repo->alias, cached_generation);
+                conn_log(FALSE, repo->alias, L"The remembered password was refused by restic and forgotten");
+            } else {
+                conn_log(FALSE, repo->alias, L"Password refused by restic");
+            }
             restic_describe_password(password, wrong_hint, _countof(wrong_hint));
             SecureZeroMemory(password, sizeof(password));
             have_password = FALSE;
@@ -869,7 +905,7 @@ static ResticResult run_with_password(
             session_touch(repo->alias, cached_generation);
         } else {
             kept = session_put(repo->alias, password);
-            if (kept) connection_announce();
+            if (kept) conn_log(FALSE, repo->alias, L"Password accepted");
         }
     }
     SecureZeroMemory(password, sizeof(password));
@@ -984,10 +1020,14 @@ static ResticResult resolve_repo_path(const RepoCall* call, const WCHAR* rest, B
     }
 
     SnapshotTree* tree = NULL;
+    ULONGLONG started = GetTickCount64();
     ResticResult res = restic_list_snapshots(call->cfg->restic_path, call->repo->target, call->password,
                                              call->cfg->snapshot_time_format, call->exec, &tree, call->err, call->err_cap);
     if (res != RESTIC_OK) return res;
     log_write(L"Snapshots of '%ls': %u", call->repo->alias, (unsigned)snapshot_tree_snapshot_count(tree));
+    /* (Logged before the password is announced as a connection the first time, so seen from then on) */
+    conn_log(FALSE, call->repo->alias, L"Snapshot list read: %u snapshots, %.1f s",
+             (unsigned)snapshot_tree_snapshot_count(tree), (double)(GetTickCount64() - started) / 1000.0);
     res = walk_tree(tree, rest, want_items, out);
     repo_cache_put_tree(call->repo->alias, call->repo->target, call->cfg->snapshot_time_format, tree, call->generation);
     return res;
@@ -1022,9 +1062,15 @@ static ResticResult list_operation(const RepoCall* call, void* ctx_ptr) {
                 return res;
             }
             /* Until then one `restic ls` per folder, as before */
-            return restic_list_directory(call->cfg->restic_path, call->repo->target, call->password,
-                                         where.snapshot_id, where.subpath, call->exec, &ctx->items, &ctx->count,
-                                         call->err, call->err_cap);
+            ULONGLONG started = GetTickCount64();
+            res = restic_list_directory(call->cfg->restic_path, call->repo->target, call->password,
+                                        where.snapshot_id, where.subpath, call->exec, &ctx->items, &ctx->count,
+                                        call->err, call->err_cap);
+            if (res == RESTIC_OK) {
+                conn_log(FALSE, call->repo->alias, L"%ls: %u entries listed by restic in %.1f s", ctx->rest,
+                         (unsigned)ctx->count, (double)(GetTickCount64() - started) / 1000.0);
+            }
+            return res;
         }
         default:
             return RESTIC_ERR_PATH_NOT_FOUND;
@@ -1512,6 +1558,11 @@ int __stdcall FsGetFileW(WCHAR* RemoteName, WCHAR* LocalName, int CopyFlags, Rem
         case RESTIC_OK:
             if (g_ProgressProc) {
                 g_ProgressProc(g_PluginNr, RemoteName, LocalName, 100);
+            }
+            if (g_LogProc && InterlockedCompareExchange(&g_Connected, 0, 0)) { /* WFX SDK: "source -> target" */
+                WCHAR done[MAX_PATH * 2 + 8];
+                _snwprintf_s(done, _countof(done), _TRUNCATE, L"%ls -> %ls", RemoteName, LocalName);
+                g_LogProc(g_PluginNr, MSGTYPE_TRANSFERCOMPLETE, done);
             }
             ret = FS_FILE_OK;
             break;

@@ -243,13 +243,20 @@ run with its duration.
 
 With `ConnectionLog=yes` under `[Settings]` (also `true`, `on` or `1`;
 anything else, or no setting, means no) the plugin announces itself as a
-connection once a repository's password is accepted, as an FTP plugin
-announces a server, and Total Commander shows its FTP connections toolbar
-with two buttons that matter here:
+connection when a repository is first used, as an FTP plugin announces a
+server, and Total Commander shows its FTP connections toolbar with two
+buttons that matter here:
 
-- **The log window** shows the work the plugin does in the background:
+- **The log window** shows what the plugin does and what takes time:
+  passwords accepted, refused and forgotten (with the reason: timeout,
+  making room for another repository's), snapshot lists and folders read
+  by restic (with how long it took), files copied, and the work in the
+  background:
 
   ```text
+  [MyLocalBackup] Password accepted
+  [MyLocalBackup] Snapshot list read: 42 snapshots, 1.3 s
+  [MyLocalBackup] \snapshots\latest\C\Users: 12 entries listed by restic in 1.1 s
   [MyLocalBackup] Reading every file and folder of snapshot a1b2c3d4 in the background
   [MyLocalBackup] Snapshot a1b2c3d4: 120000 files and folders read so far (25 s)
   [MyLocalBackup] Snapshot a1b2c3d4 read: 209750 files and folders, 18 MiB, 48 s; its folders now open without restic

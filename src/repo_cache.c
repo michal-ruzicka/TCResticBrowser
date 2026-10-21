@@ -557,6 +557,23 @@ void repo_cache_refresh_tree(
     log_write(L"Snapshots of '%ls' are re-read in the background", alias);
 }
 
+static VOID CALLBACK report_worker(PTP_CALLBACK_INSTANCE instance, PVOID context) {
+    WCHAR* text = (WCHAR*)context;
+    RepoStatusProc proc = g_StatusProc;
+    if (text && proc) proc(text);
+    free(text);
+    release_worker_module(instance);
+}
+
+void repo_cache_report_async(const WCHAR* text) {
+    if (!text || !g_StatusProc) return;
+    size_t len = wcslen(text) + 1;
+    WCHAR* copy = (WCHAR*)malloc(len * sizeof(WCHAR));
+    if (!copy) return;
+    wcscpy_s(copy, len, text);
+    if (!submit_worker(report_worker, copy)) free(copy);
+}
+
 void repo_cache_set_index_limit(size_t bytes) {
     AcquireSRWLockExclusive(&g_CacheLock);
     if (bytes != g_IndexLimit) {

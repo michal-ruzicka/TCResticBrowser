@@ -24,11 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TCResticBrowser.ini`; the default is restic's colon-free
   `2006-01-02_15-04-05`.
 - **Optional connection log.** With the new `ConnectionLog=yes`, the plugin
-  appears in Total Commander's FTP connections toolbar once a password is
-  accepted: its log window shows the background work (reading a whole
-  snapshot, with progress every few seconds, and re-reading the snapshot
-  list), and its Disconnect button forgets all passwords and cached
-  listings. Off by default, because only Disconnect can close the toolbar
+  appears in Total Commander's FTP connections toolbar once a repository is
+  used: its log window shows what takes time and why - passwords
+  accepted, refused and forgotten, snapshot lists and folders read by
+  restic with their durations, files copied, and the background work
+  (reading a whole snapshot, with progress every few seconds, and
+  re-reading the snapshot list) - and its Disconnect button forgets all
+  passwords and cached listings. Off by default, because only Disconnect can close the toolbar
   again; `🗑 Forget N Passwords` cannot.
 - **The password dialog names the repository in its title**
   (`<alias> - Restic repository password`), so password managers that

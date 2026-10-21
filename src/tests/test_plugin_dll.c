@@ -1168,8 +1168,17 @@ static void test_live_end_to_end_navigation(void) {
 
     /* ConnectionLog=yes: one connection for all repositories, announced once */
     EXPECT_TRUE(conn_log_count(L"1:CONNECT \\\n") == 1 && conn_log_count(L"1:CONNECT") == 1,
-                "One connection (MSGTYPE_CONNECT \"CONNECT \\\"), announced when the first password was accepted, "
+                "One connection (MSGTYPE_CONNECT \"CONNECT \\\"), announced when a repository was first used, "
                 "not again for another repository nor after the forget entry");
+    /* What the log shows besides the background work */
+    EXPECT_TRUE(conn_log_count(L"3:[MainRepo] Password refused by restic\n") >= 1 &&
+                conn_log_count(L"3:[MainRepo] Password accepted\n") >= 1 && conn_log_count(L"3:[SecondRepo] Password accepted\n") == 1,
+                "Passwords refused and accepted are logged (the connection is announced before the first prompt)");
+    EXPECT_TRUE(conn_log_count(L"3:[MainRepo] Snapshot list read: 2 snapshots, ") >= 1,
+                "The snapshot list read in the foreground is logged, also on the very first visit");
+    EXPECT_TRUE(conn_log_count(L" entries listed by restic in ") >= 1, "Folders listed by restic are logged with the time");
+    EXPECT_TRUE(conn_log_count(L"4:\\MainRepo\\snapshots\\") >= 1 && conn_log_count(L"\\readme.txt -> ") >= 1,
+                "Files copied are logged as MSGTYPE_TRANSFERCOMPLETE \"source -> target\"");
     /* Its Disconnect button forgets every password and what was read: the next visits ask again */
     EXPECT_TRUE(p.disconnect_w != NULL && p.disconnect_w(L"\\"), "FsDisconnectW succeeds");
     EXPECT_TRUE(conn_log_count(L"2:DISCONNECT \\\n") == 1 &&
@@ -1235,6 +1244,12 @@ static void test_live_end_to_end_navigation(void) {
     h = p.find_first_w(L"\\Slot01", &fd);
     p.find_close(h);
     EXPECT_TRUE(g_e2e_pwd_prompts == 1, "Oldest session was evicted and requires a new password (no crash, no corruption)");
+    BOOL recycled_logged = FALSE; /* Logged by a worker: the eviction happens with the session lock held */
+    for (int i = 0; i < 100 && !recycled_logged; ++i) {
+        recycled_logged = conn_log_count(L"to make room for another repository's (8 are remembered at most)") >= 1;
+        if (!recycled_logged) Sleep(50);
+    }
+    EXPECT_TRUE(recycled_logged, "A password forgotten to make room is logged");
 
     /* 5. Non-existent repository (\MissingRepo) -> exit code 10 -> ERROR_PATH_NOT_FOUND + dialog */
     g_e2e_pwd_mode    = 1;

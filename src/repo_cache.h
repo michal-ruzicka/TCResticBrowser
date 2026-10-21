@@ -76,6 +76,12 @@ void repo_cache_refresh_tree(
 typedef void (*RepoStatusProc)(const WCHAR* text);
 void repo_cache_set_status_proc(RepoStatusProc proc);
 
+/*
+ * Passes `text` to the status callback from a thread-pool worker, for callers that must not call
+ * it themselves: with a lock held, or from the password timer, whose callbacks DLL unload waits for
+ */
+void repo_cache_report_async(const WCHAR* text);
+
 /* Sets the memory for snapshot listings ([Settings] SnapshotCacheMB); 0 disables them */
 void repo_cache_set_index_limit(size_t bytes);
 
