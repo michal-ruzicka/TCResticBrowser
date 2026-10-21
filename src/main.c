@@ -497,7 +497,9 @@ static BOOL load_config(ResticConfig* cfg) {
     BOOL ok = config_load(cfg);
     apply_password_timeout(cfg->password_timeout_s, cfg->password_timeout_reset_on_use);
     ULONGLONG bytes = (ULONGLONG)cfg->snapshot_cache_mb * 1024ull * 1024ull;
-    repo_cache_set_index_limit(bytes > SIZE_MAX / 2 ? SIZE_MAX / 2 : (size_t)bytes); /* 32-bit: capped */
+    /* 32-bit Total Commander has 2 GiB of address space for everything: at most 512 MiB here */
+    ULONGLONG cap = sizeof(void*) == 4 ? 512ull * 1024ull * 1024ull : (ULONGLONG)(SIZE_MAX / 2);
+    repo_cache_set_index_limit((size_t)(bytes > cap ? cap : bytes));
     InterlockedExchange(&g_ConnectionLogOn, cfg->connection_log);
     return ok;
 }

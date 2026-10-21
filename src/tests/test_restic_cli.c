@@ -602,6 +602,12 @@ static void test_repo_cache_generations(void) {
     repo_cache_clear();
 }
 
+/* RepoPasswordSource for the background loads of the live test */
+static BOOL fixture_password(const WCHAR* alias, WCHAR* out, size_t cap) {
+    (void)alias;
+    return wcscpy_s(out, cap, L"p@ss \"w0rd\" \u00fc %PATH% \u65e5\u672c") == 0;
+}
+
 /* Counts the lines a line consumer receives, checking that they arrive whole and in order */
 typedef struct {
     int lines;
@@ -968,6 +974,31 @@ static void test_live_restic_cli(void) {
     EXPECT_TRUE(restic_list_snapshot_index(restic_bin, repo, password, "--help", NULL, index, &index_status, err,
                                            _countof(err)) == RESTIC_ERR_INVALID_ARG, "Non-hex snapshot ID refused");
     snapshot_index_free(index);
+
+    /* Background loads: one at a time, and the snapshot being read makes room within SnapshotCacheMB */
+    WCHAR live_repo[MAX_PATH];
+    wcscpy_s(live_repo, MAX_PATH, repo);
+    repo_cache_clear();
+    repo_cache_set_index_limit(64u * 1024u * 1024u);
+    repo_cache_load_index(L"Live", live_repo, restic_bin, snap1, fixture_password);
+    repo_cache_load_index(L"Live", live_repo, restic_bin, snap2, fixture_password); /* Not while snap1 loads */
+    EXPECT_TRUE(repo_cache_wait_idle(120000), "First background load finishes");
+    const SnapshotIndex* one = repo_cache_lock_index(L"Live", live_repo, snap1);
+    size_t one_bytes = one ? snapshot_index_memory(one) : 0;
+    if (one) repo_cache_unlock();
+    const SnapshotIndex* two = repo_cache_lock_index(L"Live", live_repo, snap2);
+    if (two) repo_cache_unlock();
+    EXPECT_TRUE(one_bytes > 0 && two == NULL, "Snapshot 1 read; snapshot 2 was not started while it loaded");
+    repo_cache_set_index_limit(one_bytes + one_bytes / 2); /* Room for one listing, not for two */
+    repo_cache_load_index(L"Live", live_repo, restic_bin, snap2, fixture_password);
+    EXPECT_TRUE(repo_cache_wait_idle(120000), "Second background load finishes");
+    one = repo_cache_lock_index(L"Live", live_repo, snap1);
+    if (one) repo_cache_unlock();
+    two = repo_cache_lock_index(L"Live", live_repo, snap2);
+    if (two) repo_cache_unlock();
+    EXPECT_TRUE(one == NULL && two != NULL, "Reading snapshot 2 dropped snapshot 1 to stay within the limit");
+    repo_cache_clear();
+    repo_cache_set_index_limit(512u * 1024u * 1024u);
 
     /* Output larger than the initial 4 KB / typical buffers: 300 NDJSON lines */
     to_wfx_path(data, L"many", wfx, _countof(wfx));

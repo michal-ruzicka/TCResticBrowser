@@ -21,7 +21,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 
-#define MAX_CONCURRENT_LOADS 2
+#define MAX_CONCURRENT_LOADS 1 /* With the listings kept, a second load could double the memory in use */
 #define PROGRESS_REPORT_MS (5u * 1000u) /* How often a running snapshot listing reports progress */
 #define LOAD_RETRY_MS (60u * 1000u)   /* A listing that failed is not tried again sooner */
 #define SESSION_PASSWORD_CHARS 512    /* main.c SESSION_MAX_PASSWORD */
@@ -239,9 +239,17 @@ typedef struct {
 
 static BOOL load_cancelled(void* ctx) {
     LoadCancel* c = (LoadCancel*)ctx;
+    size_t growing = c->index ? snapshot_index_memory(c->index) : 0;
     AcquireSRWLockShared(&g_CacheLock);
     BOOL gone = !generation_valid_locked(c->alias, c->generation);
+    BOOL full = growing && g_IndexBytes + growing > g_IndexLimit;
     ReleaseSRWLockShared(&g_CacheLock);
+    if (!gone && full) {
+        /* The listings kept and the one being read stay within SnapshotCacheMB together */
+        AcquireSRWLockExclusive(&g_CacheLock);
+        make_room_locked(growing, NULL);
+        ReleaseSRWLockExclusive(&g_CacheLock);
+    }
     ULONGLONG now = GetTickCount64();
     if (!gone && c->job && c->index && now - c->reported >= PROGRESS_REPORT_MS) {
         c->reported = now;

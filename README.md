@@ -362,10 +362,11 @@ answers every later folder of that snapshot from memory - about 100 bytes
 per file, 18 MB for those 200,000 files.
 
 `SnapshotCacheMB=` under `[Settings]` sets how much memory these lists may
-take (default 512 MiB, about five million files); the least recently used
-snapshots make room for new ones, a snapshot larger than the whole limit is
-not cached at all - its folders are then simply listed one by one, as
-before, and the diagnostic log says so - and `0` turns the cache off.
+take (default 512 MiB, about five million files; in 32-bit Total Commander
+at most 512 MiB). One snapshot is read at a time, and the least recently
+used snapshots make room while it is read; a snapshot larger than the
+whole limit is not cached at all - its folders are then simply listed one
+by one, as before, and the logs say so - and `0` turns the cache off.
 Nothing is written to disk; unlike passwords, the lists (names, sizes and
 times of files) are not encrypted in memory. They are dropped together with
 the repository's password (timeout, `🗑 Forget N Passwords`, Disconnect
