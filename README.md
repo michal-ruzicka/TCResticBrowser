@@ -208,7 +208,7 @@ documentation.
 | --- | --- |
 | **List Repositories** | Open **Network Neighborhood** (`\\\`) -> **`TCResticBrowser`**. Changes to `TCResticBrowser.ini` take effect immediately on panel refresh (`Ctrl+R` / `F2`). |
 | **Browse Snapshots** | Enter a repository folder (`\<Alias>`). Prompted once for the repository password; once restic accepts it, it is kept in RAM (encrypted) for that alias across both panels for 30 minutes (see [Password Timeout](#password-timeout)). Up to 3 password attempts are allowed. The dialog's title starts with the repository alias (`MyLocalBackup - Restic repository password`), so a password manager that picks an entry by the title of the active window, such as KeePassXC Auto-Type, can offer the right password. |
-| **Connection Log and Disconnect** | Once a repository's password is accepted, Total Commander lists the repository as a connection in its FTP connections toolbar. Its log window shows what the plugin is doing in the background - reading a whole snapshot (with progress every few seconds) or re-reading the snapshot list - and **Disconnect** forgets that repository's password and everything read from it. See [Connection Log](#connection-log). |
+| **Connection Log** | Optional (`ConnectionLog=yes`): Total Commander's FTP connections toolbar, whose log window shows what the plugin is doing in the background - reading a whole snapshot (with progress every few seconds) or re-reading the snapshot list - and whose **Disconnect** forgets all passwords and everything read with them. See [Connection Log](#connection-log). |
 | **Forget Passwords** | While passwords are remembered, the plugin's root folder starts with **`🗑 Forget N Passwords`** (N is their number; `🗑 Forget 1 Password` for one). Press **Enter** on it to wipe them all at once; a message says how many were forgotten, the root folder is then re-read without the entry, and the next access asks again. The entry is not removed by itself when the passwords expire; it disappears the next time the root folder is read (`Ctrl+R`). |
 | **Explore Files** | Enter a snapshot through `snapshots`, `ids`, `hosts` or `tags` (or `latest`) and navigate the backed-up directory tree. The snapshot list is read once and then shown at once from memory; when it is older than a minute (`SnapshotListRefreshSeconds=`), as `restic mount` would re-read it, restic reads a new one in the background and the next listing (`Ctrl+R`) shows any new snapshots (see [Snapshot List Refresh](#snapshot-list-refresh)). |
 | **View File (`F3` / `Ctrl+Q`)** | Press **`F3`** (Lister) or **`Ctrl+Q`** (Quick View) on any file to stream it to a temporary location and view its contents. |
@@ -235,16 +235,16 @@ After the password timeout (30 minutes by default) or `🗑 Forget N
 Passwords`, everything read from that repository is dropped, so the next
 visit starts from the top of the table again. Total Commander shows its
 progress dialog, with `ESC` to cancel, only for operations that take more
-than a few seconds. The [connection log](#connection-log) shows the background
-reads as they happen, and the [diagnostic log](#logging) records every restic
+than a few seconds. The optional [connection log](#connection-log) shows the
+background reads as they happen, and the [diagnostic log](#logging) records every restic
 run with its duration.
 
 ### Connection Log
 
-The plugin announces every repository whose password restic accepted as a
-connection, as an FTP plugin announces a server. Total Commander then shows
-its FTP connections toolbar while you are in the repository, with two
-buttons that matter here:
+With `ConnectionLog=yes` under `[Settings]` the plugin announces itself as a
+connection once a repository's password is accepted, as an FTP plugin
+announces a server, and Total Commander shows its FTP connections toolbar
+with two buttons that matter here:
 
 - **The log window** shows the work the plugin does in the background:
 
@@ -257,20 +257,22 @@ buttons that matter here:
 
   There is no percentage: restic does not tell in advance how many files a
   snapshot holds.
-- **Disconnect** forgets the repository's password and everything read from
-  it, like `🗑 Forget N Passwords` does for all repositories; the next visit
-  asks for the password again.
+- **Disconnect** forgets all remembered passwords and everything read with
+  them, like `🗑 Forget N Passwords`, and closes the toolbar; Total
+  Commander then switches the panel back to where it was before, as it does
+  for FTP.
+
+There is one connection for all repositories, so one Disconnect is always
+enough. Only Disconnect closes it: `🗑 Forget N Passwords` or a password
+timeout forget the passwords but cannot close Total Commander's toolbar, so
+it stays (the log says so) until you press Disconnect or enter a
+repository again, which reuses it. That is why the toolbar is off by
+default.
 
 The toolbar is Total Commander's own FTP toolbar, so it says *FTP* and has
 a transfer mode list; the mode has no effect here: files always come out
 of the snapshot byte for byte, whatever it says, and the plugin changes no
 setting of Total Commander.
-
-`🗑 Forget N Passwords` ends every connection the way Disconnect ends one
-(the log says `DISCONNECT`). Otherwise a connection stays listed until you
-disconnect it, also after its password timed out: the plugin cannot remove
-it from the toolbar by itself. Entering
-the repository again then just asks for the password.
 
 ### File Names from Other Systems
 

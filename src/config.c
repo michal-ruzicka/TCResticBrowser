@@ -617,6 +617,7 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
     BOOL cache_seen = FALSE;
     BOOL format_seen = FALSE;
     BOOL refresh_seen = FALSE;
+    BOOL connection_log_seen = FALSE;
     IniReader reader = {ini_text, NULL};
     WCHAR *alias = NULL, *target = NULL;
     while (ini_next_entry(&reader, &alias, &target)) {
@@ -649,6 +650,12 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
                 }
             }
             format_seen = TRUE;
+            continue;
+        }
+        if (ini_in_section(&reader, L"Settings") && _wcsicmp(alias, L"ConnectionLog") == 0) {
+            /* First occurrence wins; anything but a recognised "yes" keeps the default (no) */
+            if (!connection_log_seen) out_config->connection_log = parse_yes(target);
+            connection_log_seen = TRUE;
             continue;
         }
         if (ini_in_section(&reader, L"Settings") && _wcsicmp(alias, L"SnapshotListRefreshSeconds") == 0) {

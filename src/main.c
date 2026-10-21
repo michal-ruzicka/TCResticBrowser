@@ -49,6 +49,10 @@ static tProgressProcW g_ProgressProc = NULL;
 static tLogProcW      g_LogProc      = NULL;
 static tRequestProcW  g_RequestProc  = NULL;
 
+/* Total Commander's connection log (see connection_announce) */
+static volatile LONG g_ConnectionLogOn = FALSE; /* [Settings] ConnectionLog, applied by load_config */
+static volatile LONG g_Connected       = FALSE; /* The connection was announced and not disconnected */
+
 /*
  * In-memory credential sessions, one slot per repository alias (two panels can browse two
  * repositories alternately without being prompted again). Guarded by an SRW lock because Total
@@ -394,88 +398,36 @@ static void session_forget(const WCHAR* alias, ULONGLONG generation) {
     ReleaseSRWLockExclusive(&g_SessionLock);
 }
 
-/* Wipes the cached password of `alias`, whatever its generation, and everything read with it */
-static void session_forget_alias(const WCHAR* alias) {
-    AcquireSRWLockExclusive(&g_SessionLock);
-    SessionSlot* slot = session_find_locked(alias);
-    if (slot) session_wipe_slot_locked(slot);
-    ReleaseSRWLockExclusive(&g_SessionLock);
-    repo_cache_forget(alias); /* Also when the password had already expired */
-}
 
 /*
- * Total Commander's connection log. A repository whose password restic accepted is announced as a
- * connection (LogProc MSGTYPE_CONNECT, "CONNECT \<alias>"): Total Commander then shows its FTP
- * connections toolbar with a log window, where the background work of the plugin is reported
- * (MSGTYPE_DETAILS), and a Disconnect button, which calls FsDisconnectW. A connection is announced
- * once, until FsDisconnectW or FsInitW: the WFX API cannot take a connection back, so a password
- * that times out leaves it listed, and the next password typed in reuses it.
+ * Total Commander's connection log ([Settings] ConnectionLog=yes). Once restic accepted a typed-in
+ * password, the plugin announces one connection for all its repositories (LogProc MSGTYPE_CONNECT,
+ * "CONNECT \\", the WFX SDK's root "for a single possible connection"): Total Commander then shows
+ * its FTP connections toolbar with a log window, where the background work is reported
+ * (MSGTYPE_DETAILS), and a Disconnect button, which calls FsDisconnectW.
+ *
+ * Only Total Commander can end a connection, one per click of Disconnect, each time switching the
+ * panel back to where it was before; logging MSGTYPE_DISCONNECT alone changes nothing. A single
+ * connection therefore needs one click, whatever the number of repositories in use, and it is
+ * announced only once until FsDisconnectW or FsInitW: a password that times out, and the forget
+ * entry, leave it listed, and the next accepted password reuses it.
  *
  * LogProc is never called with a lock of the plugin held, nor from the password timer, whose
  * callbacks DLL unload waits for.
  */
-#define MAX_CONNECTIONS 64
-static WCHAR   g_Connections[MAX_CONNECTIONS][MAX_PATH];
-static size_t  g_ConnectionCount = 0;
-static SRWLOCK g_ConnectionLock  = SRWLOCK_INIT;
 
-/* Removes `alias` from the announced connections; TRUE if it was one */
-static BOOL connection_remove(const WCHAR* alias) {
-    BOOL found = FALSE;
-    AcquireSRWLockExclusive(&g_ConnectionLock);
-    for (size_t i = 0; i < g_ConnectionCount; ++i) {
-        if (_wcsicmp(g_Connections[i], alias) == 0) {
-            if (i + 1 < g_ConnectionCount) wcscpy_s(g_Connections[i], MAX_PATH, g_Connections[g_ConnectionCount - 1]);
-            g_ConnectionCount--;
-            found = TRUE;
-            break;
-        }
-    }
-    ReleaseSRWLockExclusive(&g_ConnectionLock);
-    return found;
-}
-
-/* Announces `alias` as a connection unless it already is one */
-static void connection_announce(const WCHAR* alias) {
-    BOOL is_new = TRUE;
-    AcquireSRWLockExclusive(&g_ConnectionLock);
-    for (size_t i = 0; i < g_ConnectionCount && is_new; ++i) {
-        if (_wcsicmp(g_Connections[i], alias) == 0) is_new = FALSE;
-    }
-    if (is_new && (g_ConnectionCount == MAX_CONNECTIONS || wcslen(alias) >= MAX_PATH)) is_new = FALSE;
-    if (is_new) wcscpy_s(g_Connections[g_ConnectionCount++], MAX_PATH, alias);
-    ReleaseSRWLockExclusive(&g_ConnectionLock);
-    if (!is_new || !g_LogProc) return;
-    WCHAR text[MAX_PATH + 16];
-    _snwprintf_s(text, _countof(text), _TRUNCATE, L"CONNECT \\%ls", alias);
+/* Announces the connection unless ConnectionLog is off or it already is announced */
+static void connection_announce(void) {
+    if (!InterlockedCompareExchange(&g_ConnectionLogOn, 0, 0) || !g_LogProc) return;
+    if (InterlockedExchange(&g_Connected, TRUE)) return;
+    WCHAR text[] = L"CONNECT \\";
     g_LogProc(g_PluginNr, MSGTYPE_CONNECT, text);
 }
 
-/*
- * Logs MSGTYPE_DISCONNECT for every announced connection and forgets them, so the next accepted
- * password announces its repository again: the forget entry ends all connections the way the
- * Disconnect button ends one. (Whether Total Commander then closes its toolbar is up to it.)
- */
-static void connection_close_all(void) {
-    /* Copied out, because LogProc is never called with the lock held */
-    WCHAR(*closing)[MAX_PATH] = (WCHAR(*)[MAX_PATH])malloc(sizeof(g_Connections));
-    AcquireSRWLockExclusive(&g_ConnectionLock);
-    size_t n = closing ? g_ConnectionCount : 0;
-    for (size_t i = 0; i < n; ++i) wcscpy_s(closing[i], MAX_PATH, g_Connections[i]);
-    g_ConnectionCount = 0;
-    ReleaseSRWLockExclusive(&g_ConnectionLock);
-    for (size_t i = 0; i < n && g_LogProc; ++i) {
-        WCHAR text[MAX_PATH + 16];
-        _snwprintf_s(text, _countof(text), _TRUNCATE, L"DISCONNECT \\%ls", closing[i]);
-        g_LogProc(g_PluginNr, MSGTYPE_DISCONNECT, text);
-    }
-    free(closing);
-}
-
-/* RepoStatusProc: background work reported in the connection log */
+/* RepoStatusProc: background work reported in the connection log, while there is one */
 static void report_status(const WCHAR* text) {
     tLogProcW log_proc = g_LogProc;
-    if (log_proc) log_proc(g_PluginNr, MSGTYPE_DETAILS, (WCHAR*)text);
+    if (log_proc && InterlockedCompareExchange(&g_Connected, 0, 0)) log_proc(g_PluginNr, MSGTYPE_DETAILS, (WCHAR*)text);
 }
 
 /* TRUE for a root entry name that is the forget command (also used to reserve such aliases) */
@@ -546,6 +498,7 @@ static BOOL load_config(ResticConfig* cfg) {
     apply_password_timeout(cfg->password_timeout_s, cfg->password_timeout_reset_on_use);
     ULONGLONG bytes = (ULONGLONG)cfg->snapshot_cache_mb * 1024ull * 1024ull;
     repo_cache_set_index_limit(bytes > SIZE_MAX / 2 ? SIZE_MAX / 2 : (size_t)bytes); /* 32-bit: capped */
+    InterlockedExchange(&g_ConnectionLogOn, cfg->connection_log);
     return ok;
 }
 
@@ -896,7 +849,7 @@ static ResticResult run_with_password(
             session_touch(repo->alias, cached_generation);
         } else {
             session_put(repo->alias, password);
-            connection_announce(repo->alias);
+            connection_announce();
         }
     }
     SecureZeroMemory(password, sizeof(password));
@@ -1140,9 +1093,7 @@ int __stdcall FsInitW(
     tRequestProcW pRequestProcW
 ) {
     clear_password_session();
-    AcquireSRWLockExclusive(&g_ConnectionLock);
-    g_ConnectionCount = 0; /* A new session of Total Commander knows of no connection */
-    ReleaseSRWLockExclusive(&g_ConnectionLock);
+    InterlockedExchange(&g_Connected, FALSE); /* A new session of Total Commander knows of no connection */
     g_PluginNr     = PluginNr;
     g_ProgressProc = pProgressProcW;
     g_LogProc      = pLogProcW;
@@ -1251,8 +1202,7 @@ int __stdcall FsExecuteFileW(HWND MainWin, WCHAR* RemoteName, WCHAR* Verb) {
         unsigned n = cached_password_count();
         clear_password_session();
         log_write(L"Forget All Passwords: %u cached password(s) wiped", n);
-        report_status(L"All remembered passwords and cached listings forgotten");
-        connection_close_all();
+        report_status(L"All remembered passwords and cached listings forgotten; Disconnect closes this toolbar");
         if (g_RequestProc) {
             WCHAR msg[128], title[MAX_PATH], unused[4] = {0};
             if (n == 0) {
@@ -1281,23 +1231,20 @@ int __stdcall FsExecuteFileW(HWND MainWin, WCHAR* RemoteName, WCHAR* Verb) {
 }
 
 /*
- * The Disconnect button of Total Commander's connections toolbar, for a repository announced by
- * connection_announce: forgets its password and everything read from it, as the forget entry does
- * for all repositories. Total Commander then returns to the plugin's root.
+ * The Disconnect button of Total Commander's connections toolbar (the connection announced by
+ * connection_announce): forgets every password and everything read with them, as the forget entry
+ * does. Total Commander then switches the panel back to where it was before the connection.
  */
 BOOL __stdcall FsDisconnectW(WCHAR* DisconnectRoot) {
-    if (!DisconnectRoot) return TRUE;
-    const WCHAR* alias = DisconnectRoot;
-    while (*alias == L'\\') alias++;
-    if (*alias == L'\0' || wcschr(alias, L'\\') != NULL) return TRUE; /* Not one of ours: nothing open */
-    connection_remove(alias);
-    session_forget_alias(alias);
-    log_write(L"Disconnect %ls: password and cached listings forgotten", DisconnectRoot);
+    if (!InterlockedExchange(&g_Connected, FALSE)) return TRUE; /* Nothing announced: nothing open */
+    unsigned n = cached_password_count();
+    clear_password_session();
+    log_write(L"Disconnect %ls: %u cached password(s) and the cached listings forgotten",
+              DisconnectRoot ? DisconnectRoot : L"(null)", n);
     if (g_LogProc) {
-        WCHAR text[MAX_PATH + 64];
-        _snwprintf_s(text, _countof(text), _TRUNCATE, L"[%ls] Password and cached listings forgotten", alias);
-        g_LogProc(g_PluginNr, MSGTYPE_DETAILS, text);
-        _snwprintf_s(text, _countof(text), _TRUNCATE, L"DISCONNECT \\%ls", alias);
+        WCHAR details[] = L"All remembered passwords and cached listings forgotten";
+        WCHAR text[] = L"DISCONNECT \\";
+        g_LogProc(g_PluginNr, MSGTYPE_DETAILS, details);
         g_LogProc(g_PluginNr, MSGTYPE_DISCONNECT, text);
     }
     return TRUE;

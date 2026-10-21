@@ -937,12 +937,14 @@ static void test_e2e_snapshot_cache(const Plugin* p, const WCHAR* dir, const WCH
     WCHAR forget[] = L"\\\U0001F5D1 Forget 1 Password", open_verb[] = L"open";
     g_e2e_msg_dialogs = 0;
     EXPECT_TRUE(p->execute_w(NULL, forget, open_verb) == FS_EXEC_SYMLINK, "Forget the passwords");
-    EXPECT_TRUE(conn_log_count(L"2:DISCONNECT \\MainRepo\n") == 1, "...which ends the repository's connection");
+    EXPECT_TRUE(conn_log_count(L"3:All remembered passwords and cached listings forgotten; Disconnect closes this toolbar") == 1 &&
+                conn_log_count(L"2:DISCONNECT") == 0,
+                "...which the connection log says, pointing to Disconnect: the plugin cannot close the connection itself");
     g_e2e_pwd_mode = 1;
     EXPECT_TRUE(list_names(p, data_path, names_again, _countof(names_again)) && wcscmp(names, names_again) == 0,
                 "Listed again after a password prompt, with the same entries");
     EXPECT_TRUE(g_e2e_pwd_prompts == 1 && count_restic_runs(log_file) > runs, "Asked for the password and ran restic");
-    EXPECT_TRUE(conn_log_count(L"1:CONNECT \\MainRepo\n") == 2, "...and connected again");
+    EXPECT_TRUE(conn_log_count(L"1:CONNECT \\\n") == 1, "...on the connection still listed, not a new one");
     g_e2e_pwd_prompts = 0;
     g_e2e_msg_dialogs = 0;
 }
@@ -1005,7 +1007,7 @@ static void test_live_end_to_end_navigation(void) {
     int ini_len = snprintf(
         ini_text,
         sizeof(ini_text),
-        "[Settings]\r\nResticPath=%s\r\nSnapshotTimeFormat=YYYY-MM-DDThh.mm.ss\r\n"
+        "[Settings]\r\nResticPath=%s\r\nSnapshotTimeFormat=YYYY-MM-DDThh.mm.ss\r\nConnectionLog=yes\r\n"
         "[Logging]\r\nLogPath=%s\\log dir\\e2e.log\r\n"
         "[Repositories]\r\nMainRepo=%s\r\nSecondRepo=%s\r\nThirdRepo=%s\r\n"
         "ExtractRepo=%s\r\nHintRepo=%s\r\n"
@@ -1164,28 +1166,25 @@ static void test_live_end_to_end_navigation(void) {
     p.find_close(h);
     EXPECT_TRUE(g_e2e_pwd_prompts == 1, "Alternating between two panels' repositories never re-prompts");
 
-    /* Each repository is a connection of Total Commander's connections toolbar, announced once */
-    EXPECT_TRUE(conn_log_count(L"1:CONNECT \\MainRepo\n") == 2 && conn_log_count(L"1:CONNECT \\SecondRepo\n") == 1,
-                "A repository is announced as a connection (MSGTYPE_CONNECT) once restic accepted its password "
-                "(MainRepo twice: the forget entry disconnected it in between)");
-    /* Its Disconnect button forgets the password and what was read: the next visit asks again */
-    EXPECT_TRUE(p.disconnect_w != NULL && p.disconnect_w(L"\\SecondRepo"), "FsDisconnectW succeeds");
-    EXPECT_TRUE(conn_log_count(L"2:DISCONNECT \\SecondRepo\n") == 1 &&
-                conn_log_count(L"3:[SecondRepo] Password and cached listings forgotten") == 1,
+    /* ConnectionLog=yes: one connection for all repositories, announced once */
+    EXPECT_TRUE(conn_log_count(L"1:CONNECT \\\n") == 1 && conn_log_count(L"1:CONNECT") == 1,
+                "One connection (MSGTYPE_CONNECT \"CONNECT \\\"), announced when the first password was accepted, "
+                "not again for another repository nor after the forget entry");
+    /* Its Disconnect button forgets every password and what was read: the next visits ask again */
+    EXPECT_TRUE(p.disconnect_w != NULL && p.disconnect_w(L"\\"), "FsDisconnectW succeeds");
+    EXPECT_TRUE(conn_log_count(L"2:DISCONNECT \\\n") == 1 &&
+                conn_log_count(L"3:All remembered passwords and cached listings forgotten\n") == 1,
                 "Disconnect is logged (MSGTYPE_DISCONNECT)");
+    EXPECT_TRUE(p.disconnect_w(L"\\") && p.disconnect_w(NULL) && conn_log_count(L"2:DISCONNECT") == 1,
+                "Disconnecting again succeeds and does nothing");
     h = p.find_first_w(L"\\SecondRepo", &fd);
     EXPECT_TRUE(h != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 2, "After Disconnect the password is asked again");
     p.find_close(h);
-    EXPECT_TRUE(conn_log_count(L"1:CONNECT \\SecondRepo\n") == 2, "...and the repository connected again");
+    EXPECT_TRUE(conn_log_count(L"1:CONNECT \\\n") == 2, "...and the plugin connected again");
     h = p.find_first_w(L"\\MainRepo", &fd);
-    EXPECT_TRUE(h != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 2, "Other repositories stay connected");
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 3 && conn_log_count(L"1:CONNECT \\\n") == 2,
+                "Disconnect forgot every repository's password; the connection is not announced twice");
     p.find_close(h);
-    EXPECT_TRUE(p.disconnect_w(L"\\NoSuchRepo") && p.disconnect_w(L"\\") && p.disconnect_w(NULL),
-                "Disconnecting what is not connected succeeds and does nothing");
-    h = p.find_first_w(L"\\MainRepo", &fd);
-    EXPECT_TRUE(h != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 2, "...MainRepo still needs no password");
-    p.find_close(h);
-
     /* 4. Exhausting all 3 password attempts returns ERROR_ACCESS_DENIED and shows an error dialog */
     g_e2e_pwd_mode    = 2;
     g_e2e_pwd_prompts = 0;
@@ -1506,6 +1505,7 @@ static void test_live_paths_with_spaces(void) {
 
     Plugin p;
     EXPECT_TRUE(load_plugin_copy(dir, &p), "Load plugin copy from a folder with spaces");
+    int connects_before = conn_log_count(L"1:CONNECT"); /* ConnectionLog is off by default: none here */
     EXPECT_TRUE(p.init_w(43, (void*)e2e_progress_proc, (void*)e2e_log_proc, (void*)e2e_request_proc) == 0,
                 "Register Total Commander callbacks (spaces)");
 
@@ -1597,6 +1597,8 @@ static void test_live_paths_with_spaces(void) {
     EXPECT_TRUE(reread, "Meanwhile restic re-read it in the background");
     count_entries(&p, L"\\Fresh\\snapshots", &after);
     EXPECT_TRUE(after == 6 && g_e2e_pwd_prompts == 1, "The next listing shows the new snapshot, without a prompt");
+    EXPECT_TRUE(conn_log_count(L"1:CONNECT") == connects_before && conn_log_count(L"[Fresh]") == 0,
+                "Without ConnectionLog=yes no connection is announced and nothing goes to its log");
 
     unload_plugin_copy(&p, dir);
     DeleteFileW(ini);

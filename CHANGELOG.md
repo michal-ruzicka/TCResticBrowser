@@ -27,12 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   folders never waits for restic again. The snapshot folders of version 2.0
   (`<time>_[<short id>]`) are gone, so history and hotlist entries that
   point into them need to be recreated.
-- **Repositories appear in Total Commander's FTP connections toolbar.**
-  Once a repository's password is accepted, it is announced as a
-  connection: the toolbar's log window shows the background work (reading
-  a whole snapshot, with progress every few seconds, and re-reading the
-  snapshot list), and its Disconnect button forgets that repository's
-  password and cached listings.
+- **Optional connection log.** With the new `ConnectionLog=yes`, the plugin
+  appears in Total Commander's FTP connections toolbar once a password is
+  accepted: its log window shows the background work (reading a whole
+  snapshot, with progress every few seconds, and re-reading the snapshot
+  list), and its Disconnect button forgets all passwords and cached
+  listings. Off by default, because only Disconnect can close the toolbar
+  again; `🗑 Forget N Passwords` cannot.
 - **The password dialog names the repository in its title**
   (`<alias> - Restic repository password`), so password managers that
   choose an entry by window title, such as KeePassXC Auto-Type, can fill
