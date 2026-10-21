@@ -227,7 +227,6 @@ upstream 1.x line.
   only if no file or link of that name exists; otherwise another name is
   used.
 
-
 ## [v1.0.0] – 2026-10-18
 
 Upstream release of [Restic WFX Plugin](https://github.com/goldfix/Restic_WFX_Plugin)
