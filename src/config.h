@@ -9,6 +9,7 @@
 #define CONFIG_DEFAULT_ROOT_NAME  L"TCResticBrowser"  /* Network Neighborhood name without [Settings] RootName */
 #define CONFIG_DEFAULT_PASSWORD_TIMEOUT_S 1800u  /* [Settings] PasswordTimeoutSeconds default: 30 min */
 #define CONFIG_MAX_PATH           1024
+#define CONFIG_ERROR_CHARS        512   /* ResticConfig.restic_path_error */
 #define CONFIG_MAX_INI_BYTES      (4 * 1024 * 1024)  /* A larger TCResticBrowser.ini is not read */
 
 /**
@@ -24,7 +25,8 @@ typedef struct {
  */
 typedef struct {
     WCHAR ini_path[CONFIG_MAX_PATH];     /* Full path to the active TCResticBrowser.ini */
-    WCHAR restic_path[CONFIG_MAX_PATH];  /* Resolved path or command for restic.exe */
+    WCHAR restic_path[CONFIG_MAX_PATH];  /* Resolved full path of restic.exe; bare name if not found */
+    WCHAR restic_path_error[CONFIG_ERROR_CHARS]; /* Why restic.exe was not found; empty if it was */
     WCHAR root_name[MAX_PATH];           /* [Settings] RootName, or CONFIG_DEFAULT_ROOT_NAME */
     WCHAR log_path[CONFIG_MAX_PATH];     /* [Logging] LogPath as written (unexpanded); empty = off */
     DWORD password_timeout_s;            /* [Settings] PasswordTimeoutSeconds; 0 = keep until exit */
@@ -65,14 +67,29 @@ BOOL config_get_user_ini_path(WCHAR* out_path, size_t out_capacity);
 BOOL config_resolve_ini_path(WCHAR* out_path, size_t out_capacity);
 
 /**
- * Resolves the Restic CLI executable path in priority order:
- * 1. [Settings] ResticPath in ini_path (if set to an existing file or custom command).
- * 2. <plugin_dir>\restic.exe (if present in the plugin directory).
- * 3. Binary located in the system PATH environment variable (fallback to "restic.exe").
+ * Resolves the full path of the Restic CLI executable.
  *
- * Returns TRUE if the binary was verified on disk or in PATH, FALSE if falling back to bare "restic.exe".
+ * A non-empty [Settings] ResticPath in ini_path (first occurrence) is used or nothing is: a full
+ * path must name an existing file, a relative one ("tools\restic.exe") is taken from the plugin
+ * directory, and a bare name ("restic-custom", ".exe" added when there is no extension) is looked up
+ * in the plugin directory, then in PATH. Drive- or root-relative values ("C:restic.exe",
+ * "\tools\restic.exe") and over-long ones are refused. Nothing else is tried when the configured
+ * binary is missing, so the user never runs a different restic.exe without knowing it.
+ *
+ * Without ResticPath: <plugin_dir>\restic.exe, then restic.exe in the absolute PATH entries. The
+ * current directory is never searched.
+ *
+ * Returns TRUE with the full path in out_path. Otherwise out_path receives the bare "restic.exe"
+ * (which restic_exec_command refuses to run) and `error` (optional) a message for the user that
+ * names the setting, the INI file and the path that was tried.
  */
-BOOL config_resolve_restic_path(const WCHAR* ini_path, WCHAR* out_path, size_t out_capacity);
+BOOL config_resolve_restic_path(
+    const WCHAR* ini_path,
+    WCHAR* out_path,
+    size_t out_capacity,
+    WCHAR* error,
+    size_t error_capacity
+);
 
 /*
  * TRUE for "X:\..." and "\\server\..." (also "\\?\..."): a path that does not depend on the

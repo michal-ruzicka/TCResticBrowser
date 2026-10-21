@@ -70,6 +70,17 @@ static BOOL make_temp_dir(const WCHAR* prefix, WCHAR* out_dir, size_t capacity) 
     return TRUE;
 }
 
+/* Helper: reads the current value of an environment variable into a heap string (or NULL) */
+static WCHAR* dup_env(const WCHAR* name) {
+    DWORD need = GetEnvironmentVariableW(name, NULL, 0);
+    WCHAR* buf = (need > 0) ? (WCHAR*)malloc(need * sizeof(WCHAR)) : NULL;
+    if (buf && GetEnvironmentVariableW(name, buf, need) >= need) {
+        free(buf);
+        buf = NULL;
+    }
+    return buf;
+}
+
 /* Points %APPDATA% at `appdata_dir` and returns its GHISLER subdirectory in `out_user_dir` */
 static void use_temp_appdata(const WCHAR* appdata_dir, WCHAR* out_user_dir, size_t capacity) {
     SetEnvironmentVariableW(L"APPDATA", appdata_dir);
@@ -181,15 +192,26 @@ static void test_restic_binary_resolution(void) {
     WCHAR ini_path[MAX_PATH]       = {0};
     WCHAR local_restic[MAX_PATH]   = {0};
     WCHAR custom_restic[MAX_PATH]  = {0};
+    WCHAR tools_dir[MAX_PATH]      = {0};
+    WCHAR tools_restic[MAX_PATH]   = {0};
+    WCHAR bare_restic[MAX_PATH]    = {0};
     swprintf_s(ini_path, MAX_PATH, L"%ls\\%ls", plugin_dir, CONFIG_INI_FILENAME);
     swprintf_s(local_restic, MAX_PATH, L"%ls\\restic.exe", plugin_dir);
     swprintf_s(custom_restic, MAX_PATH, L"%ls\\my_restic.exe", custom_dir);
+    swprintf_s(tools_dir, MAX_PATH, L"%ls\\tools", plugin_dir);
+    swprintf_s(tools_restic, MAX_PATH, L"%ls\\restic.exe", tools_dir);
+    swprintf_s(bare_restic, MAX_PATH, L"%ls\\restic-custom.exe", plugin_dir);
 
     /* Create dummy binaries */
     write_text_file(local_restic, "MZ_DUMMY_LOCAL");
     write_text_file(custom_restic, "MZ_DUMMY_CUSTOM");
+    CreateDirectoryW(tools_dir, NULL);
+    write_text_file(tools_restic, "MZ_DUMMY_TOOLS");
+    write_text_file(bare_restic, "MZ_DUMMY_BARE");
 
     config_set_plugin_dir(plugin_dir);
+    WCHAR* old_path = dup_env(L"PATH");
+    SetEnvironmentVariableW(L"PATH", L"C:\\no_such_dir_restic_bin"); /* Only the plugin folder counts */
 
     /* Priority 1: Explicit custom path in [Settings] ResticPath */
     char ini_content[2048];
@@ -198,22 +220,71 @@ static void test_restic_binary_resolution(void) {
     write_text_file(ini_path, ini_content);
 
     WCHAR resolved_bin[MAX_PATH] = {0};
-    BOOL ok = config_resolve_restic_path(ini_path, resolved_bin, MAX_PATH);
-    EXPECT_TRUE(ok, "Custom ResticPath should resolve");
+    WCHAR error[CONFIG_ERROR_CHARS] = {0};
+    BOOL ok = config_resolve_restic_path(ini_path, resolved_bin, MAX_PATH, error, _countof(error));
+    EXPECT_TRUE(ok && error[0] == L'\0', "Custom ResticPath should resolve without an error");
     EXPECT_WSTR_EQ(resolved_bin, custom_restic, "Explicit ResticPath takes highest priority");
 
-    /* Priority 2: ResticPath is default/empty -> picks <plugin_dir>\restic.exe */
-    write_text_file(ini_path, "[Settings]\r\nResticPath=restic.exe\r\n");
-    ok = config_resolve_restic_path(ini_path, resolved_bin, MAX_PATH);
-    EXPECT_TRUE(ok, "Local plugin_dir restic.exe should resolve");
-    EXPECT_WSTR_EQ(resolved_bin, local_restic, "Should pick <plugin_dir>\\restic.exe");
+    /* Without ResticPath (missing or empty) -> <plugin_dir>\restic.exe */
+    static const char* const unset[] = {"[Settings]\r\n", "[Settings]\r\nResticPath=\r\n",
+                                        "[Settings]\r\nResticPath=restic.exe\r\n"};
+    for (size_t i = 0; i < _countof(unset); ++i) {
+        write_text_file(ini_path, unset[i]);
+        ok = config_resolve_restic_path(ini_path, resolved_bin, MAX_PATH, error, _countof(error));
+        EXPECT_TRUE(ok, "Local plugin_dir restic.exe should resolve");
+        EXPECT_WSTR_EQ(resolved_bin, local_restic, "Should pick <plugin_dir>\\restic.exe");
+    }
 
-    /* Priority 3: Remove <plugin_dir>\restic.exe -> falls back to PATH or bare restic.exe */
+    /* A relative path is taken from the plugin folder; a bare name gets ".exe" there as in PATH */
+    write_text_file(ini_path, "[Settings]\r\nResticPath=tools\\restic.exe\r\n");
+    ok = config_resolve_restic_path(ini_path, resolved_bin, MAX_PATH, error, _countof(error));
+    EXPECT_TRUE(ok, "Relative ResticPath resolves against the plugin folder");
+    EXPECT_WSTR_EQ(resolved_bin, tools_restic, "Relative ResticPath -> <plugin_dir>\\tools\\restic.exe");
+    write_text_file(ini_path, "[Settings]\r\nResticPath=restic-custom\r\n");
+    ok = config_resolve_restic_path(ini_path, resolved_bin, MAX_PATH, error, _countof(error));
+    EXPECT_TRUE(ok, "Bare ResticPath without extension resolves in the plugin folder");
+    EXPECT_WSTR_EQ(resolved_bin, bare_restic, "Bare ResticPath -> <plugin_dir>\\restic-custom.exe");
+
+    /* A configured binary that is missing never falls back to <plugin_dir>\restic.exe */
+    static const struct {
+        const char* ini;
+        const WCHAR* in_error;
+        const char* msg;
+    } missing[] = {
+        {"[Settings]\r\nResticPath=C:\\no_such_dir_restic_bin\\restic.exe\r\n",
+         L"ResticPath=C:\\no_such_dir_restic_bin\\restic.exe", "Missing absolute ResticPath fails"},
+        {"[Settings]\r\nResticPath=\"C:\\no such dir\\restic.exe\"\r\n",
+         L"does not exist or is not a file", "Missing quoted ResticPath fails"},
+        {"[Settings]\r\nResticPath=tools\\no_restic.exe\r\n",
+         L"\\tools\\no_restic.exe", "Missing relative ResticPath fails and names the resolved path"},
+        {"[Settings]\r\nResticPath=tools\r\n", L"ResticPath=tools", "A folder is not a binary"},
+        {"[Settings]\r\nResticPath=tools\\\r\n", L"is not a file", "A folder path is not a binary"},
+        {"[Settings]\r\nResticPath=restic-old\r\n", L"neither in the plugin folder nor in PATH",
+         "Missing bare ResticPath fails"},
+    };
+    for (size_t i = 0; i < _countof(missing); ++i) {
+        write_text_file(ini_path, missing[i].ini);
+        ok = config_resolve_restic_path(ini_path, resolved_bin, MAX_PATH, error, _countof(error));
+        EXPECT_TRUE(!ok && wcscmp(resolved_bin, L"restic.exe") == 0, missing[i].msg);
+        EXPECT_TRUE(wcsstr(error, missing[i].in_error) != NULL && wcsstr(error, ini_path) != NULL,
+                    "The error names the setting, the path tried and the INI file");
+    }
+    ok = config_resolve_restic_path(ini_path, resolved_bin, MAX_PATH, NULL, 0);
+    EXPECT_TRUE(!ok, "The error buffer is optional");
+
+    /* Nothing configured and nothing found: the default message */
     DeleteFileW(local_restic);
-    config_resolve_restic_path(ini_path, resolved_bin, MAX_PATH);
-    EXPECT_TRUE(resolved_bin[0] != L'\0', "Fallback restic binary string must not be empty");
+    write_text_file(ini_path, "[Settings]\r\n");
+    ok = config_resolve_restic_path(ini_path, resolved_bin, MAX_PATH, error, _countof(error));
+    EXPECT_TRUE(!ok && wcscmp(resolved_bin, L"restic.exe") == 0, "No restic.exe anywhere -> bare name");
+    EXPECT_TRUE(wcsstr(error, L"restic.exe not found") != NULL, "Default error message when nothing is found");
 
+    SetEnvironmentVariableW(L"PATH", old_path);
+    free(old_path);
     DeleteFileW(custom_restic);
+    DeleteFileW(tools_restic);
+    DeleteFileW(bare_restic);
+    RemoveDirectoryW(tools_dir);
     DeleteFileW(ini_path);
     RemoveDirectoryW(plugin_dir);
     RemoveDirectoryW(custom_dir);
@@ -486,17 +557,6 @@ static void test_root_name(void) {
     RemoveDirectoryW(plugin_dir);
 }
 
-/* Helper: reads the current value of an environment variable into a heap string (or NULL) */
-static WCHAR* dup_env(const WCHAR* name) {
-    DWORD need = GetEnvironmentVariableW(name, NULL, 0);
-    WCHAR* buf = (need > 0) ? (WCHAR*)malloc(need * sizeof(WCHAR)) : NULL;
-    if (buf && GetEnvironmentVariableW(name, buf, need) >= need) {
-        free(buf);
-        buf = NULL;
-    }
-    return buf;
-}
-
 /* Test 5: restic.exe is searched in %PATH% only - never in the current directory (planting) */
 static void test_restic_lookup_ignores_current_directory(void) {
     WCHAR plugin_dir[MAX_PATH] = {0}, path_dir[MAX_PATH] = {0};
@@ -526,18 +586,18 @@ static void test_restic_lookup_ignores_current_directory(void) {
     swprintf_s(path_value, _countof(path_value), L";;C:\\no_such_dir_xyz; \"%ls\" ;", path_dir);
     SetEnvironmentVariableW(L"PATH", path_value);
     WCHAR resolved_a[MAX_PATH] = {0};
-    BOOL ok_a = config_resolve_restic_path(NULL, resolved_a, MAX_PATH);
+    BOOL ok_a = config_resolve_restic_path(NULL, resolved_a, MAX_PATH, NULL, 0);
 
     /* Case B: PATH without restic.exe while the current directory holds one */
     SetEnvironmentVariableW(L"PATH", L"C:\\no_such_dir_xyz");
     WCHAR resolved_b[MAX_PATH] = {0};
-    BOOL ok_b = config_resolve_restic_path(NULL, resolved_b, MAX_PATH);
+    BOOL ok_b = config_resolve_restic_path(NULL, resolved_b, MAX_PATH, NULL, 0);
 
     /* Case C: [Settings] ResticPath is a bare name without extension, found through PATH */
     SetEnvironmentVariableW(L"PATH", path_dir);
     write_text_file(ini_path, "[Settings]\r\nResticPath=custom_tool\r\n");
     WCHAR resolved_c[MAX_PATH] = {0};
-    BOOL ok_c = config_resolve_restic_path(ini_path, resolved_c, MAX_PATH);
+    BOOL ok_c = config_resolve_restic_path(ini_path, resolved_c, MAX_PATH, NULL, 0);
 
     /* Case D: relative PATH entries would resolve against the current directory */
     WCHAR cwd_sub[MAX_PATH] = {0}, cwd_sub_restic[MAX_PATH] = {0};
@@ -547,20 +607,22 @@ static void test_restic_lookup_ignores_current_directory(void) {
     write_text_file(cwd_sub_restic, "MZ_PLANTED");
     SetEnvironmentVariableW(L"PATH", L".;bin;%SystemRoot%\\no_such_dir");
     WCHAR resolved_d[MAX_PATH] = {0};
-    BOOL ok_d = config_resolve_restic_path(NULL, resolved_d, MAX_PATH);
+    BOOL ok_d = config_resolve_restic_path(NULL, resolved_d, MAX_PATH, NULL, 0);
 
     /* Case E: drive-relative and root-relative ResticPath values point into the current directory */
     static char ini_e[MAX_PATH * 3];
     sprintf_s(ini_e, sizeof(ini_e), "[Settings]\r\nResticPath=%c:restic.exe\r\n", (char)cwd_dir[0]);
     write_text_file(ini_path, ini_e);
     WCHAR resolved_e1[MAX_PATH] = {0};
-    BOOL ok_e1 = config_resolve_restic_path(ini_path, resolved_e1, MAX_PATH);
+    static WCHAR error_e1[CONFIG_ERROR_CHARS];
+    BOOL ok_e1 = config_resolve_restic_path(ini_path, resolved_e1, MAX_PATH, error_e1, CONFIG_ERROR_CHARS);
     static char root_rel[MAX_PATH * 3];
     WideCharToMultiByte(CP_UTF8, 0, cwd_restic + 2, -1, root_rel, (int)sizeof(root_rel), NULL, NULL);
     sprintf_s(ini_e, sizeof(ini_e), "[Settings]\r\nResticPath=%s\r\n", root_rel);
     write_text_file(ini_path, ini_e);
     WCHAR resolved_e2[MAX_PATH] = {0};
-    BOOL ok_e2 = config_resolve_restic_path(ini_path, resolved_e2, MAX_PATH);
+    static WCHAR error_e2[CONFIG_ERROR_CHARS];
+    BOOL ok_e2 = config_resolve_restic_path(ini_path, resolved_e2, MAX_PATH, error_e2, CONFIG_ERROR_CHARS);
 
     /* Case F: values too long for the path buffers fail cleanly instead of terminating the host */
     static char ini_f[4096];
@@ -570,18 +632,20 @@ static void test_restic_lookup_ignores_current_directory(void) {
     sprintf_s(ini_f, sizeof(ini_f), "[Settings]\r\nResticPath=tools\\%s.exe\r\n", long_name); /* Relative */
     write_text_file(ini_path, ini_f);
     WCHAR resolved_f1[MAX_PATH] = {0};
-    BOOL ok_f1 = config_resolve_restic_path(ini_path, resolved_f1, MAX_PATH);
+    static WCHAR error_f1[CONFIG_ERROR_CHARS];
+    BOOL ok_f1 = config_resolve_restic_path(ini_path, resolved_f1, MAX_PATH, error_f1, CONFIG_ERROR_CHARS);
     long_name[300] = '\0';
     sprintf_s(ini_f, sizeof(ini_f), "[Settings]\r\nResticPath=%s\r\n", long_name); /* Bare, no extension */
     write_text_file(ini_path, ini_f);
     WCHAR resolved_f2[MAX_PATH] = {0};
-    BOOL ok_f2 = config_resolve_restic_path(ini_path, resolved_f2, MAX_PATH);
+    static WCHAR error_f2[CONFIG_ERROR_CHARS];
+    BOOL ok_f2 = config_resolve_restic_path(ini_path, resolved_f2, MAX_PATH, error_f2, CONFIG_ERROR_CHARS);
     static WCHAR long_path_env[2048];
     swprintf_s(long_path_env, _countof(long_path_env), L"C:\\%01100d;%ls", 0, path_dir);
     SetEnvironmentVariableW(L"PATH", long_path_env);
     DeleteFileW(ini_path);
     WCHAR resolved_f3[MAX_PATH] = {0};
-    BOOL ok_f3 = config_resolve_restic_path(NULL, resolved_f3, MAX_PATH);
+    BOOL ok_f3 = config_resolve_restic_path(NULL, resolved_f3, MAX_PATH, NULL, 0);
 
     SetCurrentDirectoryW(old_cwd);
     SetEnvironmentVariableW(L"PATH", old_path);
@@ -595,8 +659,11 @@ static void test_restic_lookup_ignores_current_directory(void) {
     EXPECT_WSTR_EQ(resolved_c, expected_custom, ".exe extension appended to extension-less ResticPath");
     EXPECT_TRUE(!ok_d && wcscmp(resolved_d, L"restic.exe") == 0,
                 "Relative PATH entries ('.', 'bin', unexpanded variables) are skipped");
-    EXPECT_TRUE(!ok_e1 && !ok_e2, "Drive-relative and root-relative ResticPath values are ignored");
-    EXPECT_TRUE(!ok_f1 && !ok_f2, "Over-long ResticPath values are ignored without a crash");
+    EXPECT_TRUE(!ok_e1 && !ok_e2 && wcsstr(error_e1, L"current drive or folder") != NULL &&
+                wcsstr(error_e2, L"current drive or folder") != NULL,
+                "Drive-relative and root-relative ResticPath values are refused with an error");
+    EXPECT_TRUE(!ok_f1 && !ok_f2 && error_f1[0] != L'\0' && error_f2[0] != L'\0',
+                "Over-long ResticPath values fail with an error, without a crash");
     EXPECT_TRUE(ok_f3 && wcscmp(resolved_f3, expected) == 0, "An over-long PATH entry is skipped");
 
     DeleteFileW(expected);
@@ -822,6 +889,28 @@ static void test_wfx_routing_and_callbacks(void) {
                 GetLastError() == ERROR_CANCELLED, "Cancelled password prompt returns ERROR_CANCELLED");
     EXPECT_TRUE(g_mock_pwd_calls == 1 && g_mock_msgok_calls == 0,
                 "Cancelled password prompt asks once and shows no error dialog");
+
+    /* A configured ResticPath that is missing fails loudly although <plugin_dir>\restic.exe exists */
+    write_text_file(ini_path, "[Settings]\r\nResticPath=C:\\no_such_dir_restic_test\\restic.exe\r\n"
+                              "[Repositories]\r\nMyRepo=D:\\SomeRepo\r\n");
+    g_mock_pwd_calls = g_mock_msgok_calls = g_mock_log_calls = 0;
+    SetLastError(0);
+    EXPECT_TRUE(FsFindFirstW(L"\\MyRepo", &fd) == INVALID_HANDLE_VALUE &&
+                GetLastError() == ERROR_FILE_NOT_FOUND, "Missing ResticPath binary returns ERROR_FILE_NOT_FOUND");
+    EXPECT_TRUE(g_mock_pwd_calls == 0 && g_mock_msgok_calls == 1 && g_mock_log_calls == 1,
+                "Missing ResticPath binary is reported once, without a password prompt");
+    EXPECT_TRUE(wcsstr(g_mock_last_log, L"ResticPath=C:\\no_such_dir_restic_test\\restic.exe") != NULL &&
+                wcsstr(g_mock_last_log, ini_path) != NULL,
+                "The error names the configured path and the INI file that sets it");
+    WCHAR remote_file[] = L"\\MyRepo\\2026-10-18_12-00-00_[abcdef12]\\file.txt";
+    WCHAR local_file[MAX_PATH];
+    swprintf_s(local_file, MAX_PATH, L"%ls\\file.txt", plugin_dir);
+    g_mock_pwd_calls = g_mock_msgok_calls = 0;
+    EXPECT_TRUE(FsGetFileW(remote_file, local_file, 0, NULL) == FS_FILE_READERROR &&
+                g_mock_pwd_calls == 0 && g_mock_msgok_calls == 1 &&
+                GetFileAttributesW(local_file) == INVALID_FILE_ATTRIBUTES,
+                "FsGetFileW refuses the same way and writes nothing");
+    write_text_file(ini_path, "[Repositories]\r\nMyRepo=D:\\SomeRepo\r\n");
 
     FsInitW(0, NULL, NULL, NULL);
     if (saved_path) {

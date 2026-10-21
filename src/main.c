@@ -688,23 +688,31 @@ static BOOL password_worth_caching(ResticResult res) {
            res == RESTIC_ERR_PATH_NOT_FOUND;
 }
 
+/*
+ * TRUE when config_resolve_restic_path found restic.exe; otherwise shows the reason (a configured
+ * ResticPath that is missing, or no restic.exe at all) before any password prompt
+ */
+static BOOL restic_path_usable(const ResticConfig* cfg, const WCHAR* repo_alias) {
+    if (config_is_absolute_path(cfg->restic_path)) return TRUE;
+    report_plugin_error(repo_alias, cfg->restic_path_error[0] != L'\0' ? cfg->restic_path_error
+                                                                       : L"restic.exe not found.");
+    return FALSE;
+}
+
 /* Executes a Level 1 (snapshots) or Level 2 (directory) query with password prompt/retry */
 static HANDLE execute_repo_query(
     const WCHAR* virtual_path,
-    const WCHAR* restic_exe,
+    const ResticConfig* cfg,
     const ResticRepoEntry* repo,
     const WfxParsedPath* parsed,
     WIN32_FIND_DATAW* FindData
 ) {
     /* Verify that restic.exe was resolved to an explicit path before prompting for a password */
-    if (!config_is_absolute_path(restic_exe)) {
-        report_plugin_error(
-            repo->alias,
-            L"restic.exe not found. Set ResticPath in TCResticBrowser.ini or place restic.exe in the plugin directory / PATH."
-        );
+    if (!restic_path_usable(cfg, repo->alias)) {
         SetLastError(ERROR_FILE_NOT_FOUND);
         return INVALID_HANDLE_VALUE;
     }
+    const WCHAR* restic_exe = cfg->restic_path;
 
     WfxCancelContext cancel_ctx = {virtual_path, repo->alias};
     ResticExecOptions exec_opts = {WFX_RESTIC_TIMEOUT_MS, wfx_cancel_callback, &cancel_ctx};
@@ -858,7 +866,11 @@ static void log_configuration(const ResticConfig* cfg) {
     WCHAR log_path[CONFIG_MAX_PATH];
     log_get_path(log_path, _countof(log_path));
     log_write(L"Configuration: %ls", cfg->ini_path);
-    log_write(L"  ResticPath resolved to: %ls", cfg->restic_path);
+    if (cfg->restic_path_error[0] != L'\0') {
+        log_write(L"  restic.exe: %ls", cfg->restic_path_error);
+    } else {
+        log_write(L"  ResticPath resolved to: %ls", cfg->restic_path);
+    }
     log_write(L"  RootName: %ls; LogPath: %ls", cfg->root_name, log_path);
     log_write(L"  %u repositories:", (unsigned)cfg->repo_count);
     for (size_t i = 0; i < cfg->repo_count; ++i) {
@@ -1008,7 +1020,7 @@ HANDLE __stdcall FsFindFirstW(WCHAR* Path, WIN32_FIND_DATAW* FindData) {
     }
 
     log_write(L"List %ls", Path);
-    HANDLE hdl = execute_repo_query(Path, cfg.restic_path, repo, &parsed, FindData);
+    HANDLE hdl = execute_repo_query(Path, &cfg, repo, &parsed, FindData);
     config_free(&cfg);
     return hdl;
 }
@@ -1127,11 +1139,7 @@ int __stdcall FsGetFileW(WCHAR* RemoteName, WCHAR* LocalName, int CopyFlags, Rem
         config_free(&cfg);
         return FS_FILE_NOTFOUND;
     }
-    if (!config_is_absolute_path(cfg.restic_path)) {
-        report_plugin_error(
-            repo->alias,
-            L"restic.exe not found. Set ResticPath in TCResticBrowser.ini or place restic.exe in the plugin directory / PATH."
-        );
+    if (!restic_path_usable(&cfg, repo->alias)) {
         config_free(&cfg);
         return FS_FILE_READERROR;
     }

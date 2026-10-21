@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A `ResticPath=` that does not work is now an error.** When the
+  configured `restic.exe` did not exist, the plugin silently fell back to
+  `restic.exe` in the plugin folder or in `PATH`, so a different restic
+  could run without the user knowing. Now the configured binary is used or
+  nothing is, and the message names the setting, the configuration file and
+  the path that was tried. The same applies to values relative to the
+  current drive or folder (`C:restic.exe`, `\tools\restic.exe`), which were
+  ignored before. A bare name without an extension is now also found in the
+  plugin folder (`ResticPath=restic-custom` -> `restic-custom.exe`), not
+  only in `PATH`.
 
 ## [v2.0.0] – 2026-10-21
 

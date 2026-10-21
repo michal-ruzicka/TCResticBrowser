@@ -251,10 +251,24 @@ default is used.
 
 #### How `restic.exe` Is Located
 
-When executing a command, the plugin searches for `restic.exe` in this order:
-1. The path configured in `ResticPath=` under `[Settings]` (absolute path, or relative to the plugin directory).
-2. `<plugin_dir>\restic.exe` (next to the plugin DLL).
-3. The system `PATH` environment variable *(for security against working-directory hijacking, the process current directory is never searched)*.
+If `ResticPath=` under `[Settings]` is set, the plugin uses exactly that
+binary or none at all:
+
+- a full path (`C:\Tools\restic\restic.exe`) must point to an existing file;
+- a relative path (`tools\restic.exe`) is taken from the plugin folder;
+- a bare name (`restic-custom`, `.exe` is added when there is no extension) is
+  looked up in the plugin folder, then in the folders listed in `PATH`.
+
+When that binary is missing, the plugin says so (naming the setting, the
+configuration file and the path it tried) and does not look for another
+`restic.exe`, so you never end up running a different restic than you chose.
+
+Without `ResticPath=` (or with an empty value), the plugin uses
+`<plugin_dir>\restic.exe` next to the plugin DLL, and otherwise `restic.exe`
+from the system `PATH`. For security against working-directory hijacking,
+the current directory is never searched, and neither are relative `PATH`
+entries or `ResticPath` values relative to the current drive or folder
+(`C:restic.exe`, `\tools\restic.exe`).
 
 #### Paths with Spaces
 
