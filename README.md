@@ -208,6 +208,7 @@ documentation.
 | --- | --- |
 | **List Repositories** | Open **Network Neighborhood** (`\\\`) -> **`TCResticBrowser`**. Changes to `TCResticBrowser.ini` take effect immediately on panel refresh (`Ctrl+R` / `F2`). |
 | **Browse Snapshots** | Enter a repository folder (`\<Alias>`). Prompted once for the repository password; once restic accepts it, it is kept in RAM (encrypted) for that alias across both panels for 30 minutes (see [Password Timeout](#password-timeout)). Up to 3 password attempts are allowed. The dialog's title starts with the repository alias (`MyLocalBackup - Restic repository password`), so a password manager that picks an entry by the title of the active window, such as KeePassXC Auto-Type, can offer the right password. |
+| **Connection Log and Disconnect** | Once a repository's password is accepted, Total Commander lists the repository as a connection in its FTP connections toolbar. Its log window shows what the plugin is doing in the background - reading a whole snapshot (with progress every few seconds) or re-reading the snapshot list - and **Disconnect** forgets that repository's password and everything read from it. See [Connection Log](#connection-log). |
 | **Forget Passwords** | While passwords are remembered, the plugin's root folder starts with **`🗑 Forget N Passwords`** (N is their number; `🗑 Forget 1 Password` for one). Press **Enter** on it to wipe them all at once; a message says how many were forgotten, the root folder is then re-read without the entry, and the next access asks again. The entry is not removed by itself when the passwords expire; it disappears the next time the root folder is read (`Ctrl+R`). |
 | **Explore Files** | Enter a snapshot through `snapshots`, `ids`, `hosts` or `tags` (or `latest`) and navigate the backed-up directory tree. The snapshot list is read once and then shown at once from memory; when it is older than a minute (`SnapshotListRefreshSeconds=`), as `restic mount` would re-read it, restic reads a new one in the background and the next listing (`Ctrl+R`) shows any new snapshots (see [Snapshot List Refresh](#snapshot-list-refresh)). |
 | **View File (`F3` / `Ctrl+Q`)** | Press **`F3`** (Lister) or **`Ctrl+Q`** (Quick View) on any file to stream it to a temporary location and view its contents. |
@@ -234,8 +235,35 @@ After the password timeout (30 minutes by default) or `🗑 Forget N
 Passwords`, everything read from that repository is dropped, so the next
 visit starts from the top of the table again. Total Commander shows its
 progress dialog, with `ESC` to cancel, only for operations that take more
-than a few seconds. The [diagnostic log](#logging) records every restic run
-and background read with its duration.
+than a few seconds. The [connection log](#connection-log) shows the background
+reads as they happen, and the [diagnostic log](#logging) records every restic
+run with its duration.
+
+### Connection Log
+
+The plugin announces every repository whose password restic accepted as a
+connection, as an FTP plugin announces a server. Total Commander then shows
+its FTP connections toolbar while you are in the repository, with two
+buttons that matter here:
+
+- **The log window** shows the work the plugin does in the background:
+
+  ```text
+  [MyLocalBackup] Reading every file and folder of snapshot a1b2c3d4 in the background
+  [MyLocalBackup] Snapshot a1b2c3d4: 120000 files and folders read so far (25 s)
+  [MyLocalBackup] Snapshot a1b2c3d4 read: 209750 files and folders, 18 MiB, 48 s; its folders now open without restic
+  [MyLocalBackup] Snapshot list re-read in the background: 42 snapshots, 1 s
+  ```
+
+  There is no percentage: restic does not tell in advance how many files a
+  snapshot holds.
+- **Disconnect** forgets the repository's password and everything read from
+  it, like `🗑 Forget N Passwords` does for all repositories; the next visit
+  asks for the password again.
+
+A connection stays listed until you disconnect it, also after its password
+timed out: the plugin cannot remove it from the toolbar by itself. Entering
+the repository again then just asks for the password.
 
 ### File Names from Other Systems
 

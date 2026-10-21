@@ -67,6 +67,14 @@ void repo_cache_refresh_tree(
     RepoPasswordSource password_source
 );
 
+/*
+ * Receives one line about the background work ("[<alias>] Snapshot 1a2b3c4d read: ..."), for
+ * Total Commander's connection log. Called from the background threads, never with a lock of the
+ * cache held; NULL (the default) reports nothing.
+ */
+typedef void (*RepoStatusProc)(const WCHAR* text);
+void repo_cache_set_status_proc(RepoStatusProc proc);
+
 /* Sets the memory for snapshot listings ([Settings] SnapshotCacheMB); 0 disables them */
 void repo_cache_set_index_limit(size_t bytes);
 

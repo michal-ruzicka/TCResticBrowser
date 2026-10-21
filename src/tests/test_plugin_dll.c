@@ -90,6 +90,7 @@ typedef int    (__stdcall *PFN_FindClose)(HANDLE);
 typedef int    (__stdcall *PFN_GetFile)(char*, char*, int, RemoteInfo*);
 typedef int    (__stdcall *PFN_GetFileW)(WCHAR*, WCHAR*, int, RemoteInfo*);
 typedef int    (__stdcall *PFN_ExecuteFileW)(HWND, WCHAR*, WCHAR*);
+typedef BOOL   (__stdcall *PFN_DisconnectW)(WCHAR*);
 
 typedef struct {
     HMODULE module;
@@ -103,6 +104,7 @@ typedef struct {
     PFN_GetFile get_file;
     PFN_GetFileW get_file_w;
     PFN_ExecuteFileW execute_w;
+    PFN_DisconnectW disconnect_w;
 } Plugin;
 
 static BOOL make_unique_dir(const WCHAR* tag, WCHAR* out, size_t cap) {
@@ -154,6 +156,7 @@ static BOOL load_plugin_copy(const WCHAR* dir, Plugin* p) {
     p->get_file          = (PFN_GetFile)(void*)GetProcAddress(p->module, "FsGetFile");
     p->get_file_w        = (PFN_GetFileW)(void*)GetProcAddress(p->module, "FsGetFileW");
     p->execute_w         = (PFN_ExecuteFileW)(void*)GetProcAddress(p->module, "FsExecuteFileW");
+    p->disconnect_w      = (PFN_DisconnectW)(void*)GetProcAddress(p->module, "FsDisconnectW");
     return TRUE;
 }
 
@@ -172,7 +175,8 @@ static void test_export_surface(void) {
 
     const char* required[] = {"FsInit", "FsInitW", "FsFindFirst", "FsFindFirstW", "FsFindNext",
                               "FsFindNextW", "FsFindClose", "FsGetDefRootName", "FsSetDefaultParams",
-                              "FsGetFile", "FsGetFileW", "FsExecuteFile", "FsExecuteFileW"};
+                              "FsGetFile", "FsGetFileW", "FsExecuteFile", "FsExecuteFileW",
+                              "FsDisconnect", "FsDisconnectW"};
     for (size_t i = 0; i < _countof(required); ++i) {
         FARPROC fn = GetProcAddress(m, required[i]);
         g_tests_run++;
@@ -400,11 +404,35 @@ static int __stdcall e2e_progress_proc(int PluginNr, WCHAR* SourceName, WCHAR* T
     return g_e2e_force_abort ? 1 : 0;
 }
 
+/*
+ * Everything the plugin logged through LogProc other than important errors, one "<MsgType>:<text>"
+ * line each. LogProc is also called from the plugin's background threads, hence the lock.
+ */
+static WCHAR   g_e2e_conn_log[1 << 16];
+static SRWLOCK g_e2e_conn_log_lock = SRWLOCK_INIT;
+
 static void __stdcall e2e_log_proc(int PluginNr, int MsgType, WCHAR* LogString) {
     (void)PluginNr;
     if (MsgType == MSGTYPE_IMPORTANTERROR && LogString) {
         g_e2e_error_logs++;
+    } else if (LogString) {
+        WCHAR line[1100];
+        _snwprintf_s(line, _countof(line), _TRUNCATE, L"%d:%ls\n", MsgType, LogString);
+        AcquireSRWLockExclusive(&g_e2e_conn_log_lock);
+        if (wcslen(g_e2e_conn_log) + wcslen(line) < _countof(g_e2e_conn_log)) {
+            wcscat_s(g_e2e_conn_log, _countof(g_e2e_conn_log), line);
+        }
+        ReleaseSRWLockExclusive(&g_e2e_conn_log_lock);
     }
+}
+
+/* Number of times `text` occurs in what LogProc received */
+static int conn_log_count(const WCHAR* text) {
+    int n = 0;
+    AcquireSRWLockShared(&g_e2e_conn_log_lock);
+    for (const WCHAR* p = g_e2e_conn_log; (p = wcsstr(p, text)) != NULL; p++) n++;
+    ReleaseSRWLockShared(&g_e2e_conn_log_lock);
+    return n;
 }
 
 static BOOL __stdcall e2e_request_proc(
@@ -877,6 +905,11 @@ static void test_e2e_snapshot_cache(const Plugin* p, const WCHAR* dir, const WCH
         if (!read) Sleep(200);
     }
     EXPECT_TRUE(read, "The whole snapshot was read in the background after entering it");
+    /* (The test has entered two snapshots by now: one through ids\, one through snapshots\) */
+    EXPECT_TRUE(conn_log_count(L"3:[MainRepo] Reading every file and folder of snapshot ") >= 1 &&
+                conn_log_count(L"3:[MainRepo] Snapshot ") >= 1 &&
+                conn_log_count(L"files and folders, ") >= 1 && conn_log_count(L"its folders now open without restic") >= 1,
+                "The connection log tells when the background read starts and when it is done (MSGTYPE_DETAILS)");
 
     int runs = count_restic_runs(log_file);
     g_e2e_pwd_prompts = 0;
@@ -1128,6 +1161,27 @@ static void test_live_end_to_end_navigation(void) {
     EXPECT_TRUE(h != INVALID_HANDLE_VALUE, "And again SecondRepo");
     p.find_close(h);
     EXPECT_TRUE(g_e2e_pwd_prompts == 1, "Alternating between two panels' repositories never re-prompts");
+
+    /* Each repository is a connection of Total Commander's connections toolbar, announced once */
+    EXPECT_TRUE(conn_log_count(L"1:CONNECT \\MainRepo\n") == 1 && conn_log_count(L"1:CONNECT \\SecondRepo\n") == 1,
+                "A repository is announced as a connection (MSGTYPE_CONNECT) once restic accepted its password");
+    /* Its Disconnect button forgets the password and what was read: the next visit asks again */
+    EXPECT_TRUE(p.disconnect_w != NULL && p.disconnect_w(L"\\SecondRepo"), "FsDisconnectW succeeds");
+    EXPECT_TRUE(conn_log_count(L"2:DISCONNECT \\SecondRepo\n") == 1 &&
+                conn_log_count(L"3:[SecondRepo] Password and cached listings forgotten") == 1,
+                "Disconnect is logged (MSGTYPE_DISCONNECT)");
+    h = p.find_first_w(L"\\SecondRepo", &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 2, "After Disconnect the password is asked again");
+    p.find_close(h);
+    EXPECT_TRUE(conn_log_count(L"1:CONNECT \\SecondRepo\n") == 2, "...and the repository connected again");
+    h = p.find_first_w(L"\\MainRepo", &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 2, "Other repositories stay connected");
+    p.find_close(h);
+    EXPECT_TRUE(p.disconnect_w(L"\\NoSuchRepo") && p.disconnect_w(L"\\") && p.disconnect_w(NULL),
+                "Disconnecting what is not connected succeeds and does nothing");
+    h = p.find_first_w(L"\\MainRepo", &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 2, "...MainRepo still needs no password");
+    p.find_close(h);
 
     /* 4. Exhausting all 3 password attempts returns ERROR_ACCESS_DENIED and shows an error dialog */
     g_e2e_pwd_mode    = 2;

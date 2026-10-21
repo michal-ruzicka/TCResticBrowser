@@ -18,7 +18,11 @@
 #include "log.h"
 #include "restic_cli.h"
 
+#include <stdarg.h>
+#include <stdio.h>
+
 #define MAX_CONCURRENT_LOADS 2
+#define PROGRESS_REPORT_MS (5u * 1000u) /* How often a running snapshot listing reports progress */
 #define LOAD_RETRY_MS (60u * 1000u)   /* A listing that failed is not tried again sooner */
 #define SESSION_PASSWORD_CHARS 512    /* main.c SESSION_MAX_PASSWORD */
 
@@ -77,6 +81,26 @@ static LONG loads_running(void) {
 
 static LONG64 last_used_of(IndexEntry* e) {
     return InterlockedCompareExchange64(&e->last_used, 0, 0);
+}
+
+static RepoStatusProc g_StatusProc = NULL;
+
+void repo_cache_set_status_proc(RepoStatusProc proc) {
+    g_StatusProc = proc;
+}
+
+/* "[<alias>] <message>" to the status callback; never called with g_CacheLock held */
+static void report(const WCHAR* alias, const WCHAR* format, ...) {
+    RepoStatusProc proc = g_StatusProc;
+    if (!proc) return;
+    WCHAR text[1024];
+    int n = _snwprintf_s(text, _countof(text), _TRUNCATE, L"[%ls] ", alias);
+    if (n < 0) return;
+    va_list args;
+    va_start(args, format);
+    _vsnwprintf_s(text + n, _countof(text) - (size_t)n, _TRUNCATE, format, args);
+    va_end(args);
+    proc(text);
 }
 
 /* Caller holds g_CacheLock */
@@ -176,20 +200,34 @@ static void make_room_locked(size_t need, const IndexEntry* keep) {
     }
 }
 
-/* Background worker: one `restic ls` of a whole snapshot */
+/*
+ * Polled by a background restic run: TRUE once the repository was forgotten. A whole-snapshot
+ * listing (`index` set) also reports how far it got every PROGRESS_REPORT_MS; the poll runs on the
+ * worker's own thread, the one that fills the index.
+ */
 typedef struct {
     ULONGLONG generation;
+    const LoadJob* job;          /* NULL for a snapshot-list re-read */
+    const SnapshotIndex* index;
+    ULONGLONG started, reported;
 } LoadCancel;
 
 static BOOL load_cancelled(void* ctx) {
-    const LoadCancel* c = (const LoadCancel*)ctx;
+    LoadCancel* c = (LoadCancel*)ctx;
     AcquireSRWLockShared(&g_CacheLock);
     BOOL gone = c->generation != g_CacheGeneration;
     ReleaseSRWLockShared(&g_CacheLock);
+    ULONGLONG now = GetTickCount64();
+    if (!gone && c->job && c->index && now - c->reported >= PROGRESS_REPORT_MS) {
+        c->reported = now;
+        report(c->job->alias, L"Snapshot %.8hs: %u files and folders read so far (%llu s)", c->job->snapshot_id,
+               (unsigned)snapshot_index_entry_count(c->index), (now - c->started) / 1000);
+    }
     return gone;
 }
 
-static void finish_load(const LoadJob* job, SnapshotIndex* index, IndexState state) {
+/* Stores the outcome of a load; returns the state kept, or INDEX_LOADING when it was discarded */
+static IndexState finish_load(const LoadJob* job, SnapshotIndex* index, IndexState state) {
     AcquireSRWLockExclusive(&g_CacheLock);
     IndexEntry* e = job->generation == g_CacheGeneration
                         ? find_index_locked(find_repo_locked(job->alias, job->target), job->snapshot_id)
@@ -199,6 +237,7 @@ static void finish_load(const LoadJob* job, SnapshotIndex* index, IndexState sta
         make_room_locked(bytes, e);
         if (g_IndexBytes + bytes > g_IndexLimit) state = INDEX_TOO_LARGE;
     }
+    if (!e) state = INDEX_LOADING;
     if (e) {
         e->state = state;
         e->failed_at = GetTickCount64();
@@ -211,6 +250,7 @@ static void finish_load(const LoadJob* job, SnapshotIndex* index, IndexState sta
     }
     ReleaseSRWLockExclusive(&g_CacheLock);
     snapshot_index_free(index);
+    return state;
 }
 
 /*
@@ -255,7 +295,7 @@ static VOID CALLBACK load_index_worker(PTP_CALLBACK_INSTANCE instance, PVOID con
 
     if (job->password_source(job->alias, password, _countof(password)) &&
         (index = snapshot_index_new(limit)) != NULL) {
-        LoadCancel cancel = {job->generation};
+        LoadCancel cancel = {job->generation, job, index, started, started};
         ResticExecOptions opts;
         memset(&opts, 0, sizeof(opts));
         opts.cancel_proc = load_cancelled;
@@ -270,18 +310,37 @@ static VOID CALLBACK load_index_worker(PTP_CALLBACK_INSTANCE instance, PVOID con
     }
     SecureZeroMemory(password, sizeof(password));
 
-    if (state == INDEX_READY) {
-        log_write(L"Listing of snapshot %hs of '%ls' read: %u entries, %u KiB, %llu ms", job->snapshot_id, job->alias,
-                  (unsigned)snapshot_index_entry_count(index), (unsigned)(snapshot_index_memory(index) / 1024),
-                  GetTickCount64() - started);
-    } else {
-        log_write(L"Listing of snapshot %hs of '%ls' not kept: %ls", job->snapshot_id, job->alias,
-                  state == INDEX_TOO_LARGE ? L"larger than SnapshotCacheMB"
-                                           : err[0] ? err : L"restic failed, was cancelled or had no password");
+    unsigned entries = index ? (unsigned)snapshot_index_entry_count(index) : 0;
+    unsigned kib     = index ? (unsigned)(snapshot_index_memory(index) / 1024) : 0;
+    ULONGLONG ms     = GetTickCount64() - started;
+    if (state != INDEX_READY) {
         snapshot_index_free(index);
         index = NULL;
     }
-    finish_load(job, index, state);
+    switch (finish_load(job, index, state)) { /* May still refuse a listing that does not fit */
+        case INDEX_READY: /* The connection log first: the diagnostic log line is what tests wait for */
+            report(job->alias, L"Snapshot %.8hs read: %u files and folders, %u MiB, %llu s; its folders now open "
+                               L"without restic", job->snapshot_id, entries, (kib + 1023) / 1024, ms / 1000);
+            log_write(L"Listing of snapshot %hs of '%ls' read: %u entries, %u KiB, %llu ms", job->snapshot_id,
+                      job->alias, entries, kib, ms);
+            break;
+        case INDEX_TOO_LARGE:
+            log_write(L"Listing of snapshot %hs of '%ls' not kept: larger than SnapshotCacheMB", job->snapshot_id,
+                      job->alias);
+            report(job->alias, L"Snapshot %.8hs has more files than SnapshotCacheMB holds; its folders stay listed "
+                               L"one by one", job->snapshot_id);
+            break;
+        case INDEX_LOADING:
+            log_write(L"Listing of snapshot %hs of '%ls' discarded: the repository was forgotten meanwhile",
+                      job->snapshot_id, job->alias);
+            break;
+        default:
+            log_write(L"Listing of snapshot %hs of '%ls' not kept: %ls", job->snapshot_id, job->alias,
+                      err[0] ? err : L"restic failed, was cancelled or had no password");
+            report(job->alias, L"Snapshot %.8hs not read: %ls", job->snapshot_id,
+                   err[0] ? err : L"restic failed, was cancelled or had no password");
+            break;
+    }
     free(job);
     InterlockedDecrement(&g_LoadsRunning);
     release_worker_module(instance);
@@ -345,6 +404,7 @@ void repo_cache_load_index(
         return;
     }
     log_write(L"Listing of snapshot %hs of '%ls' started in the background", snapshot_id, alias);
+    report(alias, L"Reading every file and folder of snapshot %.8hs in the background", snapshot_id);
 }
 
 /* One background `restic snapshots` */
@@ -370,7 +430,7 @@ static VOID CALLBACK refresh_tree_worker(PTP_CALLBACK_INSTANCE instance, PVOID c
     ULONGLONG started = GetTickCount64();
 
     if (job->password_source(job->alias, password, _countof(password))) {
-        LoadCancel cancel = {job->generation};
+        LoadCancel cancel = {job->generation, NULL, NULL, started, started};
         ResticExecOptions opts;
         memset(&opts, 0, sizeof(opts));
         opts.cancel_proc = load_cancelled;
@@ -382,10 +442,14 @@ static VOID CALLBACK refresh_tree_worker(PTP_CALLBACK_INSTANCE instance, PVOID c
     if (res == RESTIC_OK) {
         log_write(L"Snapshots of '%ls' re-read in the background: %u, %llu ms", job->alias,
                   (unsigned)snapshot_tree_snapshot_count(tree), GetTickCount64() - started);
+        report(job->alias, L"Snapshot list re-read in the background: %u snapshots, %llu s",
+               (unsigned)snapshot_tree_snapshot_count(tree), (GetTickCount64() - started) / 1000);
         repo_cache_put_tree(job->alias, job->target, job->time_format, tree, job->generation);
     } else {
         log_write(L"Snapshots of '%ls' not re-read in the background, the cached list stays: %ls", job->alias,
                   err[0] ? err : L"restic failed, was cancelled or had no password");
+        report(job->alias, L"Snapshot list not re-read, the previous one stays: %ls",
+               err[0] ? err : L"restic failed, was cancelled or had no password");
     }
 
     AcquireSRWLockExclusive(&g_CacheLock);

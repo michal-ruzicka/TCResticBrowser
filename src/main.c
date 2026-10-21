@@ -394,6 +394,69 @@ static void session_forget(const WCHAR* alias, ULONGLONG generation) {
     ReleaseSRWLockExclusive(&g_SessionLock);
 }
 
+/* Wipes the cached password of `alias`, whatever its generation, and everything read with it */
+static void session_forget_alias(const WCHAR* alias) {
+    AcquireSRWLockExclusive(&g_SessionLock);
+    SessionSlot* slot = session_find_locked(alias);
+    if (slot) session_wipe_slot_locked(slot);
+    ReleaseSRWLockExclusive(&g_SessionLock);
+    repo_cache_forget(alias); /* Also when the password had already expired */
+}
+
+/*
+ * Total Commander's connection log. A repository whose password restic accepted is announced as a
+ * connection (LogProc MSGTYPE_CONNECT, "CONNECT \<alias>"): Total Commander then shows its FTP
+ * connections toolbar with a log window, where the background work of the plugin is reported
+ * (MSGTYPE_DETAILS), and a Disconnect button, which calls FsDisconnectW. A connection is announced
+ * once, until FsDisconnectW or FsInitW: the WFX API cannot take a connection back, so a password
+ * that times out leaves it listed, and the next password typed in reuses it.
+ *
+ * LogProc is never called with a lock of the plugin held, nor from the password timer, whose
+ * callbacks DLL unload waits for.
+ */
+#define MAX_CONNECTIONS 64
+static WCHAR   g_Connections[MAX_CONNECTIONS][MAX_PATH];
+static size_t  g_ConnectionCount = 0;
+static SRWLOCK g_ConnectionLock  = SRWLOCK_INIT;
+
+/* Removes `alias` from the announced connections; TRUE if it was one */
+static BOOL connection_remove(const WCHAR* alias) {
+    BOOL found = FALSE;
+    AcquireSRWLockExclusive(&g_ConnectionLock);
+    for (size_t i = 0; i < g_ConnectionCount; ++i) {
+        if (_wcsicmp(g_Connections[i], alias) == 0) {
+            if (i + 1 < g_ConnectionCount) wcscpy_s(g_Connections[i], MAX_PATH, g_Connections[g_ConnectionCount - 1]);
+            g_ConnectionCount--;
+            found = TRUE;
+            break;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_ConnectionLock);
+    return found;
+}
+
+/* Announces `alias` as a connection unless it already is one */
+static void connection_announce(const WCHAR* alias) {
+    BOOL is_new = TRUE;
+    AcquireSRWLockExclusive(&g_ConnectionLock);
+    for (size_t i = 0; i < g_ConnectionCount && is_new; ++i) {
+        if (_wcsicmp(g_Connections[i], alias) == 0) is_new = FALSE;
+    }
+    if (is_new && (g_ConnectionCount == MAX_CONNECTIONS || wcslen(alias) >= MAX_PATH)) is_new = FALSE;
+    if (is_new) wcscpy_s(g_Connections[g_ConnectionCount++], MAX_PATH, alias);
+    ReleaseSRWLockExclusive(&g_ConnectionLock);
+    if (!is_new || !g_LogProc) return;
+    WCHAR text[MAX_PATH + 16];
+    _snwprintf_s(text, _countof(text), _TRUNCATE, L"CONNECT \\%ls", alias);
+    g_LogProc(g_PluginNr, MSGTYPE_CONNECT, text);
+}
+
+/* RepoStatusProc: background work reported in the connection log */
+static void report_status(const WCHAR* text) {
+    tLogProcW log_proc = g_LogProc;
+    if (log_proc) log_proc(g_PluginNr, MSGTYPE_DETAILS, (WCHAR*)text);
+}
+
 /* TRUE for a root entry name that is the forget command (also used to reserve such aliases) */
 static BOOL is_forget_entry_name(const WCHAR* name) {
     return name && _wcsnicmp(name, FORGET_ENTRY_PREFIX, wcslen(FORGET_ENTRY_PREFIX)) == 0;
@@ -812,6 +875,7 @@ static ResticResult run_with_password(
             session_touch(repo->alias, cached_generation);
         } else {
             session_put(repo->alias, password);
+            connection_announce(repo->alias);
         }
     }
     SecureZeroMemory(password, sizeof(password));
@@ -1055,10 +1119,14 @@ int __stdcall FsInitW(
     tRequestProcW pRequestProcW
 ) {
     clear_password_session();
+    AcquireSRWLockExclusive(&g_ConnectionLock);
+    g_ConnectionCount = 0; /* A new session of Total Commander knows of no connection */
+    ReleaseSRWLockExclusive(&g_ConnectionLock);
     g_PluginNr     = PluginNr;
     g_ProgressProc = pProgressProcW;
     g_LogProc      = pLogProcW;
     g_RequestProc  = pRequestProcW;
+    repo_cache_set_status_proc(report_status);
 
     ResticConfig cfg; /* Applies [Logging] LogPath before the first log line */
     load_config(&cfg);
@@ -1162,6 +1230,7 @@ int __stdcall FsExecuteFileW(HWND MainWin, WCHAR* RemoteName, WCHAR* Verb) {
         unsigned n = cached_password_count();
         clear_password_session();
         log_write(L"Forget All Passwords: %u cached password(s) wiped", n);
+        report_status(L"All remembered passwords and cached listings forgotten");
         if (g_RequestProc) {
             WCHAR msg[128], title[MAX_PATH], unused[4] = {0};
             if (n == 0) {
@@ -1178,6 +1247,35 @@ int __stdcall FsExecuteFileW(HWND MainWin, WCHAR* RemoteName, WCHAR* Verb) {
     }
     if (_wcsicmp(Verb, L"properties") == 0) return FS_EXEC_OK;
     return FS_EXEC_ERROR;
+}
+
+/*
+ * The Disconnect button of Total Commander's connections toolbar, for a repository announced by
+ * connection_announce: forgets its password and everything read from it, as the forget entry does
+ * for all repositories. Total Commander then returns to the plugin's root.
+ */
+BOOL __stdcall FsDisconnectW(WCHAR* DisconnectRoot) {
+    if (!DisconnectRoot) return TRUE;
+    const WCHAR* alias = DisconnectRoot;
+    while (*alias == L'\\') alias++;
+    if (*alias == L'\0' || wcschr(alias, L'\\') != NULL) return TRUE; /* Not one of ours: nothing open */
+    connection_remove(alias);
+    session_forget_alias(alias);
+    log_write(L"Disconnect %ls: password and cached listings forgotten", DisconnectRoot);
+    if (g_LogProc) {
+        WCHAR text[MAX_PATH + 64];
+        _snwprintf_s(text, _countof(text), _TRUNCATE, L"[%ls] Password and cached listings forgotten", alias);
+        g_LogProc(g_PluginNr, MSGTYPE_DETAILS, text);
+        _snwprintf_s(text, _countof(text), _TRUNCATE, L"DISCONNECT \\%ls", alias);
+        g_LogProc(g_PluginNr, MSGTYPE_DISCONNECT, text);
+    }
+    return TRUE;
+}
+
+BOOL __stdcall FsDisconnect(char* DisconnectRoot) {
+    WCHAR root_w[MAX_PATH];
+    if (!DisconnectRoot || MultiByteToWideChar(CP_ACP, 0, DisconnectRoot, -1, root_w, MAX_PATH) == 0) return TRUE;
+    return FsDisconnectW(root_w);
 }
 
 int __stdcall FsExecuteFile(HWND MainWin, char* RemoteName, char* Verb) {

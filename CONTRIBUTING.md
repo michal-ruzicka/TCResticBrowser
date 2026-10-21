@@ -391,8 +391,11 @@ Total Commander process
     │                                    read, then from memory
     ├── FsGetFileW                   restic dump -> temporary file -> atomic
     │                                replace of the target (F5, F3, Ctrl+Q)
-    └── RequestProcW (TC callback)   repository password, kept in memory
-                                     per alias, passed as RESTIC_PASSWORD
+    ├── RequestProcW (TC callback)   repository password, kept in memory
+    │                                per alias, passed as RESTIC_PASSWORD
+    └── LogProcW (TC callback)       CONNECT \<alias> once the password is accepted,
+                                     background work as MSGTYPE_DETAILS;
+                                     FsDisconnectW forgets password and cache
 ```
 
 | Source | Responsibility |
