@@ -684,6 +684,24 @@ static void test_e2e_extraction_edge_cases(const Plugin* p, const WCHAR* dir, co
     swprintf_s(local, _countof(local), L"%ls\\no_such_subdir\\x.txt", dir);
     EXPECT_TRUE(p->get_file_w(remote, local, 0, &ri) == FS_FILE_WRITEERROR,
                 "Non-existent local directory -> FS_FILE_WRITEERROR");
+
+    /* Target names Windows would map to a stream, a device or another file are refused up front */
+    static const WCHAR* const unsafe_leaves[] = {L"carrier.txt:hidden", L"CON", L"nul.txt", L"COM1", L"trail."};
+    WCHAR carrier[MAX_PATH], other[MAX_PATH];
+    swprintf_s(carrier, _countof(carrier), L"%ls\\carrier.txt", dir);
+    swprintf_s(other, _countof(other), L"%ls\\trail", dir);
+    EXPECT_TRUE(write_file(carrier, "keep"), "Carrier file for the stream test is created");
+    DeleteFileW(other);
+    for (size_t i = 0; i < _countof(unsafe_leaves); ++i) {
+        swprintf_s(local, _countof(local), L"%ls\\%ls", dir, unsafe_leaves[i]);
+        EXPECT_TRUE(p->get_file_w(remote, local, FS_COPYFLAGS_OVERWRITE, &ri) == FS_FILE_WRITEERROR,
+                    "A target name Windows cannot store as is -> FS_FILE_WRITEERROR");
+    }
+    swprintf_s(local, _countof(local), L"%ls:hidden", carrier);
+    EXPECT_TRUE(GetFileAttributesW(local) == INVALID_FILE_ATTRIBUTES && file_has_text(carrier, "keep") &&
+                GetFileAttributesW(other) == INVALID_FILE_ATTRIBUTES,
+                "No alternate data stream is written and \"trail.\" does not become \"trail\"");
+    DeleteFileW(carrier);
     EXPECT_TRUE(g_e2e_msg_dialogs == saved_dialogs, "Local-side failures do not raise Restic error popups");
 
     /* RemoteInfoStruct variants */

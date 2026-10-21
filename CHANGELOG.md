@@ -135,6 +135,12 @@ upstream 1.x line.
   copying its folder with `F5` could then write outside the chosen target
   directory. Names containing `\` or `/`, or consisting only of dots and
   spaces, are now skipped.
+- **A file is never restored under a name Windows would store as something
+  else.** Names from other systems such as `a:b`, `CON`, `nul.txt` or
+  `notes.` would have been written to an alternate data stream of `a`, to a
+  device, or over the file `notes`. Such files are still listed under their
+  original names, but copying them now fails with a write error; see
+  [File Names from Other Systems](README.md#file-names-from-other-systems).
 - **`restic.exe` is never taken from the current directory**, which
   follows the Total Commander panel. Relative `PATH` entries (such as `.`)
   and drive- or root-relative `ResticPath` values (`C:restic.exe`,

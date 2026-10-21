@@ -1005,6 +1005,27 @@ static void test_logging(void) {
     SetEnvironmentVariableW(L"TCRB_TEST_LOG_ROOT", NULL);
 }
 
+/* Target file names: only names Windows stores exactly as given are accepted */
+static void test_plain_file_names(void) {
+    static const WCHAR* const plain[] = {
+        L"C:\\t\\readme.txt", L"C:/t/.bashrc", L"a.b.c", L"..x", L"CONSOLE.log", L"COM10", L"LPT", L"x CON",
+        L"\\\\server\\share\\nul-device.txt", L"\u017Elu\u0165ou\u010Dk\u00FD k\u016F\u0148.txt",
+    };
+    static const WCHAR* const refused[] = {
+        L"C:\\t\\a:b", L"C:\\t\\file.txt:Zone.Identifier", L"C:\\t\\CON", L"nul.txt", L"Aux.tar.gz",
+        L"com1", L"LPT9.log", L"COM\u00B9", L"CON .txt", L"conin$", L"CONOUT$.x", L"C:\\t\\a.", L"a ",
+        L"C:\\t\\", L"C:/t/", L"", L"a?b", L"a*b", L"a<b", L"a>b", L"a|b", L"a\"b", L"tab\there",
+    };
+    for (size_t i = 0; i < _countof(plain); ++i) {
+        EXPECT_TRUE(config_is_plain_file_name(plain[i]), "An ordinary file name is accepted");
+    }
+    for (size_t i = 0; i < _countof(refused); ++i) {
+        EXPECT_TRUE(!config_is_plain_file_name(refused[i]),
+                    "A stream, device, trailing dot/space or forbidden character is refused");
+    }
+    EXPECT_TRUE(!config_is_plain_file_name(NULL), "NULL is refused");
+}
+
 int main(void) {
 #if defined(_DEBUG) && !defined(__SANITIZE_ADDRESS__)
     _CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
@@ -1032,6 +1053,7 @@ int main(void) {
     test_missing_ini_is_harmless();
     test_logging();
     test_password_timeout_setting();
+    test_plain_file_names();
 
     RemoveDirectoryW(user_dir);
     RemoveDirectoryW(appdata_dir);

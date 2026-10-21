@@ -81,6 +81,14 @@ BOOL config_resolve_restic_path(const WCHAR* ini_path, WCHAR* out_path, size_t o
  */
 BOOL config_is_absolute_path(const WCHAR* p);
 
+/*
+ * TRUE when Windows stores a file under exactly the last component of `path` (both separators
+ * count). Names from non-Windows backups may be legal there but not here: "a:b" would write the
+ * alternate data stream "b" of the file "a", "CON", "NUL.txt" or "COM1" a device, "a." or "a "
+ * the file "a", and <>"|?* or control characters make Win32 fail. All of them are refused.
+ */
+BOOL config_is_plain_file_name(const WCHAR* path);
+
 /**
  * Loads configuration and repository list from a specific INI file path. root_name is always
  * filled: with a valid [Settings] RootName, otherwise (also when the file is missing) with

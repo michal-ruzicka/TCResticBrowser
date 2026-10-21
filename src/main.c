@@ -1096,6 +1096,15 @@ int __stdcall FsGetFileW(WCHAR* RemoteName, WCHAR* LocalName, int CopyFlags, Rem
         return FS_FILE_NOTFOUND;
     }
 
+    /*
+     * A name legal where the backup was made may mean something else here ("a:b" is a stream of
+     * "a", "CON" a device, "a." the file "a"); the snapshot keeps the name, the copy is refused
+     */
+    if (!config_is_plain_file_name(LocalName)) {
+        log_write(L"Copy %ls refused: Windows cannot store a file named as in %ls", RemoteName, LocalName);
+        return FS_FILE_WRITEERROR;
+    }
+
     /* Total Commander calls FsGetFileW first without FS_COPYFLAGS_OVERWRITE to probe for collisions */
     DWORD local_attr = GetFileAttributesW(LocalName);
     if (local_attr != INVALID_FILE_ATTRIBUTES) {

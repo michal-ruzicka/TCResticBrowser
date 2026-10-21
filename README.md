@@ -164,6 +164,27 @@ documentation.
 | **Restore / Extract (`F5`)** | Select one or more files or directories and press **`F5`** to copy them to the target panel, preserving original `LastWriteTime` timestamps. Standard Total Commander overwrite prompts are supported. |
 | **Cancel Operation (`ESC`)** | Press **`ESC`** in Total Commander's progress dialog to terminate the underlying `restic.exe` child process and clean up any temporary file. |
 
+### File Names from Other Systems
+
+Snapshots made on Linux or macOS can contain names that are legal there but
+not on Windows. The plugin shows them exactly as they are in the backup and
+never renames anything, but it will not copy such a file under that name:
+
+- Names containing `:` (`12:30.log`) are refused, because Windows would write
+  the alternate data stream `30.log` of a file `12` instead.
+- Names containing `<`, `>`, `"`, `|`, `?`, `*` or control characters cannot
+  be created on Windows at all.
+- Reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`,
+  `LPT1`–`LPT9`, also with an extension such as `nul.txt`) are refused, because
+  Windows would write to the device.
+- Names ending in a dot or a space (`notes.`) are refused, because Windows
+  would silently store them as a different file (`notes`).
+
+Total Commander then reports a write error for that file. To restore a single
+such file, press `F5` on it alone and type another name in the copy dialog.
+Names containing `\` or `/`, or consisting only of dots and spaces, are not
+listed at all, so a snapshot can never make a copy leave the target folder.
+
 ### Configuration
 
 A fully commented sample configuration file

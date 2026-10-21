@@ -125,6 +125,36 @@ BOOL config_is_absolute_path(const WCHAR* p) {
     return (p[0] == L'\\' || p[0] == L'/') && (p[1] == L'\\' || p[1] == L'/');
 }
 
+/* TRUE when `base` (the name up to its first dot, trailing spaces ignored) is a DOS device name */
+static BOOL is_dos_device_name(const WCHAR* base, size_t len) {
+    static const WCHAR* const devices[] = {L"CON", L"PRN", L"AUX", L"NUL", L"CONIN$", L"CONOUT$"};
+    while (len > 0 && base[len - 1] == L' ') len--;
+    for (size_t i = 0; i < _countof(devices); ++i) {
+        if (len == wcslen(devices[i]) && _wcsnicmp(base, devices[i], len) == 0) return TRUE;
+    }
+    /* COM0-COM9, LPT0-LPT9 and the superscript digits 1-3 that Windows treats the same way */
+    if (len == 4 && (_wcsnicmp(base, L"COM", 3) == 0 || _wcsnicmp(base, L"LPT", 3) == 0)) {
+        WCHAR d = base[3];
+        return (d >= L'0' && d <= L'9') || d == L'\u00B9' || d == L'\u00B2' || d == L'\u00B3';
+    }
+    return FALSE;
+}
+
+BOOL config_is_plain_file_name(const WCHAR* path) {
+    if (!path) return FALSE;
+    const WCHAR* name = path;
+    for (const WCHAR* p = path; *p != L'\0'; ++p) {
+        if (*p == L'\\' || *p == L'/') name = p + 1;
+    }
+    size_t len = wcslen(name);
+    if (len == 0 || name[len - 1] == L'.' || name[len - 1] == L' ') return FALSE;
+    for (const WCHAR* p = name; *p != L'\0'; ++p) {
+        if (*p < 0x20 || wcschr(L"<>:\"|?*", *p) != NULL) return FALSE;
+    }
+    const WCHAR* dot = wcschr(name, L'.');
+    return !is_dos_device_name(name, dot ? (size_t)(dot - name) : len);
+}
+
 /* Checks whether path points to an existing regular file */
 static BOOL file_exists(const WCHAR* path) {
     if (!path || path[0] == L'\0') return FALSE;
