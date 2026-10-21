@@ -28,6 +28,8 @@
 #define MAX_UTF8_PATH (MAX_WFX_PATH * 3 + 1)
 /* CreateProcessW command line limit in UTF-16 units */
 #define MAX_CMDLINE_CHARS 32767
+/* Buffer size requested for the child's stdout pipe */
+#define STDOUT_PIPE_BYTES (1024u * 1024u)
 /* Poll interval for the cancellation callback while Restic is running */
 #define CANCEL_POLL_MS 100
 
@@ -393,7 +395,8 @@ typedef struct {
     size_t cap;
 } ByteBuf;
 
-static BOOL bytebuf_append(ByteBuf* b, const char* src, size_t n) {
+/* Makes room for n more bytes plus the terminating NUL */
+static BOOL bytebuf_reserve(ByteBuf* b, size_t n) {
     if (b->len + n + 1 > b->cap) {
         if (n > SIZE_MAX / 2 - b->len) return FALSE; /* The doubling below would wrap around */
         size_t new_cap = b->cap ? b->cap : 4096;
@@ -403,6 +406,11 @@ static BOOL bytebuf_append(ByteBuf* b, const char* src, size_t n) {
         b->data = p;
         b->cap  = new_cap;
     }
+    return TRUE;
+}
+
+static BOOL bytebuf_append(ByteBuf* b, const char* src, size_t n) {
+    if (!bytebuf_reserve(b, n)) return FALSE;
     memcpy(b->data + b->len, src, n);
     b->len += n;
     b->data[b->len] = '\0';
@@ -415,9 +423,9 @@ static BOOL bytebuf_append(ByteBuf* b, const char* src, size_t n) {
  * pipe is closed.
  */
 #define DRAIN_SLICE_BYTES (1024u * 1024u)
+#define DRAIN_READ_BYTES  (64u * 1024u) /* At most per ReadFile, straight into the buffer */
 static BOOL drain_pipe(HANDLE pipe, ByteBuf* buf, BOOL* eof) {
-    char chunk[4096];
-    for (size_t taken = 0; !*eof && taken < DRAIN_SLICE_BYTES; taken += sizeof(chunk)) {
+    for (size_t taken = 0; !*eof && taken < DRAIN_SLICE_BYTES;) {
         DWORD avail = 0;
         DWORD got = 0;
         if (!PeekNamedPipe(pipe, NULL, 0, NULL, &avail, NULL)) {
@@ -425,12 +433,15 @@ static BOOL drain_pipe(HANDLE pipe, ByteBuf* buf, BOOL* eof) {
             break;
         }
         if (avail == 0) break;
-        if (!ReadFile(pipe, chunk, avail < sizeof(chunk) ? avail : (DWORD)sizeof(chunk), &got, NULL) ||
-            got == 0) {
+        DWORD want = avail < DRAIN_READ_BYTES ? avail : DRAIN_READ_BYTES;
+        if (!bytebuf_reserve(buf, want)) return FALSE;
+        if (!ReadFile(pipe, buf->data + buf->len, want, &got, NULL) || got == 0) {
             *eof = TRUE;
             break;
         }
-        if (!bytebuf_append(buf, chunk, got)) return FALSE;
+        buf->len += got;
+        buf->data[buf->len] = '\0';
+        taken += got;
     }
     return TRUE;
 }
@@ -590,7 +601,8 @@ static BOOL spawn_hidden(
     BOOL attrs_ready = FALSE;
     BOOL ok = FALSE;
 
-    if (!CreatePipe(&out_r, &out_w, &sa, 0) || !CreatePipe(&err_r, &err_w, &sa, 0)) goto done;
+    /* A large stdout pipe lets restic write a big listing without waiting on every 4 KB */
+    if (!CreatePipe(&out_r, &out_w, &sa, STDOUT_PIPE_BYTES) || !CreatePipe(&err_r, &err_w, &sa, 0)) goto done;
     SetHandleInformation(out_r, HANDLE_FLAG_INHERIT, 0);
     SetHandleInformation(err_r, HANDLE_FLAG_INHERIT, 0);
 
