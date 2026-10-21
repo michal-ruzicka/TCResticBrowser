@@ -18,7 +18,9 @@
  * restic (internal/fuse/snapshots_dirstruct.go):
  * - snapshots are inserted in ascending order of time, ties broken by ID, and a name already taken
  *   in a folder gets "-1", "-2", ... appended, so the older snapshot keeps the plain name;
- * - "latest" in a folder of snapshots is the one inserted last with the newest time;
+ * - "latest" in a folder of snapshots is the one inserted last with the newest time; next to it
+ *   "latest → <short id>" shows the same snapshot and tells which one it is (restic's latest is a
+ *   symlink, whose target Total Commander would not show);
  * - the time is the snapshot's own wall-clock time (the zone it was taken in), and the four
  *   top-level folders exist even when the repository has no snapshots.
  * Host names and tags become a single Windows-safe path component the way restic's filenameFromTag
@@ -33,6 +35,8 @@
 #define SNAPSHOT_TREE_SHORT_ID_CHARS 8
 /* A full snapshot ID: 64 hexadecimal characters */
 #define SNAPSHOT_TREE_ID_CHARS 64
+/* "latest → " (U+2192 RIGHTWARDS ARROW between spaces), followed by the short ID of the latest snapshot */
+#define SNAPSHOT_TREE_LATEST_LINK_PREFIX "latest \xe2\x86\x92 "
 
 /*
  * Time format of the snapshot folders: placeholders YYYY (year), YY (year without century), MM

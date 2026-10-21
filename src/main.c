@@ -556,7 +556,7 @@ static BOOL prompt_repository_password(
     BOOL accepted = g_RequestProc(
         g_PluginNr,
         RT_Password,
-        L"Restic Repository Password",
+        title,
         prompt_text,
         out_pwd,
         (int)cap

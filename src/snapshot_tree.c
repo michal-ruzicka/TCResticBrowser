@@ -336,6 +336,27 @@ static void time_name(const Timestamp* t, const char* format, char* out) {
     *o = '\0';
 }
 
+/*
+ * Next to the latest folder of `dir`, if it has one, a folder named "latest → <short id>" that shows
+ * the same snapshot: restic mount's latest is a symlink whose target `ls -l` shows, and Total
+ * Commander shows no link targets, so the name says it
+ */
+static int add_latest_link(NodeIndex* idx, BuildNode* dir) {
+    BuildNode** slot = index_slot(idx, dir, "latest");
+    const BuildNode* latest = *slot;
+    if (!latest || !latest->pub.snapshot_id) return 1;
+    char name[sizeof(SNAPSHOT_TREE_LATEST_LINK_PREFIX) + SNAPSHOT_TREE_SHORT_ID_CHARS];
+    size_t prefix = sizeof(SNAPSHOT_TREE_LATEST_LINK_PREFIX) - 1;
+    memcpy(name, SNAPSHOT_TREE_LATEST_LINK_PREFIX, prefix);
+    memcpy(name + prefix, latest->pub.snapshot_id, SNAPSHOT_TREE_SHORT_ID_CHARS);
+    name[prefix + SNAPSHOT_TREE_SHORT_ID_CHARS] = '\0';
+    BuildNode* link = get_child(idx, dir, name, NULL);
+    if (!link) return 0;
+    link->pub.snapshot_id = latest->pub.snapshot_id;
+    link->pub.time        = latest->pub.time;
+    return 1;
+}
+
 static SnapshotTreeStatus build_from_records(const SnapshotRecord* records, size_t count, const char* time_format,
                                              SnapshotTree* tree) {
     NodeIndex idx = {NULL, 0, 0};
@@ -380,6 +401,14 @@ static SnapshotTreeStatus build_from_records(const SnapshotRecord* records, size
             free(tag_name);
             if (!tag || !add_snapshot(&idx, tag, when, rec, id, 1)) goto done;
         }
+    }
+    /* Only now is every latest final */
+    if (!add_latest_link(&idx, snapshots)) goto done;
+    for (size_t i = 0; i < hosts->kid_count; ++i) {
+        if (!add_latest_link(&idx, hosts->kids[i])) goto done;
+    }
+    for (size_t i = 0; i < tags->kid_count; ++i) {
+        if (!add_latest_link(&idx, tags->kids[i])) goto done;
     }
     if (finish_node(root)) status = SNAPSHOT_TREE_OK;
 done:

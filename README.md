@@ -43,7 +43,8 @@ to list and extract data and never modifies a repository.
 │   │   └── laptop\
 │   │       ├── 2026-10-17_21-15-42\
 │   │       ├── 2026-10-18_09-30-00\
-│   │       └── latest\
+│   │       ├── latest\
+│   │       └── latest → a1b2c3d4\
 │   ├── ids\
 │   │   ├── a1b2c3d4\
 │   │   └── e5f60718\
@@ -54,11 +55,13 @@ to list and extract data and never modifies a repository.
 │   │   │       └── Users\
 │   │   │           └── alice\
 │   │   │               └── report.pdf      <-- The backed-up files
-│   │   └── latest\                         <-- The newest snapshot
+│   │   ├── latest\                         <-- The newest snapshot
+│   │   └── latest → a1b2c3d4\              <-- The same, saying which one it is
 │   └── tags\
 │       └── daily\
 │           ├── 2026-10-18_09-30-00\
-│           └── latest\
+│           ├── latest\
+│           └── latest → a1b2c3d4\
 └── CloudS3Backup\
 ```
 
@@ -72,7 +75,11 @@ the one the snapshot was taken in, in that computer's time zone, and its
 format can be changed with `SnapshotTimeFormat=` (see the comments in the
 sample `TCResticBrowser.ini`; e.g. `YYYY-MM-DDThh.mm.ss` gives
 `2026-10-18T09.30.00`). Two
-snapshots with the same name get `-1`, `-2`, ... appended, and host names or
+snapshots with the same name get `-1`, `-2`, ... appended. `restic mount`
+shows `latest` as a link to the newest snapshot's folder; Total Commander
+cannot show where a link points, so next to `latest` (which keeps its name
+for scripts and hotlist entries) the plugin lists the same snapshot once
+more as `latest → <short ID>`, which tells which snapshot it is, and host names or
 tags containing characters Windows does not allow (`\ / : * ? " < > |`, or a
 dot or space at the end) show them as `_`. Paths saved by version 2.0
 (`2026-10-18_09-30-00_[a1b2c3d4]` directly in the repository) no longer
