@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v2.0.0] – 2026-10-21
 
 First release of the fork. Version 2.0.0 keeps its releases apart from the
 upstream 1.x line.
@@ -155,6 +155,7 @@ upstream 1.x line.
   only if no file or link of that name exists; otherwise another name is
   used.
 
+
 ## [v1.0.0] – 2026-10-18
 
 Upstream release of [Restic WFX Plugin](https://github.com/goldfix/Restic_WFX_Plugin)
@@ -171,5 +172,6 @@ by Pietro Partescano, the base of this fork was commit [c8481b43c9ab2867eee82471
   password dialog and passed to `restic.exe` in an isolated environment
   block.
 
-[Unreleased]: https://github.com/michal-ruzicka/TCResticBrowser/compare/c8481b43c9ab2867eee824719e3a9c6785db6c61...HEAD
+
+[v2.0.0]: https://github.com/michal-ruzicka/TCResticBrowser/compare/c8481b43c9ab2867eee824719e3a9c6785db6c61...v2.0.0
 [v1.0.0]: https://github.com/goldfix/Restic_WFX_Plugin/tree/1.0.0
