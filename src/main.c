@@ -1133,6 +1133,10 @@ static void log_configuration(const ResticConfig* cfg) {
     log_write(L"  SnapshotTimeFormat: %ls%ls; SnapshotCacheMB: %lu", time_format,
               cfg->snapshot_time_format_invalid ? L" (the configured one is unusable, default used)" : L"",
               (unsigned long)cfg->snapshot_cache_mb);
+    log_write(L"  PasswordTimeoutSeconds: %lu; PasswordTimeoutResetOnUse: %ls; SnapshotListRefreshSeconds: %lu; "
+              L"ConnectionLog: %ls", (unsigned long)cfg->password_timeout_s,
+              cfg->password_timeout_reset_on_use ? L"yes" : L"no", (unsigned long)cfg->snapshot_list_refresh_s,
+              cfg->connection_log ? L"yes" : L"no");
     log_write(L"  %u repositories:", (unsigned)cfg->repo_count);
     for (size_t i = 0; i < cfg->repo_count; ++i) {
         WCHAR target[CONFIG_MAX_PATH];
