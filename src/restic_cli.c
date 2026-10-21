@@ -468,7 +468,10 @@ static BOOL bytebuf_append(ByteBuf* b, const char* src, size_t n) {
  */
 #define DRAIN_SLICE_BYTES (1024u * 1024u)
 #define DRAIN_READ_BYTES  (64u * 1024u) /* At most per ReadFile, straight into the buffer */
-static BOOL drain_pipe(HANDLE pipe, ByteBuf* buf, BOOL* eof) {
+#define STDERR_KEEP_BYTES (1024u * 1024u)       /* Enough for any error message; the rest is read and dropped */
+#define STREAM_LINE_MAX_BYTES (16u * 1024u * 1024u) /* A streamed stdout line longer than this fails the command */
+static BOOL drain_pipe(HANDLE pipe, ByteBuf* buf, BOOL* eof, size_t keep_max) {
+    char discard[4096];
     for (size_t taken = 0; !*eof && taken < DRAIN_SLICE_BYTES;) {
         DWORD avail = 0;
         DWORD got = 0;
@@ -477,14 +480,18 @@ static BOOL drain_pipe(HANDLE pipe, ByteBuf* buf, BOOL* eof) {
             break;
         }
         if (avail == 0) break;
+        BOOL keep = keep_max == 0 || buf->len < keep_max;
         DWORD want = avail < DRAIN_READ_BYTES ? avail : DRAIN_READ_BYTES;
-        if (!bytebuf_reserve(buf, want)) return FALSE;
-        if (!ReadFile(pipe, buf->data + buf->len, want, &got, NULL) || got == 0) {
+        if (!keep && want > sizeof(discard)) want = (DWORD)sizeof(discard);
+        if (keep && !bytebuf_reserve(buf, want)) return FALSE;
+        if (!ReadFile(pipe, keep ? buf->data + buf->len : discard, want, &got, NULL) || got == 0) {
             *eof = TRUE;
             break;
         }
-        buf->len += got;
-        buf->data[buf->len] = '\0';
+        if (keep) {
+            buf->len += got;
+            buf->data[buf->len] = '\0';
+        }
         taken += got;
     }
     return TRUE;
@@ -744,23 +751,27 @@ static ResticResult collect_output(
     ResticLineProc line_proc = options ? options->line_proc : NULL;
     size_t delivered = 0; /* Bytes of stdout passed to line_proc and no longer kept */
 
-    for (;;) {
+    for (BOOL exited = FALSE;;) {
         size_t before = delivered + out->len + err->len;
-        if (!drain_pipe(out_pipe, out, &out_eof) || !drain_pipe(err_pipe, err, &err_eof)) {
+        if (!drain_pipe(out_pipe, out, &out_eof, 0) || !drain_pipe(err_pipe, err, &err_eof, STDERR_KEEP_BYTES)) {
             return RESTIC_ERR_OUT_OF_MEMORY;
         }
         BOOL got_data = delivered + out->len + err->len != before;
         if (line_proc) {
             ResticResult r = deliver_lines(out, line_proc, options->line_ctx, FALSE, &delivered);
             if (r != RESTIC_OK) return r;
+            if (out->len > STREAM_LINE_MAX_BYTES) return RESTIC_ERR_JSON_PARSE; /* No line is that long */
         }
 
+        /* After the exit, read on until the pipes hold nothing more (a slice is at most 1 MiB) */
+        if (exited) {
+            if (got_data) continue;
+            return line_proc ? deliver_lines(out, line_proc, options->line_ctx, TRUE, &delivered) : RESTIC_OK;
+        }
         /* Only sleep when idle; wake immediately when the child exits */
         if (!got_data && WaitForSingleObject(process, 20) == WAIT_OBJECT_0) {
-            if (!drain_pipe(out_pipe, out, &out_eof) || !drain_pipe(err_pipe, err, &err_eof)) {
-                return RESTIC_ERR_OUT_OF_MEMORY;
-            }
-            return line_proc ? deliver_lines(out, line_proc, options->line_ctx, TRUE, &delivered) : RESTIC_OK;
+            exited = TRUE;
+            continue;
         }
 
         if (options) {
@@ -1392,7 +1403,7 @@ ResticResult restic_dump_file(
 
             result = dump_drain_stdout(out_pipe, &st, &out_eof);
             if (result != RESTIC_OK) break;
-            if (!drain_pipe(err_pipe, &err, &err_eof)) {
+            if (!drain_pipe(err_pipe, &err, &err_eof, STDERR_KEEP_BYTES)) {
                 result = RESTIC_ERR_OUT_OF_MEMORY;
                 break;
             }
@@ -1401,7 +1412,7 @@ ResticResult restic_dump_file(
                 st.last_activity = GetTickCount64();
             } else if (WaitForSingleObject(pi.hProcess, 20) == WAIT_OBJECT_0) {
                 result = dump_drain_stdout(out_pipe, &st, &out_eof);
-                if (result == RESTIC_OK && !drain_pipe(err_pipe, &err, &err_eof)) {
+                if (result == RESTIC_OK && !drain_pipe(err_pipe, &err, &err_eof, STDERR_KEEP_BYTES)) {
                     result = RESTIC_ERR_OUT_OF_MEMORY;
                 }
                 break;

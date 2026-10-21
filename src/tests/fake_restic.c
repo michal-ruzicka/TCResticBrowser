@@ -58,6 +58,13 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (strcmp(mode, "/silent") == 0) return 1;
+    if (strcmp(mode, "/longline") == 0) { /* 17 MiB without a line break, then success */
+        static char block[1024 * 1024];
+        memset(block, 'x', sizeof(block));
+        for (int i = 0; i < 17; ++i) fwrite(block, 1, sizeof(block), stdout);
+        fflush(stdout);
+        return 0;
+    }
     if (strcmp(mode, "/norepo") == 0) {
         put_err("Fatal: repository does not exist\n");
         return 10;

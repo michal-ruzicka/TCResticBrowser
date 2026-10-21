@@ -643,11 +643,31 @@ static void test_exec_line_streaming(void) {
     EXPECT_TRUE(count.lines == 40000 && count.in_order, "Every line whole and in order, the last one too");
     EXPECT_TRUE(kept < 4096, "stdout was not accumulated");
 
+    /* stderr beyond 1 MiB is read but not kept: a flood of warnings cannot fill memory */
+    ResticResult flood = run_cmd(L"/c \"(for /L %i in (1,1,30000) do @echo warning_%i_0123456789_0123456789_0123456789 1>&2) & exit 0\"",
+                                 NULL, &out);
+    size_t err_kept = out.error_length;
+    restic_free_command_output(&out);
+    EXPECT_TRUE(flood == RESTIC_OK && err_kept >= 1024u * 1024u && err_kept < 1024u * 1024u + 128u * 1024u,
+                "stderr is kept up to 1 MiB, the rest read and dropped");
+
     LineCount stop = {0, 1, 100};
     opts.line_ctx = &stop;
     res = run_cmd(L"/c \"for /L %i in (1,1,200000) do @echo line_%i_0123456789_0123456789 \"", &opts, &out);
     restic_free_command_output(&out);
     EXPECT_TRUE(res == RESTIC_ERR_JSON_PARSE && stop.lines == 100, "A consumer error stops the child at once");
+
+    /* A streamed line without end (17 MiB without a line break) fails instead of filling memory */
+    WCHAR fake[MAX_PATH];
+    DWORD len = GetModuleFileNameW(NULL, fake, MAX_PATH);
+    WCHAR* slash = (len > 0 && len < MAX_PATH) ? wcsrchr(fake, L'\\') : NULL;
+    EXPECT_TRUE(slash != NULL, "Locate the test's own folder");
+    wcscpy_s(slash + 1, MAX_PATH - (size_t)(slash + 1 - fake), L"fake_restic.exe");
+    LineCount endless = {0, 1, 0};
+    opts.line_ctx = &endless;
+    res = restic_exec_command(fake, L"repo", L"pw", L"/longline", &opts, &out);
+    restic_free_command_output(&out);
+    EXPECT_TRUE(res == RESTIC_ERR_JSON_PARSE && endless.lines == 0, "A streamed line over 16 MiB fails the command");
 }
 
 /* ============================================================================================ */
