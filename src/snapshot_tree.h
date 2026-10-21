@@ -1,0 +1,75 @@
+#pragma once
+#include <stddef.h>
+#include <stdint.h>
+
+/*
+ * The folder tree `restic mount` presents above the snapshots, built from the output of
+ * `restic snapshots --json`:
+ *
+ *   ids/<short id>/            one folder per snapshot
+ *   snapshots/<time>/          one folder per snapshot, plus latest/
+ *   hosts/<host>/<time>/       per host, plus latest/ in each host
+ *   tags/<tag>/<time>/         per tag (a snapshot with several tags is in each), plus latest/
+ *
+ * This is restic mount's default set of path templates ("ids/%i", "snapshots/%T", "hosts/%h/%T",
+ * "tags/%t/%T") with restic's own colon-free time template "2006-01-02_15-04-05" (see `restic help
+ * mount`), because Windows file names cannot contain the colons of the default RFC 3339 one. As in
+ * restic (internal/fuse/snapshots_dirstruct.go):
+ * - snapshots are inserted in ascending order of time, ties broken by ID, and a name already taken
+ *   in a folder gets "-1", "-2", ... appended, so the older snapshot keeps the plain name;
+ * - "latest" in a folder of snapshots is the one inserted last with the newest time;
+ * - the time is the snapshot's own wall-clock time (the zone it was taken in), and the four
+ *   top-level folders exist even when the repository has no snapshots.
+ * Host names and tags become a single Windows-safe path component the way restic's filenameFromTag
+ * treats tags ("" and "." become "_", ".." becomes "__", "/" becomes "_"), extended to characters
+ * Windows does not allow in file names (\ : * ? " < > | and control characters), trailing dots and
+ * spaces (which Win32 strips), invalid UTF-8 and names longer than 255 UTF-16 units.
+ *
+ * Portable C11 with no Win32 dependency, like json.c, so it can be tested on any platform.
+ */
+
+/* What restic prints as a snapshot's short ID and uses for ids/ */
+#define SNAPSHOT_TREE_SHORT_ID_CHARS 8
+/* A full snapshot ID: 64 hexadecimal characters */
+#define SNAPSHOT_TREE_ID_CHARS 64
+
+typedef struct SnapshotNode SnapshotNode;
+struct SnapshotNode {
+    const char* name;                    /* UTF-8, one Windows-safe path component */
+    uint64_t time;                       /* FILETIME ticks (UTC): the snapshot's time, or the newest
+                                            one below a folder; 0 for a folder without snapshots */
+    const char* snapshot_id;             /* Full ID when this folder shows a snapshot, else NULL */
+    const SnapshotNode* const* children; /* Sorted by strcmp() of the names; none for a snapshot */
+    size_t child_count;
+};
+
+typedef enum {
+    SNAPSHOT_TREE_OK = 0,
+    SNAPSHOT_TREE_BAD_JSON,  /* Not the JSON array (or null) `restic snapshots --json` prints */
+    SNAPSHOT_TREE_NO_MEMORY
+} SnapshotTreeStatus;
+
+typedef struct SnapshotTree SnapshotTree;
+
+/*
+ * Builds the tree from `len` bytes of `restic snapshots --json` output (a literal null is an empty
+ * repository). Entries without a valid time or a hexadecimal ID of 8 to 64 characters are skipped.
+ * Release the tree with snapshot_tree_free().
+ */
+SnapshotTreeStatus snapshot_tree_build(const char* json, size_t len, SnapshotTree** out);
+
+/* Releases a tree and every node obtained from it. NULL is accepted. */
+void snapshot_tree_free(SnapshotTree* tree);
+
+/* The folder holding ids, snapshots, hosts and tags */
+const SnapshotNode* snapshot_tree_root(const SnapshotTree* tree);
+
+/* Number of snapshots in the tree */
+size_t snapshot_tree_snapshot_count(const SnapshotTree* tree);
+
+/*
+ * The child of `dir` named `name` (UTF-8); an exact match first, otherwise the first one equal
+ * ignoring ASCII case (a path typed into Total Commander). NULL if there is none, or if `dir` is a
+ * snapshot.
+ */
+const SnapshotNode* snapshot_tree_child(const SnapshotNode* dir, const char* name);

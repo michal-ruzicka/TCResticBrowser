@@ -115,6 +115,7 @@ are not shipped in the ZIP) and run from the repository root:
 | Program | Scope |
 |---|---|
 | `test_json` | The JSON reader on its own: malformed input, escapes, surrogates, exact 64-bit integers, the nesting limit, real Restic output, pinned JSONTestSuite edge cases |
+| `test_snapshot_tree` | RFC 3339 timestamps and the `restic mount` folder tree (portable C, also builds with gcc/clang and sanitizers): naming, `-1` suffixes, `latest`, host and tag names made Windows-safe |
 | `test_config` | `TCResticBrowser.ini` lookup and parsing, `restic.exe` resolution (never from the current directory), root listing, the inert plugin without an INI |
 | `test_restic_cli` | Snapshot and `ls` parsers, argument quoting, child-process handling with `cmd.exe` and a fake `restic` stand-in (`fake_restic.exe`), and live tests against `tmp\restic.exe` |
 | `test_plugin_dll` | Loads the built DLL like Total Commander does: exact export surface, icon and version resources, INI lookup, and live navigation and extraction through the WFX API |

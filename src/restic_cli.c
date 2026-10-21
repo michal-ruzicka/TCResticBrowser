@@ -71,87 +71,6 @@ BOOL restic_parse_iso8601_time(const char* iso_str, FILETIME* out_ft) {
     return TRUE;
 }
 
-#define SNAPSHOT_SHORT_ID_CHARS 8  /* What restic prints as short_id */
-#define SNAPSHOT_ID_MAX_CHARS   64 /* A full snapshot ID */
-
-/* restic_format_snapshot_dirname() with the first id_chars characters of the ID */
-static BOOL format_snapshot_dirname_n(
-    const char* iso_time,
-    const char* snapshot_id,
-    size_t id_chars,
-    WCHAR* out_dirname,
-    size_t out_capacity
-) {
-    if (!iso_time || !snapshot_id || !out_dirname || out_capacity == 0) {
-        return FALSE;
-    }
-    out_dirname[0] = L'\0';
-
-    FILETIME ignored;
-    if (!restic_parse_iso8601_time(iso_time, &ignored) || !is_hex_string(snapshot_id)) {
-        return FALSE;
-    }
-
-    char short_id[SNAPSHOT_ID_MAX_CHARS + 1] = {0};
-    strncpy_s(short_id, sizeof(short_id), snapshot_id,
-              id_chars < SNAPSHOT_ID_MAX_CHARS ? id_chars : SNAPSHOT_ID_MAX_CHARS);
-
-    char formatted[128] = {0};
-    int written = snprintf(
-        formatted, sizeof(formatted), "%.4s-%.2s-%.2s_%.2s-%.2s-%.2s_[%s]",
-        iso_time + 0, iso_time + 5, iso_time + 8,
-        iso_time + 11, iso_time + 14, iso_time + 17, short_id
-    );
-    if (written <= 0 || (size_t)written >= sizeof(formatted)) {
-        return FALSE;
-    }
-
-    return MultiByteToWideChar(CP_UTF8, 0, formatted, -1, out_dirname, (int)out_capacity) > 0;
-}
-
-BOOL restic_format_snapshot_dirname(
-    const char* iso_time,
-    const char* snapshot_id,
-    WCHAR* out_dirname,
-    size_t out_capacity
-) {
-    return format_snapshot_dirname_n(iso_time, snapshot_id, SNAPSHOT_SHORT_ID_CHARS, out_dirname, out_capacity);
-}
-
-BOOL restic_extract_snapshot_id(
-    const WCHAR* snapshot_dirname,
-    char* out_id,
-    size_t out_capacity
-) {
-    if (!snapshot_dirname || !out_id || out_capacity < 2) {
-        return FALSE;
-    }
-    out_id[0] = '\0';
-
-    const WCHAR* open_bracket  = wcsrchr(snapshot_dirname, L'[');
-    const WCHAR* close_bracket = wcsrchr(snapshot_dirname, L']');
-    if (!open_bracket || !close_bracket || close_bracket <= open_bracket + 1) {
-        return FALSE;
-    }
-
-    size_t len = (size_t)(close_bracket - (open_bracket + 1));
-    if (len >= out_capacity) {
-        return FALSE;
-    }
-
-    for (size_t i = 0; i < len; ++i) {
-        WCHAR wc = open_bracket[1 + i];
-        if (!((wc >= L'0' && wc <= L'9') ||
-              (wc >= L'a' && wc <= L'f') ||
-              (wc >= L'A' && wc <= L'F'))) {
-            return FALSE;
-        }
-        out_id[i] = (char)wc;
-    }
-    out_id[len] = '\0';
-    return TRUE;
-}
-
 BOOL restic_normalize_filter_path(
     const WCHAR* subpath_w,
     char* out_utf8,
@@ -303,145 +222,6 @@ static BOOL append_find_data(
     }
     (*items)[(*count)++] = *entry;
     return TRUE;
-}
-
-typedef struct {
-    const char* id;
-    size_t index;
-} SnapshotIdRef;
-
-static int compare_snapshot_ids(const void* a, const void* b) {
-    return strcmp(((const SnapshotIdRef*)a)->id, ((const SnapshotIdRef*)b)->id);
-}
-
-static size_t common_prefix_length(const char* a, const char* b) {
-    size_t n = 0;
-    while (a[n] != '\0' && a[n] == b[n]) ++n;
-    return n;
-}
-
-/*
- * Restic resolves a snapshot by any unique prefix of its ID, and the 8-character short_id is no
- * longer unique once a repository holds tens of thousands of snapshots: "restic ls <short_id>" then
- * fails as ambiguous. For every element of the snapshots array this computes how many characters of
- * its full ID are needed to be unique (at least 8; 0 when it has no usable ID), comparing each ID
- * only with its neighbours in sorted order. *out_chars is NULL for an empty array.
- */
-static BOOL unique_id_prefixes(const JsonValue* array, size_t** out_chars) {
-    *out_chars = NULL;
-    size_t n = 0;
-    for (const JsonValue* v = array->child; v; v = v->next) ++n;
-    if (n == 0) return TRUE;
-
-    size_t* chars       = (size_t*)calloc(n, sizeof(size_t));
-    SnapshotIdRef* refs = (SnapshotIdRef*)malloc(n * sizeof(SnapshotIdRef));
-    if (!chars || !refs) {
-        free(chars);
-        free(refs);
-        return FALSE;
-    }
-    size_t m = 0, index = 0;
-    for (const JsonValue* v = array->child; v; v = v->next, ++index) {
-        const char* id = v->type == JSON_OBJECT ? json_string(json_object_get(v, "id")) : NULL;
-        if (id && is_hex_string(id) && strlen(id) <= SNAPSHOT_ID_MAX_CHARS) {
-            refs[m].id    = id;
-            refs[m].index = index;
-            ++m;
-        }
-    }
-    qsort(refs, m, sizeof(SnapshotIdRef), compare_snapshot_ids);
-    for (size_t i = 0; i < m; ++i) {
-        size_t shared = 0;
-        if (i > 0) shared = common_prefix_length(refs[i].id, refs[i - 1].id);
-        if (i + 1 < m) {
-            size_t next = common_prefix_length(refs[i].id, refs[i + 1].id);
-            if (next > shared) shared = next;
-        }
-        size_t need = shared + 1 > SNAPSHOT_SHORT_ID_CHARS ? shared + 1 : SNAPSHOT_SHORT_ID_CHARS;
-        size_t len  = strlen(refs[i].id);
-        chars[refs[i].index] = need < len ? need : len;
-    }
-    free(refs);
-    *out_chars = chars;
-    return TRUE;
-}
-
-ResticResult restic_parse_snapshots_json(
-    const char* json_text,
-    WIN32_FIND_DATAW** out_items,
-    size_t* out_count
-) {
-    if (!json_text || !out_items || !out_count) {
-        return RESTIC_ERR_INVALID_ARG;
-    }
-    *out_items = NULL;
-    *out_count = 0;
-
-    JsonDoc* doc = json_parse(json_text, strlen(json_text));
-    if (!doc) {
-        return RESTIC_ERR_JSON_PARSE;
-    }
-    const JsonValue* root = json_root(doc);
-    if (root->type == JSON_NULL) { /* Older Restic versions print "null" for an empty repository */
-        json_free(doc);
-        return RESTIC_OK;
-    }
-    if (root->type != JSON_ARRAY) {
-        json_free(doc);
-        return RESTIC_ERR_JSON_PARSE;
-    }
-
-    size_t* id_chars = NULL;
-    if (!unique_id_prefixes(root, &id_chars)) {
-        json_free(doc);
-        return RESTIC_ERR_OUT_OF_MEMORY;
-    }
-
-    size_t capacity = 0, index = 0;
-    for (const JsonValue* snap = root->child; snap; snap = snap->next, ++index) {
-        if (snap->type != JSON_OBJECT) continue;
-
-        const char* time_str = json_string(json_object_get(snap, "time"));
-        const char* short_id = json_string(json_object_get(snap, "short_id"));
-        const char* full_id  = json_string(json_object_get(snap, "id"));
-        const char* id_str   = NULL;
-        size_t id_len        = SNAPSHOT_SHORT_ID_CHARS;
-        if (id_chars && id_chars[index] > SNAPSHOT_SHORT_ID_CHARS) {
-            id_str = full_id; /* Its short_id is shared with another snapshot */
-            id_len = id_chars[index];
-        } else if (short_id && short_id[0] != '\0') {
-            id_str = short_id;
-        } else if (full_id && full_id[0] != '\0') {
-            id_str = full_id;
-        }
-        if (!time_str || !id_str) continue;
-
-        WIN32_FIND_DATAW fd;
-        memset(&fd, 0, sizeof(fd));
-        FILETIME ft;
-        if (!format_snapshot_dirname_n(time_str, id_str, id_len, fd.cFileName, MAX_PATH) ||
-            !restic_parse_iso8601_time(time_str, &ft)) {
-            continue;
-        }
-
-        fd.dwFileAttributes = FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY;
-        fd.ftLastWriteTime  = ft;
-        fd.ftCreationTime   = ft;
-        fd.ftLastAccessTime = ft;
-
-        if (!append_find_data(out_items, out_count, &capacity, &fd)) {
-            free(*out_items);
-            *out_items = NULL;
-            *out_count = 0;
-            free(id_chars);
-            json_free(doc);
-            return RESTIC_ERR_OUT_OF_MEMORY;
-        }
-    }
-
-    free(id_chars);
-    json_free(doc);
-    return RESTIC_OK;
 }
 
 /* Checks whether node_path is an immediate child of filter_path */
@@ -1124,13 +904,13 @@ ResticResult restic_list_snapshots(
     const WCHAR* repo_target,
     const WCHAR* password,
     const ResticExecOptions* options,
-    WIN32_FIND_DATAW** out_items,
-    size_t* out_count,
+    SnapshotTree** out_tree,
     WCHAR* out_error_msg,
     size_t err_capacity
 ) {
     if (out_error_msg && err_capacity > 0) out_error_msg[0] = L'\0';
-    if (!restic_exe || !repo_target || !password || !out_items || !out_count) {
+    if (out_tree) *out_tree = NULL;
+    if (!restic_exe || !repo_target || !password || !out_tree) {
         return RESTIC_ERR_INVALID_ARG;
     }
 
@@ -1139,7 +919,11 @@ ResticResult restic_list_snapshots(
                                      options, &cmd_out, out_error_msg, err_capacity);
     if (res != RESTIC_OK) return res;
 
-    res = restic_parse_snapshots_json(cmd_out.output, out_items, out_count);
+    switch (snapshot_tree_build(cmd_out.output, cmd_out.length, out_tree)) {
+        case SNAPSHOT_TREE_OK: res = RESTIC_OK; break;
+        case SNAPSHOT_TREE_NO_MEMORY: res = RESTIC_ERR_OUT_OF_MEMORY; break;
+        default: res = RESTIC_ERR_JSON_PARSE; break;
+    }
     restic_free_command_output(&cmd_out);
     return res;
 }

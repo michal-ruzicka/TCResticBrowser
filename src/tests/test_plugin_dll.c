@@ -471,7 +471,7 @@ static DWORD WINAPI mt_list_worker(LPVOID param) {
         int entries = 1;
         while (job->plugin->find_next_w(h, &fd)) entries++;
         job->plugin->find_close(h);
-        if (entries != 2) InterlockedIncrement(&g_e2e_mt_failures); /* Fixture has two snapshots */
+        if (entries != 3) InterlockedIncrement(&g_e2e_mt_failures); /* Two snapshots and latest */
     }
     return 0;
 }
@@ -799,6 +799,20 @@ static void test_e2e_extraction_edge_cases(const Plugin* p, const WCHAR* dir, co
 }
 
 /* Recursively descends the first directory at each depth until the fixture "data" directory is found */
+/* Lists `path` and joins the entry names with '|' (sorted as the plugin returns them); FALSE on error */
+static BOOL list_names(const Plugin* p, const WCHAR* path, WCHAR* out, size_t cap) {
+    WIN32_FIND_DATAW fd;
+    out[0] = L'\0';
+    HANDLE h = p->find_first_w((WCHAR*)path, &fd);
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
+    do {
+        if (out[0] != L'\0') wcscat_s(out, cap, L"|");
+        wcscat_s(out, cap, fd.cFileName);
+    } while (p->find_next_w(h, &fd));
+    p->find_close(h);
+    return TRUE;
+}
+
 static BOOL descend_to_fixture_data(
     const Plugin* p,
     const WCHAR* current_path,
@@ -889,32 +903,75 @@ static void test_live_end_to_end_navigation(void) {
     EXPECT_TRUE(p.init_w(42, (void*)e2e_progress_proc, (void*)e2e_log_proc, (void*)e2e_request_proc) == 0,
                 "Register Total Commander callbacks");
 
-    /* 1. Level 1 (\MainRepo): wrong password on first prompt -> automatic retry -> 2 snapshots listed */
+    /* 1. Level 1 (\MainRepo): wrong password on first prompt -> automatic retry -> restic mount's folders */
     g_e2e_pwd_mode    = 0;
     g_e2e_pwd_prompts = 0;
     g_e2e_msg_dialogs = 0;
     g_e2e_error_logs  = 0;
 
     WIN32_FIND_DATAW fd;
-    HANDLE h = p.find_first_w(L"\\MainRepo", &fd);
-    EXPECT_TRUE(h != INVALID_HANDLE_VALUE, "Level 1 snapshot enumeration succeeds after password retry");
+    static WCHAR names[1024];
+    EXPECT_TRUE(list_names(&p, L"\\MainRepo", names, _countof(names)) && wcscmp(names, L"hosts|ids|snapshots|tags") == 0,
+                "Level 1 shows restic mount's folders after a password retry");
     EXPECT_TRUE(g_e2e_pwd_prompts == 2, "Prompted twice (initial + 1 retry after wrong password)");
     EXPECT_TRUE(wcsstr(g_e2e_last_prompt, L"Wrong password") != NULL, "Retry prompt tells the user the password was wrong");
     EXPECT_TRUE(g_e2e_msg_dialogs == 0, "No error dialog when retry succeeds");
 
+    /* The levels above the snapshots come from the one snapshot list cached for this repository */
+    g_e2e_pwd_prompts = 0;
+    HANDLE h = p.find_first_w(L"\\MainRepo\\snapshots", &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE, "snapshots/ listed");
     WCHAR latest_snap[MAX_PATH] = {0};
     size_t snap_count = 0;
+    BOOL has_latest = FALSE;
     do {
         snap_count++;
-        wcsncpy_s(latest_snap, MAX_PATH, fd.cFileName, _TRUNCATE);
+        EXPECT_TRUE((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 && fd.ftLastWriteTime.dwHighDateTime != 0xFFFFFFFF,
+                    "Snapshot folders carry the snapshot time");
+        if (wcscmp(fd.cFileName, L"latest") == 0) {
+            has_latest = TRUE;
+        } else if (wcscmp(fd.cFileName, latest_snap) > 0) {
+            wcsncpy_s(latest_snap, MAX_PATH, fd.cFileName, _TRUNCATE); /* Names sort by time */
+        }
     } while (p.find_next_w(h, &fd));
     p.find_close(h);
-    EXPECT_TRUE(snap_count == 2, "Both fixture snapshots returned at Level 1");
+    EXPECT_TRUE(snap_count == 3 && has_latest, "Both fixture snapshots and latest in snapshots/");
+    EXPECT_TRUE(latest_snap[4] == L'-' && latest_snap[10] == L'_' && latest_snap[13] == L'-' && wcslen(latest_snap) >= 19,
+                "Named by restic mount's colon-free time template 2006-01-02_15-04-05");
+    EXPECT_TRUE(list_names(&p, L"\\MainRepo\\ids", names, _countof(names)) && wcslen(names) == 17 && names[8] == L'|',
+                "ids/ holds two 8-character short IDs");
+    WCHAR short_id[9] = {0};
+    wcsncpy_s(short_id, _countof(short_id), names, 8);
+    EXPECT_TRUE(list_names(&p, L"\\MainRepo\\hosts", names, _countof(names)) && wcschr(names, L'|') == NULL &&
+                names[0] != L'\0', "hosts/ holds the fixture's single host");
+    static WCHAR host_dir[MAX_PATH * 2];
+    swprintf_s(host_dir, _countof(host_dir), L"\\MainRepo\\hosts\\%ls", names);
+    EXPECT_TRUE(list_names(&p, host_dir, names, _countof(names)) && wcsstr(names, L"|latest") != NULL,
+                "hosts/<host>/ holds the snapshots and latest");
+    SetLastError(0);
+    EXPECT_TRUE(p.find_first_w(L"\\MainRepo\\tags", &fd) == INVALID_HANDLE_VALUE && GetLastError() == ERROR_NO_MORE_FILES,
+                "tags/ is empty: the fixture snapshots have no tags");
+    SetLastError(0);
+    EXPECT_TRUE(p.find_first_w(L"\\MainRepo\\no-such-folder", &fd) == INVALID_HANDLE_VALUE &&
+                GetLastError() == ERROR_PATH_NOT_FOUND, "Unknown folder below the alias -> ERROR_PATH_NOT_FOUND");
+    SetLastError(0);
+    EXPECT_TRUE(p.find_first_w(L"\\MainRepo\\snapshots\\1999-01-01_00-00-00", &fd) == INVALID_HANDLE_VALUE &&
+                GetLastError() == ERROR_PATH_NOT_FOUND, "Unknown snapshot -> ERROR_PATH_NOT_FOUND");
+    EXPECT_TRUE(g_e2e_pwd_prompts == 0 && g_e2e_msg_dialogs == 0, "No prompt and no dialog while browsing the tree");
+
+    /* The snapshot root is the same through latest and ids/ */
+    static WCHAR via_latest[1024], via_id[1024];
+    EXPECT_TRUE(list_names(&p, L"\\MainRepo\\snapshots\\latest", via_latest, _countof(via_latest)) && via_latest[0],
+                "latest/ shows the newest snapshot's root");
+    static WCHAR id_path[MAX_PATH];
+    swprintf_s(id_path, _countof(id_path), L"\\MainRepo\\ids\\%ls", short_id);
+    EXPECT_TRUE(list_names(&p, id_path, via_id, _countof(via_id)) && wcscmp(via_id, via_latest) == 0,
+                "ids/<short id>/ shows a snapshot root");
 
     /* 2. Level 2+ (\MainRepo\<snap>\...): session password cached in RAM (0 additional prompts) */
     g_e2e_pwd_prompts = 0;
     static WCHAR snap_root[MAX_PATH * 2], data_path[MAX_PATH * 2]; /* Static: /analyze (C6262) caps a frame at 16 KB */
-    swprintf_s(snap_root, _countof(snap_root), L"\\MainRepo\\%ls", latest_snap);
+    swprintf_s(snap_root, _countof(snap_root), L"\\MainRepo\\snapshots\\%ls", latest_snap);
     EXPECT_TRUE(descend_to_fixture_data(&p, snap_root, 0, data_path, _countof(data_path)),
                 "Descend snapshot directory tree down to fixture data folder");
 
@@ -1058,10 +1115,11 @@ static void test_live_end_to_end_navigation(void) {
     h = p.find_first_w(L"\\SecondRepo", &fd);
     EXPECT_TRUE(h != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 1, "Unverified password not cached after a user abort");
     p.find_close(h);
-    /* A password restic has accepted survives a later ESC */
+    /* A password restic has accepted survives a later ESC (inside a snapshot: the folders above come from
+       the cached snapshot list and run no restic that could be aborted) */
     g_e2e_force_abort = TRUE;
-    EXPECT_TRUE(p.find_first_w(L"\\SecondRepo", &fd) == INVALID_HANDLE_VALUE && GetLastError() == ERROR_CANCELLED,
-                "Second user abort");
+    EXPECT_TRUE(p.find_first_w(L"\\SecondRepo\\snapshots\\latest", &fd) == INVALID_HANDLE_VALUE &&
+                GetLastError() == ERROR_CANCELLED, "Second user abort");
     g_e2e_force_abort = FALSE;
     g_e2e_pwd_prompts = 0;
     h = p.find_first_w(L"\\SecondRepo", &fd);
@@ -1076,7 +1134,7 @@ static void test_live_end_to_end_navigation(void) {
         g_e2e_mt_failures = 0;
         for (int i = 0; i < THREADS; ++i) {
             jobs[i].plugin = &p;
-            jobs[i].path   = (i % 2) ? L"\\MainRepo" : L"\\SecondRepo";
+            jobs[i].path   = (i % 2) ? L"\\MainRepo\\snapshots" : L"\\SecondRepo\\snapshots";
             threads[i]     = CreateThread(NULL, 0, mt_list_worker, &jobs[i], 0, NULL);
         }
         WaitForMultipleObjects(THREADS, threads, TRUE, 120000);
@@ -1143,7 +1201,7 @@ static void test_live_end_to_end_navigation(void) {
                 wcscmp(g_e2e_last_msg, L"No repository password was remembered.") == 0 &&
                 wcscmp(exec_name, L"\\") == 0,
                 "Nothing to forget: a stale entry still sends Total Commander back to the root");
-    WCHAR some_file[] = L"\\MainRepo\\2026-10-18_12-00-00_[abcd1234]\\readme.txt";
+    WCHAR some_file[] = L"\\MainRepo\\snapshots\\2026-10-18_12-00-00\\readme.txt";
     WCHAR properties[] = L"properties", chmod_verb[] = L"chmod 755", quote_verb[] = L"quote cd x";
     EXPECT_TRUE(p.execute_w(NULL, some_file, open_verb) == FS_EXEC_YOURSELF,
                 "Enter on a snapshot file is left to Total Commander (download and open)");
@@ -1287,7 +1345,7 @@ static void test_live_paths_with_spaces(void) {
         g_e2e_pwd_prompts = 0;
         g_e2e_msg_dialogs = 0;
         WCHAR path[MAX_PATH];
-        swprintf_s(path, MAX_PATH, L"\\%ls", aliases[i]);
+        swprintf_s(path, MAX_PATH, L"\\%ls\\snapshots", aliases[i]);
         WIN32_FIND_DATAW fd;
         HANDLE h = p.find_first_w(path, &fd);
         size_t snaps = 0;
@@ -1298,7 +1356,7 @@ static void test_live_paths_with_spaces(void) {
         char msg[160];
         snprintf(msg, sizeof(msg), "Snapshots listed through alias #%u (path with spaces), one prompt, no error",
                  (unsigned)i);
-        EXPECT_TRUE(snaps == 2 && g_e2e_pwd_prompts == 1 && g_e2e_msg_dialogs == 0, msg);
+        EXPECT_TRUE(snaps == 3 && g_e2e_pwd_prompts == 1 && g_e2e_msg_dialogs == 0, msg); /* Two and latest */
     }
 
     /* PasswordTimeoutSeconds=5: reused within the timeout (counted from when restic first accepted

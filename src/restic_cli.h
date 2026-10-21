@@ -1,6 +1,7 @@
 #pragma once
 #include <windows.h>
 #include <stddef.h>
+#include "snapshot_tree.h"
 
 /**
  * Status codes returned by Restic CLI execution and JSON parsing functions.
@@ -66,28 +67,6 @@ typedef struct {
 BOOL restic_parse_iso8601_time(const char* iso_str, FILETIME* out_ft);
 
 /**
- * Formats a snapshot virtual directory name ("YYYY-MM-DD_HH-MM-SS_[short_id]") from a valid
- * ISO-8601 timestamp and a hexadecimal snapshot ID (only the first 8 characters are used).
- * Returns FALSE if the timestamp is invalid or the ID is not hexadecimal.
- */
-BOOL restic_format_snapshot_dirname(
-    const char* iso_time,
-    const char* snapshot_id,
-    WCHAR* out_dirname,
-    size_t out_capacity
-);
-
-/**
- * Extracts the hexadecimal snapshot short_id from a formatted snapshot directory name
- * ("YYYY-MM-DD_HH-MM-SS_[short_id]" -> "short_id").
- */
-BOOL restic_extract_snapshot_id(
-    const WCHAR* snapshot_dirname,
-    char* out_id,
-    size_t out_capacity
-);
-
-/**
  * Normalizes a WFX wide subpath (e.g. L"", L"\\", L"\\C\\Users\\Docs\\") into the canonical
  * UTF-8 forward-slash absolute path required by Restic (e.g. "/", "/C/Users/Docs").
  */
@@ -112,18 +91,6 @@ WCHAR* restic_quote_arg(const WCHAR* arg);
  * when there is nothing to report. The text never contains the password's own characters.
  */
 BOOL restic_describe_password(const WCHAR* password, WCHAR* out, size_t cap);
-
-/**
- * Parses the JSON array printed by `restic snapshots --json` (a literal `null` is treated as an
- * empty list) into directory entries named `YYYY-MM-DD_HH-MM-SS_[short_id]`. When two snapshots
- * share a short_id, both names carry the shortest longer prefix of their IDs that is unique.
- * Caller must free `*out_items` with `free()`.
- */
-ResticResult restic_parse_snapshots_json(
-    const char* json_text,
-    WIN32_FIND_DATAW** out_items,
-    size_t* out_count
-);
 
 /**
  * Parses the NDJSON stream printed by `restic ls --json <snapshot> <filter_path>` into the
@@ -159,16 +126,16 @@ ResticResult restic_exec_command(
 void restic_free_command_output(ResticCommandOutput* result);
 
 /**
- * Runs `restic snapshots --json --no-lock` and returns Level 1 directory entries.
- * On failure `out_error_msg` (optional) receives the reason reported by Restic.
+ * Runs `restic snapshots --json --no-lock` and builds the restic mount folder tree from it
+ * (snapshot_tree.h); release it with snapshot_tree_free(). On failure `out_error_msg` (optional)
+ * receives the reason reported by Restic.
  */
 ResticResult restic_list_snapshots(
     const WCHAR* restic_exe,
     const WCHAR* repo_target,
     const WCHAR* password,
     const ResticExecOptions* options,
-    WIN32_FIND_DATAW** out_items,
-    size_t* out_count,
+    SnapshotTree** out_tree,
     WCHAR* out_error_msg,
     size_t err_capacity
 );

@@ -25,6 +25,8 @@
 #include "fsplugin.h"
 #include "config.h"
 #include "restic_cli.h"
+#include "repo_cache.h"
+#include "snapshot_tree.h"
 #include "log.h"
 #include "version.h"
 
@@ -144,6 +146,15 @@ static void session_table_release_locked(void) {
     g_SessionWerExcluded = FALSE;
 }
 
+/*
+ * Wipes one slot and drops everything read from its repository (repo_cache.h): what was read with
+ * a password is never shown once the password is gone. Caller holds g_SessionLock.
+ */
+static void session_wipe_slot_locked(SessionSlot* slot) {
+    if (slot->used) repo_cache_forget(slot->alias);
+    SecureZeroMemory(slot, sizeof(*slot));
+}
+
 /**
  * Reentrant directory enumeration state returned as HANDLE by FsFindFirstW.
  */
@@ -157,10 +168,9 @@ typedef struct {
  * Virtual path hierarchy levels inside the WFX plugin.
  */
 typedef enum {
-    WFX_PATH_ROOT = 0,     /* "\" -> list configured repository aliases */
-    WFX_PATH_REPO,         /* "\<RepoAlias>" -> list snapshots */
-    WFX_PATH_SNAPSHOT_DIR, /* "\<RepoAlias>\<SnapshotDir>[\<SubPath>]" -> list directory */
-    WFX_PATH_INVALID       /* Malformed path or invalid snapshot directory name */
+    WFX_PATH_ROOT = 0, /* "\" -> list configured repository aliases */
+    WFX_PATH_REPO,     /* "\<RepoAlias>[\...]" -> the restic mount tree of that repository */
+    WFX_PATH_INVALID   /* Malformed path */
 } WfxPathLevel;
 
 /**
@@ -169,9 +179,41 @@ typedef enum {
 typedef struct {
     WfxPathLevel level;
     WCHAR repo_alias[MAX_PATH];
-    char snapshot_id[65];
-    const WCHAR* subpath; /* Points into the caller's Path buffer (or L"") */
+    const WCHAR* rest; /* Below the alias: L"" or "\..." (points into the caller's Path buffer) */
 } WfxParsedPath;
+
+/* Where a path below a repository alias leads (resolve_repo_path) */
+typedef enum {
+    REPO_PATH_FOLDER = 0, /* A folder of the restic mount tree above the snapshots */
+    REPO_PATH_SNAPSHOT,   /* Inside a snapshot: snapshot_id + subpath */
+    REPO_PATH_NOT_FOUND
+} RepoPathKind;
+
+typedef struct {
+    RepoPathKind kind;
+    WIN32_FIND_DATAW* items; /* REPO_PATH_FOLDER when a listing was asked for: heap array */
+    size_t count;
+    char snapshot_id[SNAPSHOT_TREE_ID_CHARS + 1];
+    const WCHAR* subpath;    /* REPO_PATH_SNAPSHOT: L"" or "\..." inside the snapshot */
+} RepoPath;
+
+/*
+ * One operation on a repository, run by run_with_password() with a password that is either the
+ * cached one (trusted: restic accepted it before, so cached data read with it may be shown) or one
+ * just typed in (data must come from restic, which checks it).
+ */
+typedef struct {
+    const ResticConfig* cfg;
+    const ResticRepoEntry* repo;
+    const WCHAR* password;
+    BOOL trusted;
+    const ResticExecOptions* exec;
+    ULONGLONG generation;    /* repo_cache_generation() before the operation */
+    WCHAR* err;
+    size_t err_cap;
+} RepoCall;
+
+typedef ResticResult (*RepoOperation)(const RepoCall* call, void* ctx);
 
 /**
  * Context forwarded to the cancellation polling callback while restic.exe runs.
@@ -226,7 +268,7 @@ static void session_expire_locked(void) {
         if (age >= g_PasswordTimeoutMs) {
             log_write(L"Cached password for '%ls' forgotten: PasswordTimeoutSeconds (%llu s) elapsed",
                       slot->alias, g_PasswordTimeoutMs / 1000);
-            SecureZeroMemory(slot, sizeof(*slot));
+            session_wipe_slot_locked(slot);
             continue;
         }
         ULONGLONG left = g_PasswordTimeoutMs - age;
@@ -277,7 +319,7 @@ static BOOL session_get(const WCHAR* alias, WCHAR* out_pwd, size_t cap, ULONGLON
         found = CryptUnprotectMemory(out_pwd, (DWORD)sizeof(slot->password), CRYPTPROTECTMEMORY_SAME_PROCESS);
         if (!found) {
             SecureZeroMemory(out_pwd, sizeof(slot->password));
-            SecureZeroMemory(slot, sizeof(*slot));
+            session_wipe_slot_locked(slot);
         } else {
             *out_generation = slot->generation;
         }
@@ -308,6 +350,9 @@ static void session_put(const WCHAR* alias, const WCHAR* password) {
             }
         }
     }
+    if (slot->used && _wcsicmp(slot->alias, alias) != 0) {
+        session_wipe_slot_locked(slot); /* Recycled: the other repository's data goes with it */
+    }
     SecureZeroMemory(slot, sizeof(*slot));
     slot->used       = TRUE;
     slot->generation = ++g_SessionGeneration;
@@ -317,6 +362,7 @@ static void session_put(const WCHAR* alias, const WCHAR* password) {
     if (!CryptProtectMemory(slot->password, (DWORD)sizeof(slot->password), CRYPTPROTECTMEMORY_SAME_PROCESS)) {
         DWORD err = GetLastError();
         SecureZeroMemory(slot, sizeof(*slot)); /* Never keep a plaintext password */
+        repo_cache_forget(alias);              /* Nor what was read with it */
         log_write(L"Password for '%ls' not cached: CryptProtectMemory failed (Windows error %lu)", alias, err);
     }
     session_expire_locked(); /* Arms the timer for this password's expiry */
@@ -344,7 +390,7 @@ static void session_touch(const WCHAR* alias, ULONGLONG generation) {
 static void session_forget(const WCHAR* alias, ULONGLONG generation) {
     AcquireSRWLockExclusive(&g_SessionLock);
     SessionSlot* slot = session_find_locked(alias);
-    if (slot && slot->generation == generation) SecureZeroMemory(slot, sizeof(*slot));
+    if (slot && slot->generation == generation) session_wipe_slot_locked(slot);
     ReleaseSRWLockExclusive(&g_SessionLock);
 }
 
@@ -369,6 +415,7 @@ static unsigned cached_password_count(void) {
 static void clear_password_session(void) {
     AcquireSRWLockExclusive(&g_SessionLock);
     if (g_Sessions) SecureZeroMemory(g_Sessions, sizeof(SessionSlot) * SESSION_SLOTS);
+    repo_cache_clear();
     session_arm_timer_locked(0);
     ReleaseSRWLockExclusive(&g_SessionLock);
 }
@@ -405,6 +452,7 @@ static void release_password_session(BOOL process_exit) {
 
     AcquireSRWLockExclusive(&g_SessionLock);
     session_table_release_locked();
+    repo_cache_clear();
     ReleaseSRWLockExclusive(&g_SessionLock);
 }
 
@@ -532,8 +580,8 @@ static BOOL wfx_cancel_callback(void* user_data) {
 static BOOL parse_wfx_path(const WCHAR* path, WfxParsedPath* out) {
     if (!out) return FALSE;
     memset(out, 0, sizeof(*out));
-    out->level   = WFX_PATH_INVALID;
-    out->subpath = L"";
+    out->level = WFX_PATH_INVALID;
+    out->rest  = L"";
 
     if (!path) return FALSE;
 
@@ -564,26 +612,25 @@ static BOOL parse_wfx_path(const WCHAR* path, WfxParsedPath* out) {
         out->level = WFX_PATH_REPO;
         return TRUE;
     }
+    out->rest = p - 1; /* The separator before the next segment */
 
-    /* Segment 2: <SnapshotDir> ("YYYY-MM-DD_HH-MM-SS_[short_id]") */
+    /*
+     * The folders below an alias are fixed (restic mount's four, see snapshot_tree.h): anything
+     * else fails here, before a password is asked for
+     */
     seg_start = p;
     while (*p != L'\0' && *p != L'\\') {
         p++;
     }
     seg_len = (size_t)(p - seg_start);
-    if (seg_len == 0 || seg_len >= MAX_PATH) {
+    WCHAR first[MAX_PATH];
+    if (seg_len >= MAX_PATH) return FALSE;
+    wcsncpy_s(first, MAX_PATH, seg_start, seg_len);
+    if (_wcsicmp(first, L"hosts") != 0 && _wcsicmp(first, L"ids") != 0 && _wcsicmp(first, L"snapshots") != 0 &&
+        _wcsicmp(first, L"tags") != 0) {
         return FALSE;
     }
-
-    WCHAR snapshot_dirname[MAX_PATH] = {0};
-    wcsncpy_s(snapshot_dirname, MAX_PATH, seg_start, seg_len);
-    if (!restic_extract_snapshot_id(snapshot_dirname, out->snapshot_id, sizeof(out->snapshot_id))) {
-        return FALSE;
-    }
-
-    /* Remainder (empty or starting with '\') is the subpath inside the snapshot */
-    out->subpath = p;
-    out->level   = WFX_PATH_SNAPSHOT_DIR;
+    out->level = WFX_PATH_REPO;
     return TRUE;
 }
 
@@ -699,64 +746,41 @@ static BOOL restic_path_usable(const ResticConfig* cfg, const WCHAR* repo_alias)
     return FALSE;
 }
 
-/* Executes a Level 1 (snapshots) or Level 2 (directory) query with password prompt/retry */
-static HANDLE execute_repo_query(
-    const WCHAR* virtual_path,
+/*
+ * Runs `op` with the repository's password: the cached one, or one asked for (up to
+ * MAX_PASSWORD_ATTEMPTS prompts while restic answers "wrong password"). A typed password is cached
+ * once restic accepted it (password_worth_caching), a cached one wiped when restic refuses it.
+ * Returns RESTIC_ERR_CANCELLED when the user cancels the prompt or enters nothing.
+ */
+static ResticResult run_with_password(
     const ResticConfig* cfg,
     const ResticRepoEntry* repo,
-    const WfxParsedPath* parsed,
-    WIN32_FIND_DATAW* FindData
+    const ResticExecOptions* exec,
+    RepoOperation op,
+    void* ctx,
+    WCHAR* err_msg,
+    size_t err_cap
 ) {
-    /* Verify that restic.exe was resolved to an explicit path before prompting for a password */
-    if (!restic_path_usable(cfg, repo->alias)) {
-        SetLastError(ERROR_FILE_NOT_FOUND);
-        return INVALID_HANDLE_VALUE;
-    }
-    const WCHAR* restic_exe = cfg->restic_path;
-
-    WfxCancelContext cancel_ctx = {virtual_path, repo->alias};
-    ResticExecOptions exec_opts = {WFX_RESTIC_TIMEOUT_MS, wfx_cancel_callback, &cancel_ctx};
-
     WCHAR password[SESSION_MAX_PASSWORD] = {0}; /* Local copy, wiped before returning */
     WCHAR wrong_hint[PASSWORD_HINT_CHARS] = {0}; /* What looked odd in a rejected password */
     ULONGLONG cached_generation          = 0;
     BOOL have_password = session_get(repo->alias, password, _countof(password), &cached_generation);
     BOOL from_cache    = have_password; /* Cached: not stored again (see session_touch) */
-    WIN32_FIND_DATAW* items              = NULL;
-    size_t count                         = 0;
-    WCHAR err_msg[512]                   = {0};
-    ResticResult res                     = RESTIC_ERR_WRONG_PASSWORD;
+    ResticResult res   = RESTIC_ERR_WRONG_PASSWORD;
 
     for (int attempt = 0; attempt < MAX_PASSWORD_ATTEMPTS; ++attempt) {
         if (!have_password) {
             if (!prompt_repository_password(repo->alias, attempt > 0, wrong_hint, password, _countof(password))) {
                 SecureZeroMemory(password, sizeof(password));
-                SetLastError(ERROR_CANCELLED);
-                return INVALID_HANDLE_VALUE;
+                return RESTIC_ERR_CANCELLED;
             }
             have_password = TRUE;
             from_cache    = FALSE;
         }
 
         err_msg[0] = L'\0';
-        if (parsed->level == WFX_PATH_REPO) {
-            res = restic_list_snapshots(
-                restic_exe, repo->target, password, &exec_opts, &items, &count, err_msg, _countof(err_msg)
-            );
-        } else {
-            res = restic_list_directory(
-                restic_exe,
-                repo->target,
-                password,
-                parsed->snapshot_id,
-                parsed->subpath,
-                &exec_opts,
-                &items,
-                &count,
-                err_msg,
-                _countof(err_msg)
-            );
-        }
+        RepoCall call = {cfg, repo, password, from_cache, exec, repo_cache_generation(), err_msg, err_cap};
+        res = op(&call, ctx);
 
         if (res == RESTIC_ERR_WRONG_PASSWORD) {
             if (from_cache) session_forget(repo->alias, cached_generation);
@@ -776,13 +800,165 @@ static HANDLE execute_repo_query(
         }
     }
     SecureZeroMemory(password, sizeof(password));
+    return res;
+}
 
-    if (res != RESTIC_OK) {
-        handle_restic_failure(res, repo->alias, err_msg);
+/* Converts one component of a WFX path (len UTF-16 units) to UTF-8; FALSE if it does not fit */
+static BOOL component_to_utf8(const WCHAR* comp, size_t len, char* out, size_t cap) {
+    if (len == 0 || len >= MAX_PATH) return FALSE;
+    int n = WideCharToMultiByte(CP_UTF8, 0, comp, (int)len, out, (int)cap - 1, NULL, NULL);
+    if (n <= 0) return FALSE;
+    out[n] = '\0';
+    return TRUE;
+}
+
+/* The children of a tree folder as Total Commander directory entries (heap array) */
+static ResticResult tree_folder_items(const SnapshotNode* dir, WIN32_FIND_DATAW** out_items, size_t* out_count) {
+    *out_items = NULL;
+    *out_count = 0;
+    if (dir->child_count == 0) return RESTIC_OK;
+    WIN32_FIND_DATAW* items = (WIN32_FIND_DATAW*)calloc(dir->child_count, sizeof(WIN32_FIND_DATAW));
+    if (!items) return RESTIC_ERR_OUT_OF_MEMORY;
+    size_t n = 0;
+    for (size_t i = 0; i < dir->child_count; ++i) {
+        const SnapshotNode* c = dir->children[i];
+        WIN32_FIND_DATAW* fd  = &items[n];
+        if (MultiByteToWideChar(CP_UTF8, 0, c->name, -1, fd->cFileName, MAX_PATH) <= 0) continue;
+        fd->dwFileAttributes = FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY;
+        if (c->time == 0) {
+            FS_SET_TIME_UNKNOWN(fd->ftLastWriteTime);
+        } else {
+            fd->ftLastWriteTime.dwLowDateTime  = (DWORD)(c->time & 0xFFFFFFFFULL);
+            fd->ftLastWriteTime.dwHighDateTime = (DWORD)(c->time >> 32);
+            fd->ftCreationTime                 = fd->ftLastWriteTime;
+            fd->ftLastAccessTime               = fd->ftLastWriteTime;
+        }
+        n++;
+    }
+    *out_items = items;
+    *out_count = n;
+    return RESTIC_OK;
+}
+
+/*
+ * Follows `rest` (L"" or "\...") through the tree. The first component that reaches a snapshot
+ * ends the walk: the remainder is the path inside it. A folder is listed into out->items when
+ * `want_items` is set.
+ */
+static ResticResult walk_tree(const SnapshotTree* tree, const WCHAR* rest, BOOL want_items, RepoPath* out) {
+    const SnapshotNode* node = snapshot_tree_root(tree);
+    const WCHAR* p = rest;
+    for (;;) {
+        while (*p == L'\\') p++;
+        if (*p == L'\0') break;
+        const WCHAR* start = p;
+        while (*p != L'\0' && *p != L'\\') p++;
+        char name[MAX_PATH * 3 + 1];
+        node = component_to_utf8(start, (size_t)(p - start), name, sizeof(name)) ? snapshot_tree_child(node, name)
+                                                                               : NULL;
+        if (!node) {
+            out->kind = REPO_PATH_NOT_FOUND;
+            return RESTIC_OK;
+        }
+        if (node->snapshot_id) {
+            out->kind = REPO_PATH_SNAPSHOT;
+            strcpy_s(out->snapshot_id, sizeof(out->snapshot_id), node->snapshot_id);
+            out->subpath = p;
+            return RESTIC_OK;
+        }
+    }
+    out->kind = REPO_PATH_FOLDER;
+    return want_items ? tree_folder_items(node, &out->items, &out->count) : RESTIC_OK;
+}
+
+/*
+ * Resolves a path below a repository alias. The cached tree is used when the password is trusted
+ * and either the path leads into a snapshot (its folder name keeps meaning the snapshot it was
+ * listed for) or the tree is younger than REPO_CACHE_TREE_TTL_MS; anything else - a stale folder
+ * listing, a name the cached tree does not know - lists the snapshots again.
+ */
+static ResticResult resolve_repo_path(const RepoCall* call, const WCHAR* rest, BOOL want_items, RepoPath* out) {
+    memset(out, 0, sizeof(*out));
+    out->subpath = L"";
+
+    if (call->trusted) {
+        ULONGLONG age = 0;
+        const SnapshotTree* cached = repo_cache_lock_tree(call->repo->alias, call->repo->target, &age);
+        if (cached) {
+            ResticResult res = walk_tree(cached, rest, want_items, out);
+            repo_cache_unlock_tree();
+            if (res != RESTIC_OK || out->kind == REPO_PATH_SNAPSHOT ||
+                (out->kind == REPO_PATH_FOLDER && age < REPO_CACHE_TREE_TTL_MS)) {
+                return res;
+            }
+            free(out->items);
+            memset(out, 0, sizeof(*out));
+            out->subpath = L"";
+        }
+    }
+
+    SnapshotTree* tree = NULL;
+    ResticResult res = restic_list_snapshots(call->cfg->restic_path, call->repo->target, call->password, call->exec,
+                                             &tree, call->err, call->err_cap);
+    if (res != RESTIC_OK) return res;
+    log_write(L"Snapshots of '%ls': %u", call->repo->alias, (unsigned)snapshot_tree_snapshot_count(tree));
+    res = walk_tree(tree, rest, want_items, out);
+    repo_cache_put_tree(call->repo->alias, call->repo->target, tree, call->generation);
+    return res;
+}
+
+/* FsFindFirstW below a repository alias */
+typedef struct {
+    const WCHAR* rest;
+    WIN32_FIND_DATAW* items;
+    size_t count;
+} ListContext;
+
+static ResticResult list_operation(const RepoCall* call, void* ctx_ptr) {
+    ListContext* ctx = (ListContext*)ctx_ptr;
+    RepoPath where;
+    ResticResult res = resolve_repo_path(call, ctx->rest, TRUE, &where);
+    if (res != RESTIC_OK) return res;
+    switch (where.kind) {
+        case REPO_PATH_FOLDER:
+            ctx->items = where.items;
+            ctx->count = where.count;
+            return RESTIC_OK;
+        case REPO_PATH_SNAPSHOT:
+            return restic_list_directory(call->cfg->restic_path, call->repo->target, call->password,
+                                         where.snapshot_id, where.subpath, call->exec, &ctx->items, &ctx->count,
+                                         call->err, call->err_cap);
+        default:
+            return RESTIC_ERR_PATH_NOT_FOUND;
+    }
+}
+
+/* Lists a folder below a repository alias, with password prompt/retry */
+static HANDLE execute_repo_query(
+    const WCHAR* virtual_path,
+    const ResticConfig* cfg,
+    const ResticRepoEntry* repo,
+    const WfxParsedPath* parsed,
+    WIN32_FIND_DATAW* FindData
+) {
+    /* Verify that restic.exe was resolved to an explicit path before prompting for a password */
+    if (!restic_path_usable(cfg, repo->alias)) {
+        SetLastError(ERROR_FILE_NOT_FOUND);
         return INVALID_HANDLE_VALUE;
     }
 
-    return wrap_find_items(items, count, FindData);
+    WfxCancelContext cancel_ctx = {virtual_path, repo->alias};
+    ResticExecOptions exec_opts = {WFX_RESTIC_TIMEOUT_MS, wfx_cancel_callback, &cancel_ctx};
+    ListContext ctx             = {parsed->rest, NULL, 0};
+    WCHAR err_msg[512]          = {0};
+
+    ResticResult res = run_with_password(cfg, repo, &exec_opts, list_operation, &ctx, err_msg, _countof(err_msg));
+    if (res != RESTIC_OK) {
+        free(ctx.items);
+        handle_restic_failure(res, repo->alias, err_msg);
+        return INVALID_HANDLE_VALUE;
+    }
+    return wrap_find_items(ctx.items, ctx.count, FindData);
 }
 
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
@@ -1076,6 +1252,30 @@ static BOOL wfx_dump_progress_callback(ULONGLONG bytes_written, void* user_data)
     return g_ProgressProc(g_PluginNr, src, dst, pct) != 0;
 }
 
+/* FsGetFileW below a repository alias */
+typedef struct {
+    const WCHAR* rest;
+    const WCHAR* local_name;
+    BOOL overwrite;
+    const FILETIME* mtime;
+    WfxDumpProgressContext* progress;
+} GetFileContext;
+
+static ResticResult get_file_operation(const RepoCall* call, void* ctx_ptr) {
+    GetFileContext* ctx = (GetFileContext*)ctx_ptr;
+    RepoPath where;
+    ResticResult res = resolve_repo_path(call, ctx->rest, FALSE, &where);
+    if (res != RESTIC_OK) return res;
+    const WCHAR* sp = where.subpath;
+    while (*sp == L'\\') sp++;
+    if (where.kind != REPO_PATH_SNAPSHOT || *sp == L'\0') {
+        return RESTIC_ERR_PATH_NOT_FOUND; /* A folder above the snapshots, or a snapshot itself */
+    }
+    return restic_dump_file(call->cfg->restic_path, call->repo->target, call->password, where.snapshot_id,
+                            where.subpath, ctx->local_name, ctx->overwrite, ctx->mtime, WFX_RESTIC_TIMEOUT_MS,
+                            wfx_dump_progress_callback, ctx->progress, call->err, call->err_cap);
+}
+
 int __stdcall FsGetFile(char* RemoteName, char* LocalName, int CopyFlags, RemoteInfoStruct* ri) {
     (void)RemoteName;
     (void)LocalName;
@@ -1098,13 +1298,7 @@ int __stdcall FsGetFileW(WCHAR* RemoteName, WCHAR* LocalName, int CopyFlags, Rem
     }
 
     WfxParsedPath parsed;
-    if (!parse_wfx_path(RemoteName, &parsed) || parsed.level != WFX_PATH_SNAPSHOT_DIR ||
-        !parsed.subpath) {
-        return FS_FILE_NOTFOUND;
-    }
-    const WCHAR* sp = parsed.subpath;
-    while (*sp == L'\\') sp++;
-    if (*sp == L'\0') {
+    if (!parse_wfx_path(RemoteName, &parsed) || parsed.level != WFX_PATH_REPO || parsed.rest[0] == L'\0') {
         return FS_FILE_NOTFOUND;
     }
 
@@ -1155,60 +1349,12 @@ int __stdcall FsGetFileW(WCHAR* RemoteName, WCHAR* LocalName, int CopyFlags, Rem
     BOOL overwrite                  = (CopyFlags & FS_COPYFLAGS_OVERWRITE) != 0;
     WfxDumpProgressContext prog_ctx = {RemoteName, LocalName, total_size};
 
-    WCHAR password[SESSION_MAX_PASSWORD] = {0};
-    WCHAR wrong_hint[PASSWORD_HINT_CHARS] = {0}; /* What looked odd in a rejected password */
-    ULONGLONG cached_generation          = 0;
-    BOOL have_password = session_get(repo->alias, password, _countof(password), &cached_generation);
-    BOOL from_cache    = have_password; /* Cached: not stored again (see session_touch) */
-    WCHAR err_msg[512]                   = {0};
-    ResticResult res                     = RESTIC_ERR_WRONG_PASSWORD;
-
-    for (int attempt = 0; attempt < MAX_PASSWORD_ATTEMPTS; ++attempt) {
-        if (!have_password) {
-            if (!prompt_repository_password(repo->alias, attempt > 0, wrong_hint, password, _countof(password))) {
-                SecureZeroMemory(password, sizeof(password));
-                config_free(&cfg);
-                return FS_FILE_USERABORT;
-            }
-            have_password = TRUE;
-            from_cache    = FALSE;
-        }
-
-        err_msg[0] = L'\0';
-        res = restic_dump_file(
-            cfg.restic_path,
-            repo->target,
-            password,
-            parsed.snapshot_id,
-            parsed.subpath,
-            LocalName,
-            overwrite,
-            mtime,
-            WFX_RESTIC_TIMEOUT_MS,
-            wfx_dump_progress_callback,
-            &prog_ctx,
-            err_msg,
-            _countof(err_msg)
-        );
-
-        if (res == RESTIC_ERR_WRONG_PASSWORD) {
-            if (from_cache) session_forget(repo->alias, cached_generation);
-            restic_describe_password(password, wrong_hint, _countof(wrong_hint));
-            SecureZeroMemory(password, sizeof(password));
-            have_password = FALSE;
-            continue;
-        }
-        break;
-    }
-
-    if (have_password && password_worth_caching(res)) {
-        if (from_cache) {
-            session_touch(repo->alias, cached_generation);
-        } else {
-            session_put(repo->alias, password);
-        }
-    }
-    SecureZeroMemory(password, sizeof(password));
+    /* Resolving the path may list the snapshots: ESC and the timeout apply to that too */
+    WfxCancelContext cancel_ctx = {RemoteName, repo->alias};
+    ResticExecOptions exec_opts = {WFX_RESTIC_TIMEOUT_MS, wfx_cancel_callback, &cancel_ctx};
+    GetFileContext ctx = {parsed.rest, LocalName, overwrite, mtime, &prog_ctx};
+    WCHAR err_msg[512] = {0};
+    ResticResult res = run_with_password(&cfg, repo, &exec_opts, get_file_operation, &ctx, err_msg, _countof(err_msg));
 
     int ret = FS_FILE_READERROR;
     switch (res) {
@@ -1218,7 +1364,7 @@ int __stdcall FsGetFileW(WCHAR* RemoteName, WCHAR* LocalName, int CopyFlags, Rem
             }
             ret = FS_FILE_OK;
             break;
-        case RESTIC_ERR_CANCELLED:
+        case RESTIC_ERR_CANCELLED: /* Also a cancelled or empty password prompt */
             ret = FS_FILE_USERABORT;
             break;
         case RESTIC_ERR_PATH_NOT_FOUND:

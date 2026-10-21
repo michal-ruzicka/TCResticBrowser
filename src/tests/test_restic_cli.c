@@ -125,34 +125,6 @@ static void test_iso8601_parsing(void) {
     EXPECT_TRUE(!restic_parse_iso8601_time("2026-10-18T10:00:00.Z", &ft), "Fraction without digits");
 }
 
-/* Snapshot directory naming and ID extraction */
-static void test_snapshot_naming(void) {
-    WCHAR dirname[MAX_PATH] = {0};
-    const char* full_id = "29095f00dedf06d1ed449d29e286bd48c3291aed7d35e5faa51954a61a4ae7a5";
-
-    EXPECT_TRUE(restic_format_snapshot_dirname("2026-10-18T16:28:15.182004+02:00", full_id, dirname, MAX_PATH),
-                "Format snapshot directory name");
-    EXPECT_WSTR_EQ(dirname, L"2026-10-18_16-28-15_[29095f00]", "Directory name format");
-
-    EXPECT_TRUE(!restic_format_snapshot_dirname("2026-10-18T16:28:15Z", "xyz123", dirname, MAX_PATH),
-                "Reject non-hex snapshot ID");
-    EXPECT_TRUE(!restic_format_snapshot_dirname("2026-10-18T16:28:15Z", "", dirname, MAX_PATH), "Reject empty ID");
-    EXPECT_TRUE(!restic_format_snapshot_dirname("..\\..\\evil\\path\\xx", "abcd1234", dirname, MAX_PATH),
-                "Reject malformed time (no path separators may leak into the name)");
-    EXPECT_TRUE(!restic_format_snapshot_dirname("2026-10-18T16:28:15Z", "abcd1234", dirname, 5),
-                "Reject undersized output buffer");
-
-    char id[32] = {0};
-    EXPECT_TRUE(restic_format_snapshot_dirname("2026-10-18T16:28:15Z", full_id, dirname, MAX_PATH), "Format again");
-    EXPECT_TRUE(restic_extract_snapshot_id(dirname, id, sizeof(id)), "Extract short_id");
-    EXPECT_STR_EQ(id, "29095f00", "Extracted short_id");
-    EXPECT_TRUE(!restic_extract_snapshot_id(L"no_brackets", id, sizeof(id)), "Reject missing brackets");
-    EXPECT_TRUE(!restic_extract_snapshot_id(L"bad_[not_hex!]", id, sizeof(id)), "Reject non-hex ID");
-    EXPECT_TRUE(!restic_extract_snapshot_id(L"empty_[]", id, sizeof(id)), "Reject empty brackets");
-    EXPECT_TRUE(!restic_extract_snapshot_id(L"reversed_]abcd[", id, sizeof(id)), "Reject reversed brackets");
-    EXPECT_TRUE(!restic_extract_snapshot_id(L"long_[0123456789abcdef]", id, 8), "Reject ID larger than buffer");
-}
-
 /* WFX path -> Restic filter path, and command-line quoting */
 static void test_path_and_quote_helpers(void) {
     char norm[256] = {0};
@@ -250,62 +222,6 @@ static void test_describe_password(void) {
     WCHAR tiny[8];
     EXPECT_TRUE(restic_describe_password(L" x ", tiny, _countof(tiny)) && wcslen(tiny) < _countof(tiny),
                 "Truncated to a small buffer");
-}
-
-static void test_parse_snapshots_json(void) {
-    const char* sample_json =
-        "[\n"
-        "  {\"time\": \"2026-10-18T16:28:15.182004+02:00\", \"id\": \"29095f00dedf06d1ed449d29e286bd48c3291aed7d35e5faa51954a61a4ae7a5\", \"short_id\": \"29095f00\"},\n"
-        "  {\"time\": \"2026-10-19T08:05:00Z\", \"id\": \"abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890\"},\n"
-        "  {\"time\": \"not-a-time\", \"id\": \"aaaaaaaa\"},\n"
-        "  {\"time\": \"2026-10-20T08:05:00Z\", \"id\": \"not-hex-id\"},\n"
-        "  {\"id\": \"bbbbbbbb\"},\n"
-        "  42\n"
-        "]";
-
-    WIN32_FIND_DATAW* items = NULL;
-    size_t count = 0;
-    ResticResult res = restic_parse_snapshots_json(sample_json, &items, &count);
-    EXPECT_TRUE(res == RESTIC_OK, "Parse snapshots array");
-    EXPECT_TRUE(count == 2, "Malformed entries are skipped, valid ones kept");
-    EXPECT_WSTR_EQ(items[0].cFileName, L"2026-10-18_16-28-15_[29095f00]", "Snapshot 0 name");
-    EXPECT_WSTR_EQ(items[1].cFileName, L"2026-10-19_08-05-00_[abcdef12]", "Snapshot 1 name (falls back to id prefix)");
-    EXPECT_TRUE(is_dir_entry(&items[0]), "Snapshot is a directory");
-    EXPECT_TRUE(ft_u64(items[0].ftLastWriteTime) != 0, "Snapshot has a modification time");
-    free(items);
-
-    /* Two snapshots sharing a short_id get the shortest unique ID prefix; the others keep 8 characters */
-    const char* colliding_json =
-        "[{\"time\":\"2026-10-18T10:00:00Z\",\"short_id\":\"12345678\","
-        "\"id\":\"1234567890aa000000000000000000000000000000000000000000000000000a\"},"
-        " {\"time\":\"2026-10-18T11:00:00Z\",\"short_id\":\"fedcba98\","
-        "\"id\":\"fedcba9800000000000000000000000000000000000000000000000000000000\"},"
-        " {\"time\":\"2026-10-18T12:00:00Z\",\"short_id\":\"12345678\","
-        "\"id\":\"1234567890ab000000000000000000000000000000000000000000000000000b\"}]";
-    res = restic_parse_snapshots_json(colliding_json, &items, &count);
-    EXPECT_TRUE(res == RESTIC_OK && count == 3, "Parse snapshots with a shared short_id");
-    if (res == RESTIC_OK && count == 3) {
-        EXPECT_WSTR_EQ(items[0].cFileName, L"2026-10-18_10-00-00_[1234567890aa]", "First colliding ID lengthened");
-        EXPECT_WSTR_EQ(items[1].cFileName, L"2026-10-18_11-00-00_[fedcba98]", "Unique short_id kept");
-        EXPECT_WSTR_EQ(items[2].cFileName, L"2026-10-18_12-00-00_[1234567890ab]", "Second colliding ID lengthened");
-        char id[65];
-        EXPECT_TRUE(restic_extract_snapshot_id(items[2].cFileName, id, sizeof(id)) && strcmp(id, "1234567890ab") == 0,
-                    "The longer prefix is what restic gets");
-    }
-    free(items);
-
-    res = restic_parse_snapshots_json("[]", &items, &count);
-    EXPECT_TRUE(res == RESTIC_OK && count == 0 && items == NULL, "Empty array");
-    res = restic_parse_snapshots_json("null", &items, &count);
-    EXPECT_TRUE(res == RESTIC_OK && count == 0 && items == NULL, "Literal null is an empty list");
-    res = restic_parse_snapshots_json("{not_an_array}", &items, &count);
-    EXPECT_TRUE(res == RESTIC_ERR_JSON_PARSE, "Malformed JSON");
-    res = restic_parse_snapshots_json("{\"a\":1}", &items, &count);
-    EXPECT_TRUE(res == RESTIC_ERR_JSON_PARSE, "Object instead of array");
-    res = restic_parse_snapshots_json("", &items, &count);
-    EXPECT_TRUE(res == RESTIC_ERR_JSON_PARSE, "Empty text");
-    res = restic_parse_snapshots_json(NULL, &items, &count);
-    EXPECT_TRUE(res == RESTIC_ERR_INVALID_ARG, "NULL text");
 }
 
 #define HEADER_LINE "{\"time\":\"2026-10-18T16:28:15+02:00\",\"id\":\"29095f00\",\"message_type\":\"snapshot\"}\r\n"
@@ -832,8 +748,9 @@ static void test_live_restic_cli(void) {
     ResticCommandOutput out;
 
     /* Error mapping before the repository exists */
-    res = restic_list_snapshots(restic_bin, repo, password, NULL, &items, &count, err, _countof(err));
-    EXPECT_TRUE(res == RESTIC_ERR_REPO_NOT_FOUND, "Missing repository -> RESTIC_ERR_REPO_NOT_FOUND");
+    SnapshotTree* tree = NULL;
+    res = restic_list_snapshots(restic_bin, repo, password, NULL, &tree, err, _countof(err));
+    EXPECT_TRUE(res == RESTIC_ERR_REPO_NOT_FOUND && tree == NULL, "Missing repository -> RESTIC_ERR_REPO_NOT_FOUND");
     EXPECT_TRUE(err[0] != L'\0', "Missing repository reports a reason");
 
     WCHAR* q_data = restic_quote_arg(data);
@@ -842,12 +759,14 @@ static void test_live_restic_cli(void) {
     EXPECT_TRUE(res == RESTIC_OK, "restic init with a password containing quotes, %PATH% and CJK text");
     restic_free_command_output(&out);
 
-    res = restic_list_snapshots(restic_bin, repo, L"wrong password", NULL, &items, &count, err, _countof(err));
+    res = restic_list_snapshots(restic_bin, repo, L"wrong password", NULL, &tree, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_WRONG_PASSWORD, "Wrong password -> RESTIC_ERR_WRONG_PASSWORD");
     EXPECT_TRUE(wcsstr(err, L"password") != NULL, "Wrong password reason mentions the password");
 
-    res = restic_list_snapshots(restic_bin, repo, password, NULL, &items, &count, err, _countof(err));
-    EXPECT_TRUE(res == RESTIC_OK && count == 0 && items == NULL, "Empty repository -> no snapshots");
+    res = restic_list_snapshots(restic_bin, repo, password, NULL, &tree, err, _countof(err));
+    EXPECT_TRUE(res == RESTIC_OK && snapshot_tree_snapshot_count(tree) == 0, "Empty repository -> no snapshots");
+    EXPECT_TRUE(snapshot_tree_root(tree)->child_count == 4, "...but the four restic mount folders");
+    snapshot_tree_free(tree);
 
     /* Two snapshots, the second after changing one file */
     swprintf_s(args, _countof(args), L"backup %ls --json --quiet", q_data);
@@ -860,15 +779,20 @@ static void test_live_restic_cli(void) {
     restic_free_command_output(&out);
     free(q_data);
 
-    res = restic_list_snapshots(restic_bin, repo, password, NULL, &items, &count, err, _countof(err));
-    EXPECT_TRUE(res == RESTIC_OK && count == 2, "Two snapshots listed");
-    EXPECT_TRUE(wcscmp(items[0].cFileName, items[1].cFileName) != 0, "Snapshot directory names are unique");
-    EXPECT_TRUE(ft_u64(items[0].ftLastWriteTime) <= ft_u64(items[1].ftLastWriteTime), "Oldest snapshot first");
-    char snap1[32] = {0}, snap2[32] = {0};
-    EXPECT_TRUE(restic_extract_snapshot_id(items[0].cFileName, snap1, sizeof(snap1)) &&
-                restic_extract_snapshot_id(items[1].cFileName, snap2, sizeof(snap2)),
-                "Snapshot IDs recoverable from directory names");
-    free(items);
+    res = restic_list_snapshots(restic_bin, repo, password, NULL, &tree, err, _countof(err));
+    EXPECT_TRUE(res == RESTIC_OK && snapshot_tree_snapshot_count(tree) == 2, "Two snapshots listed");
+    const SnapshotNode* by_time = snapshot_tree_child(snapshot_tree_root(tree), "snapshots");
+    EXPECT_TRUE(by_time && by_time->child_count == 3 && strcmp(by_time->children[2]->name, "latest") == 0,
+                "snapshots/ holds both snapshots and latest");
+    const SnapshotNode* latest = by_time->children[2];
+    EXPECT_TRUE(latest->snapshot_id && strlen(latest->snapshot_id) == 64, "Full snapshot IDs");
+    char snap1[65] = {0}, snap2[65] = {0};
+    /* The second snapshot is latest; the first is whichever folder is not */
+    strcpy_s(snap2, sizeof(snap2), latest->snapshot_id);
+    strcpy_s(snap1, sizeof(snap1), strcmp(by_time->children[0]->snapshot_id, snap2) != 0 ? by_time->children[0]->snapshot_id
+                                                                                       : by_time->children[1]->snapshot_id);
+    EXPECT_TRUE(strcmp(snap1, snap2) != 0, "Two different snapshots");
+    snapshot_tree_free(tree);
 
     /* Level 2: root of the snapshot holds only the drive letter */
     res = restic_list_directory(restic_bin, repo, password, snap2, L"\\", NULL, &items, &count, err, _countof(err));
@@ -1158,10 +1082,8 @@ int main(void) {
     printf("Running Restic CLI & JSON Parser Unit/Integration Tests...\n");
 
     test_iso8601_parsing();
-    test_snapshot_naming();
     test_path_and_quote_helpers();
     test_describe_password();
-    test_parse_snapshots_json();
     test_parse_ls_ndjson();
     test_exec_streams_and_exit_codes();
     test_exec_environment();

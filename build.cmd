@@ -323,7 +323,7 @@ exit /b 0
 REM Runs every test program in %1 from the repository root, where the live
 REM tests look for tmp\restic.exe (they report [SKIP] when it is absent).
 pushd "%ROOT%"
-for %%t in (test_json test_config test_restic_cli test_plugin_dll) do (
+for %%t in (test_json test_snapshot_tree test_config test_restic_cli test_plugin_dll) do (
     echo --- %%t
     "%~1\%%t.exe"
     if errorlevel 1 (

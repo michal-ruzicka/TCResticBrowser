@@ -800,7 +800,7 @@ static void test_missing_ini_is_harmless(void) {
     EXPECT_TRUE(FsFindFirstW(L"\\MyRepo", &fd) == INVALID_HANDLE_VALUE && GetLastError() == ERROR_PATH_NOT_FOUND,
                 "Repository level -> ERROR_PATH_NOT_FOUND without INI");
     RemoteInfoStruct ri = {5, 0, {0, 0}, 0};
-    WCHAR remote[] = L"\\MyRepo\\2026-10-18_12-00-00_[abcd1234]\\C\\x.txt";
+    WCHAR remote[] = L"\\MyRepo\\snapshots\\2026-10-18_12-00-00\\C\\x.txt";
     EXPECT_TRUE(FsGetFileW(remote, local, 0, &ri) == FS_FILE_NOTFOUND &&
                 GetFileAttributesW(local) == INVALID_FILE_ATTRIBUTES,
                 "FsGetFileW -> FS_FILE_NOTFOUND without INI and no local file is created");
@@ -865,8 +865,8 @@ static void test_wfx_routing_and_callbacks(void) {
     EXPECT_TRUE(FsFindFirstW(L"\\MyRepo\\not_a_snapshot_folder", &fd) == INVALID_HANDLE_VALUE &&
                 GetLastError() == ERROR_PATH_NOT_FOUND, "Invalid snapshot folder name rejected");
     SetLastError(0);
-    EXPECT_TRUE(FsFindFirstW(L"\\MyRepo\\2026-10-18_12-00-00_[not_hex!]\\sub", &fd) == INVALID_HANDLE_VALUE &&
-                GetLastError() == ERROR_PATH_NOT_FOUND, "Non-hex snapshot ID rejected");
+    EXPECT_TRUE(FsFindFirstW(L"\\MyRepo\\2026-10-18_12-00-00_[abcd1234]\\sub", &fd) == INVALID_HANDLE_VALUE &&
+                GetLastError() == ERROR_PATH_NOT_FOUND, "A snapshot folder name of plugin 2.0 is not a folder any more");
     EXPECT_TRUE(g_mock_pwd_calls == 0 && g_mock_msgok_calls == 0,
                 "Invalid paths must not prompt for a password or show error dialogs");
 
@@ -902,7 +902,7 @@ static void test_wfx_routing_and_callbacks(void) {
     EXPECT_TRUE(wcsstr(g_mock_last_log, L"ResticPath=C:\\no_such_dir_restic_test\\restic.exe") != NULL &&
                 wcsstr(g_mock_last_log, ini_path) != NULL,
                 "The error names the configured path and the INI file that sets it");
-    WCHAR remote_file[] = L"\\MyRepo\\2026-10-18_12-00-00_[abcdef12]\\file.txt";
+    WCHAR remote_file[] = L"\\MyRepo\\snapshots\\2026-10-18_12-00-00\\file.txt";
     WCHAR local_file[MAX_PATH];
     swprintf_s(local_file, MAX_PATH, L"%ls\\file.txt", plugin_dir);
     g_mock_pwd_calls = g_mock_msgok_calls = 0;

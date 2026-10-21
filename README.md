@@ -30,22 +30,51 @@ copy files out of their snapshots, right in Total Commander's panels.**
 The plugin adds `\\\TCResticBrowser` to Network Neighborhood (the name is
 [configurable](#root-folder-name)). Its top level
 lists the repositories configured in `TCResticBrowser.ini`; inside each one you
-find its snapshots, and inside a snapshot the backed-up directory tree.
+find its snapshots arranged the way [`restic mount`](https://restic.readthedocs.io/en/stable/050_restore.html#restore-using-mount)
+shows them - by ID, by time, by host and by tag - and inside a snapshot the
+backed-up directory tree.
 Everything is strictly read-only: the plugin runs the official `restic.exe`
 to list and extract data and never modifies a repository.
 
 ```text
 \\\TCResticBrowser\
-├── MyLocalBackup\                              <-- Level 0: Repository aliases (from TCResticBrowser.ini)
-│   ├── 2026-10-18_09-30-00_[a1b2c3d4]\         <-- Level 1: Snapshots (YYYY-MM-DD_HH-MM-SS_[short_id])
-│   │   └── C\
-│   │       └── Users\
-│   │           └── alice\
-│   │               └── Documents\
-│   │                   └── report.pdf          <-- Level 2+: Snapshot directory tree & files
-│   └── 2026-10-17_21-15-42_[e5f60718]\
+├── MyLocalBackup\                          <-- Repository aliases (from TCResticBrowser.ini)
+│   ├── hosts\
+│   │   └── laptop\
+│   │       ├── 2026-10-17_21-15-42\
+│   │       ├── 2026-10-18_09-30-00\
+│   │       └── latest\
+│   ├── ids\
+│   │   ├── a1b2c3d4\
+│   │   └── e5f60718\
+│   ├── snapshots\
+│   │   ├── 2026-10-17_21-15-42\
+│   │   ├── 2026-10-18_09-30-00\             <-- A snapshot (named by its time)
+│   │   │   └── C\
+│   │   │       └── Users\
+│   │   │           └── alice\
+│   │   │               └── report.pdf      <-- The backed-up files
+│   │   └── latest\                         <-- The newest snapshot
+│   └── tags\
+│       └── daily\
+│           ├── 2026-10-18_09-30-00\
+│           └── latest\
 └── CloudS3Backup\
 ```
+
+The folders above the snapshots are the ones `restic mount` creates, with the
+same names and the same rules, so a path you know from a mounted repository
+works here too. The one difference is the time in the folder names:
+`restic mount` writes `2026-10-18T09:30:00+02:00` by default, but Windows
+does not allow colons in file names, so the plugin uses the colon-free form
+restic itself suggests (`--time-template "2006-01-02_15-04-05"`); the time is
+the one the snapshot was taken in, in that computer's time zone. Two
+snapshots with the same name get `-1`, `-2`, ... appended, and host names or
+tags containing characters Windows does not allow (`\ / : * ? " < > |`, or a
+dot or space at the end) show them as `_`. Paths saved by version 2.0
+(`2026-10-18_09-30-00_[a1b2c3d4]` directly in the repository) no longer
+exist; Total Commander's history and hotlist entries pointing there need to
+be recreated.
 
 ### Key Features
 
@@ -159,7 +188,7 @@ documentation.
 | **List Repositories** | Open **Network Neighborhood** (`\\\`) -> **`TCResticBrowser`**. Changes to `TCResticBrowser.ini` take effect immediately on panel refresh (`Ctrl+R` / `F2`). |
 | **Browse Snapshots** | Enter a repository folder (`\<Alias>`). Prompted once for the repository password; once restic accepts it, it is kept in RAM (encrypted) for that alias across both panels for 30 minutes (see [Password Timeout](#password-timeout)). Up to 3 password attempts are allowed. |
 | **Forget Passwords** | While passwords are remembered, the plugin's root folder starts with **`🗑 Forget N Passwords`** (N is their number; `🗑 Forget 1 Password` for one). Press **Enter** on it to wipe them all at once; a message says how many were forgotten, the root folder is then re-read without the entry, and the next access asks again. The entry is not removed by itself when the passwords expire; it disappears the next time the root folder is read (`Ctrl+R`). |
-| **Explore Files** | Enter any snapshot folder (`YYYY-MM-DD_HH-MM-SS_[short_id]`; when two snapshots share a short ID, both folders show a longer unique prefix of the snapshot ID) and navigate the backed-up directory tree. |
+| **Explore Files** | Enter a snapshot through `snapshots`, `ids`, `hosts` or `tags` (or `latest`) and navigate the backed-up directory tree. The snapshot list is read once and reused for a minute, as `restic mount` does, so moving between these folders does not run restic again. |
 | **View File (`F3` / `Ctrl+Q`)** | Press **`F3`** (Lister) or **`Ctrl+Q`** (Quick View) on any file to stream it to a temporary location and view its contents. |
 | **Restore / Extract (`F5`)** | Select one or more files or directories and press **`F5`** to copy them to the target panel, preserving original `LastWriteTime` timestamps. Standard Total Commander overwrite prompts are supported. |
 | **Cancel Operation (`ESC`)** | Press **`ESC`** in Total Commander's progress dialog to terminate the underlying `restic.exe` child process and clean up any temporary file. |
