@@ -20,7 +20,9 @@ it up to date with every change.
 
 - [**Visual Studio 2026 Build Tools**](https://visualstudio.microsoft.com/)
   with the components listed in [`.vsconfig`](.vsconfig): the MSVC toolset,
-  the Windows SDK, CMake and AddressSanitizer. Installing with
+  the Windows SDK, CMake and AddressSanitizer. For a build that matches the
+  CI build byte for byte, use the pinned release, 18.11.1 (see
+  [Reproducible Builds](#reproducible-builds)). Installing with
   `vs_buildtools.exe --config .vsconfig` (as
   `setup-build-environment-example.cmd` and the CI workflow do) selects
   exactly those. The full Visual Studio IDE works too, but is not required.
@@ -147,14 +149,33 @@ Four independent sources of non-determinism are eliminated:
 | Absolute source paths in debug info | Compiler flag `/pathmap:<src-dir>=./` strips the machine-local prefix |
 | File modification times in ZIP entries | Normalized to `release-date=` read from `src\pluginst.inf` |
 
-Three additional parameters are pinned so that "same source" also means "same
+Four additional parameters are pinned so that "same source" also means "same
 compiler output":
 
 | Parameter | Pinned to | Files that must match |
 |---|---|---|
+| Visual Studio release | `18.11.1` | `build.cmd` (`EXPECTED_VS`), `.github\workflows\build.yml` (`VS_BUILDTOOLS_VERSION`, `_URL`, `_SHA256`), `setup-build-environment-example.cmd` (`VS_BUILDTOOLS_URL`, `_SHA256`) |
 | Exact `cl.exe` version | `19.51.36260` | `build.cmd` (`EXPECTED_CL`) |
 | MSVC toolset (major.minor) | `14.51` | `build.cmd` (`CMAKE_T`), `.vsconfig` (also used by the CI workflow) |
 | Windows SDK | `10.0.26100.0` | `build.cmd` (`CMAKE_SDK`), `.vsconfig` (also used by the CI workflow) |
+
+The Visual Studio release matters on its own: an update can service the
+toolset libraries (`libcmt.lib`, `libvcruntime.lib`) and the Windows SDK
+(`libucrt.lib`, headers) without changing the `cl.exe` version or the
+folder names. The CI workflow therefore installs Build Tools with the
+fixed-version bootstrapper of the pinned release (its SHA-256 is checked),
+not the latest one. Locally, keep Visual Studio at that release, or install
+the pinned Build Tools next to it with the same bootstrapper and point
+`build.cmd` at them:
+
+```
+set TCRB_VSINSTALL=C:\BuildTools
+build.cmd
+```
+
+Without `TCRB_VSINSTALL`, `build.cmd` uses the newest Visual Studio that
+`vswhere` reports. It warns when its version (`VSCMD_VER`, shown in the
+Developer Command Prompt banner) is not `EXPECTED_VS`.
 
 `build.cmd` checks `cl.exe` against `EXPECTED_CL` and prints a warning if
 they differ — the build continues regardless. The check exists so that when
@@ -220,7 +241,7 @@ the cause:
 | Section | What a difference means |
 |---|---|
 | `[toolchain]` | Another Visual Studio, MSVC toolset or Windows SDK build. The same version number with another hash of `cl.exe`, `c1.dll`, `c2.dll` or `link.exe` means a serviced toolset. Install the same Visual Studio version on both sides; a Visual Studio update can update the Windows SDK too. |
-| `[libraries]` | The static C runtime (`libcmt.lib` and `libvcruntime.lib` from the toolset, `libucrt.lib` from the Windows SDK) or an import library differs, and their code is linked into the DLL. `libucrt.lib` changes with the SDK revision (10.0.26100.*x*), which the SDK folder name `10.0.26100.0` does not show. |
+| `[libraries]` | The static C runtime (`libcmt.lib` and `libvcruntime.lib` from the toolset, `libucrt.lib` from the Windows SDK) or an import library differs, and their code is linked into the DLL. `libucrt.lib` changes with the SDK revision (10.0.26100.*x*), which the SDK folder name `10.0.26100.0` does not show; the SDK is installed machine-wide, so another product (or a newer Visual Studio instance) can update it under a pinned Visual Studio. |
 | `[options]` | CMake generated other compiler, resource compiler or linker options: another CMake version, or a changed `CMakeLists.txt`. |
 | `[objects]` | The toolchain and options are the same but an object file is not: the headers differ (another SDK revision) or the sources do. |
 | `[dll]` | Only the linked result differs: the linker or a library. The section hashes narrow it down (`.text` code, `.rdata` constants and the import table, `.rsrc` the icon and version resource). The `rich:` lines (the Rich header) list, per tool build, how many linked-in objects it produced: a library built by another compiler shows up as another `build` number. |
@@ -231,6 +252,24 @@ When you adopt a new MSVC toolset or Windows SDK version, update **both
 locations** listed below to keep them in sync. A mismatch causes either a
 build failure (CMake cannot find the requested toolset) or silent divergence
 between local and CI builds.
+
+##### Visual Studio release
+
+Take the new release's *Build Tools* fixed-version bootstrapper from the
+[Visual Studio 2026 release history](https://learn.microsoft.com/visualstudio/releases/2026/release-history).
+The long hexadecimal folder in its URL is the SHA-256 of the file; check it
+after downloading (`certutil -hashfile vs_BuildTools.exe SHA256`), and check
+that the file's *Product version* (Properties, Details) is the release.
+Update, in one commit:
+
+1. **`build.cmd`** — `set EXPECTED_VS=18.XX.Y`
+2. **`.github\workflows\build.yml`** — `VS_BUILDTOOLS_VERSION`,
+   `VS_BUILDTOOLS_URL`, `VS_BUILDTOOLS_SHA256`
+3. **`setup-build-environment-example.cmd`** — `VS_BUILDTOOLS_URL`,
+   `VS_BUILDTOOLS_SHA256`
+
+Then update your local Visual Studio to the same release. A new release can
+bring a new `cl.exe`, so check the toolset below as well.
 
 ##### MSVC toolset
 
@@ -285,8 +324,10 @@ generator flag needs updating. What does change:
 
 1. **`.vsconfig`** — the toolset and SDK component IDs change with each major
    VS release; update those using the guidance above.
-2. **`.github/workflows/build.yml`** — update the VS installer URL if the
-   stable channel URL changes (currently `https://aka.ms/vs/18/stable/vs_buildtools.exe`).
+2. **The pinned release** — a new major version has its own release history
+   page; pin one of its releases as described in *Visual Studio release*
+   above. `build.cmd` finds the installation through `vswhere`, which does not
+   depend on the major version.
 
 CMake comes with the Build Tools (`VC.CMake.Project` in `.vsconfig`), so a
 new Visual Studio version also brings a matching CMake.

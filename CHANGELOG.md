@@ -26,6 +26,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `restic.exe`) is refused before it is started, instead of Windows
   stopping Total Commander with its "Unsupported 16-Bit Application"
   dialog.
+- **Builds pin the Visual Studio release.** The v2.0.0 DLLs that CI built
+  differed from the released ones, which were built with Visual Studio
+  18.11.0 while CI installed the newest release, 18.11.1, whose installer
+  brings a newer servicing release of the Windows SDK. CI now installs
+  the pinned release (18.11.1) from its fixed-version installer, checked by
+  SHA-256, and `build.cmd` warns when the local Visual Studio is another
+  one. Reproducing the v2.0.0 ZIP itself takes Visual Studio 18.11.0 with
+  the Windows SDK it installed. Each build also writes
+  `build\fingerprint-x64.txt` and `build\fingerprint-x86.txt`, which show
+  where two builds differ; see *When the hashes differ* in CONTRIBUTING.md.
 
 ### Security
 

@@ -7,8 +7,10 @@ REM instances, and similar clean environments.
 REM
 REM What it does:
 REM   1. Downloads the source tree from GitHub.
-REM   2. Installs Visual Studio 2026 Build Tools with the components listed in
-REM      .vsconfig (C++ toolset, Windows SDK, CMake, AddressSanitizer).
+REM   2. Installs Visual Studio 2026 Build Tools of the release the build is
+REM      pinned to (EXPECTED_VS in build.cmd, VS_BUILDTOOLS_* in the CI
+REM      workflow) with the components listed in .vsconfig (C++ toolset,
+REM      Windows SDK, CMake, AddressSanitizer).
 REM   3. Runs build.cmd to produce the distributable ZIP in dist\.
 REM
 REM Usage:
@@ -24,6 +26,14 @@ REM ---------------------------------------------------------------------------
 REM Source branch.  Set BRANCH in the environment before running to override.
 REM ---------------------------------------------------------------------------
 if not defined BRANCH set BRANCH=main
+
+REM ---------------------------------------------------------------------------
+REM Visual Studio Build Tools release: the fixed-version bootstrapper and its
+REM SHA-256, the same as VS_BUILDTOOLS_URL / VS_BUILDTOOLS_SHA256 in
+REM .github\workflows\build.yml. Keep the two files in step.
+REM ---------------------------------------------------------------------------
+set VS_BUILDTOOLS_URL=https://download.visualstudio.microsoft.com/download/pr/e07fb79d-d4ec-45bc-b19d-200bc819ee8d/3b21743cfbd0458e7f4dba87981fb8b99602a974c7439b857878cfa3e9fba5f2/vs_BuildTools.exe
+set VS_BUILDTOOLS_SHA256=3b21743cfbd0458e7f4dba87981fb8b99602a974c7439b857878cfa3e9fba5f2
 
 REM GitHub archives a branch as <repo>-<branch>/ inside the ZIP, with every
 REM "/" in the branch name replaced by "-".
@@ -43,8 +53,11 @@ echo === Install Visual Studio Build Tools ===
 echo = This step takes several minutes and may appear unresponsive.
 echo = Check Task Manager to confirm the Visual Studio Installer process is still running.
 echo.
-curl.exe -L -o "%TEMP%\vs_buildtools.exe" https://aka.ms/vs/18/stable/vs_buildtools.exe
+curl.exe -L -o "%TEMP%\vs_buildtools.exe" %VS_BUILDTOOLS_URL%
 if errorlevel 1 (echo ERROR: Build Tools installer download failed & exit /b 1)
+powershell -NoLogo -NoProfile -Command ^
+    "if ((Get-FileHash -Algorithm SHA256 '%TEMP%\vs_buildtools.exe').Hash -ne '%VS_BUILDTOOLS_SHA256%') { exit 1 }"
+if errorlevel 1 (echo ERROR: Build Tools installer does not match its SHA-256 & exit /b 1)
 "%TEMP%\vs_buildtools.exe" --config "%SRC_DIR%\.vsconfig" ^
     --installPath C:\BuildTools ^
     --quiet --wait --norestart --nocache
@@ -59,5 +72,7 @@ REM so no separate CMake install is needed.
 
 echo.
 echo === Build ===
+REM Use the installation made above even if the machine has other ones.
+set TCRB_VSINSTALL=C:\BuildTools
 cd /d "%SRC_DIR%"
 build.cmd
