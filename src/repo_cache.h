@@ -16,8 +16,6 @@
  * password session lock, which is always taken first.
  */
 
-/* restic mount re-reads the snapshot list at most once a minute (minSnapshotsReloadTime) */
-#define REPO_CACHE_TREE_TTL_MS (60u * 1000u)
 
 /*
  * Returns the cached tree of the repository, built with `time_format`, and keeps it readable (a
@@ -51,6 +49,21 @@ void repo_cache_load_index(
     const WCHAR* target,
     const WCHAR* restic_exe,
     const char* snapshot_id,
+    RepoPasswordSource password_source
+);
+
+/*
+ * Re-reads the snapshot list of the repository in the background with its cached password,
+ * unless no tree is cached, one is being re-read, or the cached tree (or the last attempt) is
+ * younger than `min_interval_ms`. Until the new list replaces it the cached tree stays in use; a
+ * repository forgotten meanwhile discards the result.
+ */
+void repo_cache_refresh_tree(
+    const WCHAR* alias,
+    const WCHAR* target,
+    const WCHAR* restic_exe,
+    const char* time_format,
+    ULONGLONG min_interval_ms,
     RepoPasswordSource password_source
 );
 

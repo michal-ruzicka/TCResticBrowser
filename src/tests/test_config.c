@@ -1000,6 +1000,20 @@ static void test_password_timeout_setting(void) {
         {"[Settings]\r\nSnapshotCacheMB=1 GB\r\n", CONFIG_DEFAULT_SNAPSHOT_CACHE_MB, "SnapshotCacheMB not a number"},
         {"[Logging]\r\nSnapshotCacheMB=7\r\n", CONFIG_DEFAULT_SNAPSHOT_CACHE_MB, "SnapshotCacheMB outside [Settings]"},
     };
+    static const struct { const char* ini; DWORD expected; const char* what; } refresh[] = {
+        {"[Settings]\r\nResticPath=restic.exe\r\n", 60, "SnapshotListRefreshSeconds default 60"},
+        {"[Settings]\r\nSnapshotListRefreshSeconds=0\r\n", 0, "SnapshotListRefreshSeconds=0"},
+        {"[Settings]\r\nSnapshotListRefreshSeconds=600\r\nSnapshotListRefreshSeconds=5\r\n", 600,
+         "SnapshotListRefreshSeconds first occurrence"},
+        {"[Settings]\r\nSnapshotListRefreshSeconds=1 min\r\n", 60, "SnapshotListRefreshSeconds not a number"},
+    };
+    for (size_t i = 0; i < _countof(refresh); ++i) {
+        write_text_file(ini_path, refresh[i].ini);
+        config_load(&cfg);
+        DWORD got = cfg.snapshot_list_refresh_s;
+        config_free(&cfg);
+        EXPECT_TRUE(got == refresh[i].expected, refresh[i].what);
+    }
     for (size_t i = 0; i < _countof(cache); ++i) {
         write_text_file(ini_path, cache[i].ini);
         config_load(&cfg);

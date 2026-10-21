@@ -47,6 +47,8 @@ struct RepoEntry {
     SnapshotTree* tree;
     char tree_format[SNAPSHOT_TREE_TIME_FORMAT_MAX + 1]; /* The time format its folders are named by */
     ULONGLONG tree_at; /* GetTickCount64() when the snapshots were listed */
+    BOOL refreshing;   /* A background `restic snapshots` is running */
+    ULONGLONG refresh_tried_at; /* When the last one started */
     IndexEntry* indexes;
     RepoEntry* next;
 };
@@ -211,9 +213,34 @@ static void finish_load(const LoadJob* job, SnapshotIndex* index, IndexState sta
     snapshot_index_free(index);
 }
 
+/*
+ * Runs `worker(job)` on the thread pool with a reference to this DLL, so FreeLibrary cannot unmap
+ * the code under it; the worker ends with release_worker_module(). FALSE if it did not start.
+ */
+static BOOL submit_worker(PTP_SIMPLE_CALLBACK worker, void* job) {
+    HMODULE self = NULL;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCWSTR)(const void*)&g_CacheLock, &self)) {
+        self = NULL; /* No reference taken: nothing for FreeLibrary below */
+    }
+    if (TrySubmitThreadpoolCallback(worker, job, NULL)) return TRUE;
+    if (self) FreeLibrary(self);
+    return FALSE;
+}
+
+static void release_worker_module(PTP_CALLBACK_INSTANCE instance) {
+    HMODULE self = NULL;
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCWSTR)(const void*)&g_CacheLock, &self)) {
+        FreeLibraryWhenCallbackReturns(instance, self);
+    }
+}
+
 static VOID CALLBACK load_index_worker(PTP_CALLBACK_INSTANCE instance, PVOID context) {
     LoadJob* job = (LoadJob*)context;
-    if (!job) return; /* Never: repo_cache_load_index always passes a job */
+    if (!job) { /* Never: submit_worker always passes a job */
+        release_worker_module(instance);
+        return;
+    }
     WCHAR password[SESSION_PASSWORD_CHARS];
     WCHAR err[512] = {0};
     ULONGLONG started = GetTickCount64();
@@ -257,13 +284,7 @@ static VOID CALLBACK load_index_worker(PTP_CALLBACK_INSTANCE instance, PVOID con
     finish_load(job, index, state);
     free(job);
     InterlockedDecrement(&g_LoadsRunning);
-
-    /* The worker holds a reference to this DLL so FreeLibrary cannot unmap it under the worker */
-    HMODULE self = NULL;
-    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           (LPCWSTR)(const void*)&g_CacheLock, &self)) {
-        FreeLibraryWhenCallbackReturns(instance, self);
-    }
+    release_worker_module(instance);
 }
 
 void repo_cache_load_index(
@@ -310,14 +331,8 @@ void repo_cache_load_index(
         return;
     }
 
-    /* A reference to this DLL for the worker, released by FreeLibraryWhenCallbackReturns */
-    HMODULE self = NULL;
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCWSTR)(const void*)&g_CacheLock, &self)) {
-        self = NULL; /* No reference taken: nothing for FreeLibrary below */
-    }
-    if (!TrySubmitThreadpoolCallback(load_index_worker, job, NULL)) {
+    if (!submit_worker(load_index_worker, job)) {
         log_write(L"Listing of snapshot %hs of '%ls' not started (Windows error %lu)", snapshot_id, alias, GetLastError());
-        if (self) FreeLibrary(self);
         AcquireSRWLockExclusive(&g_CacheLock);
         InterlockedDecrement(&g_LoadsRunning);
         e = find_index_locked(find_repo_locked(job->alias, job->target), snapshot_id);
@@ -330,6 +345,102 @@ void repo_cache_load_index(
         return;
     }
     log_write(L"Listing of snapshot %hs of '%ls' started in the background", snapshot_id, alias);
+}
+
+/* One background `restic snapshots` */
+typedef struct {
+    WCHAR alias[MAX_PATH];
+    WCHAR target[CONFIG_MAX_PATH];
+    WCHAR restic_exe[CONFIG_MAX_PATH];
+    char time_format[SNAPSHOT_TREE_TIME_FORMAT_MAX + 1];
+    ULONGLONG generation;
+    RepoPasswordSource password_source;
+} RefreshJob;
+
+static VOID CALLBACK refresh_tree_worker(PTP_CALLBACK_INSTANCE instance, PVOID context) {
+    RefreshJob* job = (RefreshJob*)context;
+    if (!job) { /* Never: submit_worker always passes a job */
+        release_worker_module(instance);
+        return;
+    }
+    WCHAR password[SESSION_PASSWORD_CHARS];
+    WCHAR err[512] = {0};
+    SnapshotTree* tree = NULL;
+    ResticResult res = RESTIC_ERR_INVALID_ARG;
+    ULONGLONG started = GetTickCount64();
+
+    if (job->password_source(job->alias, password, _countof(password))) {
+        LoadCancel cancel = {job->generation};
+        ResticExecOptions opts;
+        memset(&opts, 0, sizeof(opts));
+        opts.cancel_proc = load_cancelled;
+        opts.cancel_ctx  = &cancel;
+        res = restic_list_snapshots(job->restic_exe, job->target, password, job->time_format, &opts, &tree, err,
+                                    _countof(err));
+    }
+    SecureZeroMemory(password, sizeof(password));
+    if (res == RESTIC_OK) {
+        log_write(L"Snapshots of '%ls' re-read in the background: %u, %llu ms", job->alias,
+                  (unsigned)snapshot_tree_snapshot_count(tree), GetTickCount64() - started);
+        repo_cache_put_tree(job->alias, job->target, job->time_format, tree, job->generation);
+    } else {
+        log_write(L"Snapshots of '%ls' not re-read in the background, the cached list stays: %ls", job->alias,
+                  err[0] ? err : L"restic failed, was cancelled or had no password");
+    }
+
+    AcquireSRWLockExclusive(&g_CacheLock);
+    RepoEntry* r = find_repo_locked(job->alias, job->target);
+    if (r) r->refreshing = FALSE;
+    ReleaseSRWLockExclusive(&g_CacheLock);
+    free(job);
+    release_worker_module(instance);
+}
+
+void repo_cache_refresh_tree(
+    const WCHAR* alias,
+    const WCHAR* target,
+    const WCHAR* restic_exe,
+    const char* time_format,
+    ULONGLONG min_interval_ms,
+    RepoPasswordSource password_source
+) {
+    if (!alias || !target || !restic_exe || !time_format || !password_source ||
+        wcslen(restic_exe) >= CONFIG_MAX_PATH || strlen(time_format) > SNAPSHOT_TREE_TIME_FORMAT_MAX) {
+        return;
+    }
+    RefreshJob* job = (RefreshJob*)calloc(1, sizeof(RefreshJob));
+    if (!job) return;
+
+    AcquireSRWLockExclusive(&g_CacheLock);
+    RepoEntry* r = find_repo_locked(alias, target);
+    ULONGLONG now = GetTickCount64();
+    BOOL start = r && r->tree && !r->refreshing && now - r->tree_at >= min_interval_ms &&
+                 (r->refresh_tried_at == 0 || now - r->refresh_tried_at >= min_interval_ms);
+    if (start) {
+        r->refreshing       = TRUE;
+        r->refresh_tried_at = now;
+        wcscpy_s(job->alias, MAX_PATH, r->alias);
+        wcscpy_s(job->target, CONFIG_MAX_PATH, r->target);
+        wcscpy_s(job->restic_exe, CONFIG_MAX_PATH, restic_exe);
+        strcpy_s(job->time_format, sizeof(job->time_format), time_format);
+        job->generation      = g_CacheGeneration;
+        job->password_source = password_source;
+    }
+    ReleaseSRWLockExclusive(&g_CacheLock);
+    if (!start) {
+        free(job);
+        return;
+    }
+    if (!submit_worker(refresh_tree_worker, job)) {
+        log_write(L"Snapshots of '%ls' not re-read (Windows error %lu)", alias, GetLastError());
+        AcquireSRWLockExclusive(&g_CacheLock);
+        r = find_repo_locked(alias, target);
+        if (r) r->refreshing = FALSE;
+        ReleaseSRWLockExclusive(&g_CacheLock);
+        free(job);
+        return;
+    }
+    log_write(L"Snapshots of '%ls' are re-read in the background", alias);
 }
 
 void repo_cache_set_index_limit(size_t bytes) {

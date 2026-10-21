@@ -582,6 +582,7 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
     wcsncpy_s(out_config->root_name, MAX_PATH, CONFIG_DEFAULT_ROOT_NAME, _TRUNCATE);
     out_config->password_timeout_s = CONFIG_DEFAULT_PASSWORD_TIMEOUT_S;
     out_config->snapshot_cache_mb  = CONFIG_DEFAULT_SNAPSHOT_CACHE_MB;
+    out_config->snapshot_list_refresh_s = CONFIG_DEFAULT_SNAPSHOT_LIST_REFRESH_S;
     strcpy_s(out_config->snapshot_time_format, sizeof(out_config->snapshot_time_format),
              SNAPSHOT_TREE_DEFAULT_TIME_FORMAT);
 
@@ -615,6 +616,7 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
     BOOL reset_seen = FALSE;
     BOOL cache_seen = FALSE;
     BOOL format_seen = FALSE;
+    BOOL refresh_seen = FALSE;
     IniReader reader = {ini_text, NULL};
     WCHAR *alias = NULL, *target = NULL;
     while (ini_next_entry(&reader, &alias, &target)) {
@@ -647,6 +649,13 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
                 }
             }
             format_seen = TRUE;
+            continue;
+        }
+        if (ini_in_section(&reader, L"Settings") && _wcsicmp(alias, L"SnapshotListRefreshSeconds") == 0) {
+            /* First occurrence wins; anything but a plain decimal number keeps the default */
+            DWORD seconds = 0;
+            if (!refresh_seen && parse_decimal(target, &seconds)) out_config->snapshot_list_refresh_s = seconds;
+            refresh_seen = TRUE;
             continue;
         }
         if (ini_in_section(&reader, L"Settings") && _wcsicmp(alias, L"SnapshotCacheMB") == 0) {

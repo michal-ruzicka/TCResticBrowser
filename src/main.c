@@ -880,10 +880,12 @@ static ResticResult walk_tree(const SnapshotTree* tree, const WCHAR* rest, BOOL 
 }
 
 /*
- * Resolves a path below a repository alias. The cached tree is used when the password is trusted
- * and either the path leads into a snapshot (its folder name keeps meaning the snapshot it was
- * listed for) or the tree is younger than REPO_CACHE_TREE_TTL_MS; anything else - a stale folder
- * listing, a name the cached tree does not know - lists the snapshots again.
+ * Resolves a path below a repository alias. With a trusted password the cached tree answers
+ * whatever it knows, however old: a folder above the snapshots is listed from it at once, and if
+ * the tree is older than SnapshotListRefreshSeconds a fresh list is read in the background for the
+ * next listing; a path into a snapshot keeps meaning the snapshot it was listed for. Only a name
+ * the cached tree does not know, a missing tree, or a password just typed in (restic must check
+ * it) list the snapshots while the user waits.
  */
 static ResticResult resolve_repo_path(const RepoCall* call, const WCHAR* rest, BOOL want_items, RepoPath* out) {
     memset(out, 0, sizeof(*out));
@@ -896,11 +898,15 @@ static ResticResult resolve_repo_path(const RepoCall* call, const WCHAR* rest, B
         if (cached) {
             ResticResult res = walk_tree(cached, rest, want_items, out);
             repo_cache_unlock();
-            if (res != RESTIC_OK || out->kind == REPO_PATH_SNAPSHOT ||
-                (out->kind == REPO_PATH_FOLDER && age < REPO_CACHE_TREE_TTL_MS)) {
+            if (res != RESTIC_OK || out->kind == REPO_PATH_SNAPSHOT) return res;
+            if (out->kind == REPO_PATH_FOLDER) {
+                ULONGLONG refresh_ms = (ULONGLONG)call->cfg->snapshot_list_refresh_s * 1000ull;
+                if (age >= refresh_ms) {
+                    repo_cache_refresh_tree(call->repo->alias, call->repo->target, call->cfg->restic_path,
+                                            call->cfg->snapshot_time_format, refresh_ms, cached_password);
+                }
                 return res;
             }
-            free(out->items);
             memset(out, 0, sizeof(*out));
             out->subpath = L"";
         }

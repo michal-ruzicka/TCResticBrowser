@@ -10,6 +10,7 @@
 #define CONFIG_DEFAULT_ROOT_NAME  L"TCResticBrowser"  /* Network Neighborhood name without [Settings] RootName */
 #define CONFIG_DEFAULT_PASSWORD_TIMEOUT_S 1800u  /* [Settings] PasswordTimeoutSeconds default: 30 min */
 #define CONFIG_DEFAULT_SNAPSHOT_CACHE_MB  512u   /* [Settings] SnapshotCacheMB default */
+#define CONFIG_DEFAULT_SNAPSHOT_LIST_REFRESH_S 60u /* [Settings] SnapshotListRefreshSeconds: restic mount's interval */
 #define CONFIG_MAX_PATH           1024
 #define CONFIG_ERROR_CHARS        512   /* ResticConfig.restic_path_error */
 #define CONFIG_MAX_INI_BYTES      (4 * 1024 * 1024)  /* A larger TCResticBrowser.ini is not read */
@@ -34,6 +35,7 @@ typedef struct {
     DWORD password_timeout_s;            /* [Settings] PasswordTimeoutSeconds; 0 = keep until exit */
     BOOL password_timeout_reset_on_use;  /* [Settings] PasswordTimeoutResetOnUse (default FALSE) */
     DWORD snapshot_cache_mb;             /* [Settings] SnapshotCacheMB: whole-snapshot listings; 0 = off */
+    DWORD snapshot_list_refresh_s;       /* [Settings] SnapshotListRefreshSeconds: age that triggers a re-read */
     char snapshot_time_format[SNAPSHOT_TREE_TIME_FORMAT_MAX + 1]; /* [Settings] SnapshotTimeFormat, UTF-8, always valid */
     BOOL snapshot_time_format_invalid;   /* The INI had an unusable SnapshotTimeFormat (default used) */
     ResticRepoEntry* repos;              /* Heap-allocated array of repository entries */
@@ -122,6 +124,8 @@ BOOL config_is_plain_file_name(const WCHAR* path);
  * CONFIG_DEFAULT_SNAPSHOT_CACHE_MB when it is missing or not such a number. snapshot_time_format
  * is [Settings] SnapshotTimeFormat when snapshot_tree_time_format_valid() accepts it, otherwise
  * SNAPSHOT_TREE_DEFAULT_TIME_FORMAT (and snapshot_time_format_invalid is set if one was given).
+ * snapshot_list_refresh_s is [Settings] SnapshotListRefreshSeconds (decimal seconds), or
+ * CONFIG_DEFAULT_SNAPSHOT_LIST_REFRESH_S when it is missing or not such a number.
  * Caller must release allocated resources via config_free().
  */
 BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config);

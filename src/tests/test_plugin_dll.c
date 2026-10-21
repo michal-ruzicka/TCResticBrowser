@@ -911,6 +911,37 @@ static void test_e2e_snapshot_cache(const Plugin* p, const WCHAR* dir, const WCH
     g_e2e_msg_dialogs = 0;
 }
 
+/* Lists `path` and stores the number of entries (0 on error) */
+static void count_entries(const Plugin* p, const WCHAR* path, size_t* out) {
+    WIN32_FIND_DATAW fd;
+    *out = 0;
+    HANDLE h = p->find_first_w((WCHAR*)path, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do (*out)++; while (p->find_next_w(h, &fd));
+    p->find_close(h);
+}
+
+/* Takes one more snapshot of the fixture data into `repo` with restic itself */
+static BOOL run_restic_backup(const WCHAR* restic_exe, const WCHAR* repo) {
+    static WCHAR cmd[MAX_PATH * 4], data[MAX_PATH];
+    GetFullPathNameW(L"tmp\\test_fixture\\data", MAX_PATH, data, NULL);
+    swprintf_s(cmd, _countof(cmd), L"\"%ls\" -r \"%ls\" backup \"%ls\" --quiet --host fresh-test", restic_exe, repo, data);
+    SetEnvironmentVariableW(L"RESTIC_PASSWORD", FIXTURE_PASSWORD);
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    BOOL ok = CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    SetEnvironmentVariableW(L"RESTIC_PASSWORD", NULL);
+    if (!ok) return FALSE;
+    DWORD code = 1;
+    WaitForSingleObject(pi.hProcess, 120000);
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return code == 0;
+}
+
 /* Scenario C: full end-to-end navigation (Level 0 -> Level 1 -> Level 2+, password retry & session) */
 static void test_live_end_to_end_navigation(void) {
     if (GetFileAttributesW(L"tmp\\restic.exe") == INVALID_FILE_ATTRIBUTES ||
@@ -1460,6 +1491,34 @@ static void test_live_paths_with_spaces(void) {
     h2 = p.find_first_w(L"\\Sliding", &fd2);
     if (h2 != INVALID_HANDLE_VALUE) p.find_close(h2);
     EXPECT_TRUE(h2 != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 2, "Password expires once it is no longer used");
+
+    /* SnapshotListRefreshSeconds: an outdated snapshot list is still shown at once, and re-read in
+       the background for the next listing */
+    int fresh_len = snprintf(
+        ini_text, sizeof(ini_text),
+        "[Settings]\r\nResticPath=%s\r\nSnapshotListRefreshSeconds=1\r\n"
+        "[Logging]\r\nLogPath=%s\\spaces.log\r\n[Repositories]\r\nFresh=%s\r\n",
+        exe_u8, dir_u8, repo_u8);
+    EXPECT_TRUE(fresh_len > 0 && (size_t)fresh_len < sizeof(ini_text) && write_file(ini, ini_text),
+                "Rewrite the INI with SnapshotListRefreshSeconds=1");
+    g_e2e_pwd_prompts = 0;
+    size_t before = 0, stale = 0, after = 0;
+    count_entries(&p, L"\\Fresh\\snapshots", &before);
+    EXPECT_TRUE(before == 3 && g_e2e_pwd_prompts == 1, "Two snapshots and latest");
+    EXPECT_TRUE(run_restic_backup(exe, repo), "Another snapshot taken by restic itself");
+    Sleep(1500);
+    count_entries(&p, L"\\Fresh\\snapshots", &stale);
+    EXPECT_TRUE(stale == 3, "The outdated list is shown at once");
+    BOOL reread = FALSE;
+    for (int i = 0; i < 300 && !reread; ++i) {
+        char* text = read_text_file(log_file);
+        reread = text && strstr(text, "Snapshots of 'Fresh' re-read in the background");
+        free(text);
+        if (!reread) Sleep(200);
+    }
+    EXPECT_TRUE(reread, "Meanwhile restic re-read it in the background");
+    count_entries(&p, L"\\Fresh\\snapshots", &after);
+    EXPECT_TRUE(after == 4 && g_e2e_pwd_prompts == 1, "The next listing shows the new snapshot, without a prompt");
 
     unload_plugin_copy(&p, dir);
     DeleteFileW(ini);
