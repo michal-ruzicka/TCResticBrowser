@@ -618,6 +618,7 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
     BOOL format_seen = FALSE;
     BOOL refresh_seen = FALSE;
     BOOL connection_log_seen = FALSE;
+    BOOL csv_separator_seen = FALSE;
     IniReader reader = {ini_text, NULL};
     WCHAR *alias = NULL, *target = NULL;
     while (ini_next_entry(&reader, &alias, &target)) {
@@ -650,6 +651,18 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
                 }
             }
             format_seen = TRUE;
+            continue;
+        }
+        if (ini_in_section(&reader, L"Settings") && _wcsicmp(alias, L"CsvSeparator") == 0) {
+            /* First occurrence wins; anything else keeps the default (the Windows list separator) */
+            if (!csv_separator_seen) {
+                if (wcscmp(target, L",") == 0 || wcscmp(target, L";") == 0 || wcscmp(target, L"|") == 0) {
+                    out_config->csv_separator = (char)target[0];
+                } else if (_wcsicmp(target, L"tab") == 0) {
+                    out_config->csv_separator = '\t';
+                }
+            }
+            csv_separator_seen = TRUE;
             continue;
         }
         if (ini_in_section(&reader, L"Settings") && _wcsicmp(alias, L"ConnectionLog") == 0) {

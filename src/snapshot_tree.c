@@ -26,7 +26,21 @@ typedef struct {
     Timestamp time;
     const char* hostname;             /* Points into the JSON document */
     const JsonValue* tags;            /* JSON array or NULL */
+    const JsonValue* paths;           /* JSON array or NULL */
 } SnapshotRecord;
+
+/*
+ * What snapshot_tree_csv() lists of a snapshot, as restic reported it. One allocation, the strings
+ * right after the structure, so a single free() releases it (and /analyze, which does not trust
+ * calloc'd pointer members, sees nothing left to read before freeing it).
+ */
+typedef struct {
+    const char* id;    /* The tree's copy of the full ID */
+    Timestamp time;
+    const char* host;  /* These three point just past the structure */
+    const char* paths; /* The backed-up paths, one per line */
+    const char* tags;  /* The tags, one per line */
+} SnapshotInfo;
 
 /* Open-addressing hash set of (parent, name) -> node, so inserting N snapshots stays O(N) */
 typedef struct {
@@ -37,7 +51,8 @@ typedef struct {
 struct SnapshotTree {
     BuildNode* root;
     size_t snapshot_count;
-    char** ids; /* Owned copies of the full IDs the nodes point to */
+    char** ids;          /* Owned copies of the full IDs the nodes point to */
+    SnapshotInfo** info; /* snapshot_count entries, in the order of the IDs */
 };
 
 static uint64_t hash_key(const BuildNode* parent, const char* name) {
@@ -254,10 +269,52 @@ static size_t collect_records(const JsonValue* array, SnapshotRecord* records) {
         r->hostname = json_string(json_object_get(v, "hostname"));
         const JsonValue* tags = json_object_get(v, "tags");
         r->tags = tags && tags->type == JSON_ARRAY ? tags : NULL;
+        const JsonValue* paths = json_object_get(v, "paths");
+        r->paths = paths && paths->type == JSON_ARRAY ? paths : NULL;
         n++;
     }
     qsort(records, n, sizeof(SnapshotRecord), compare_records);
     return n;
+}
+
+/*
+ * The strings of a JSON array (other elements skipped) joined by line breaks, NUL-terminated, into
+ * `out` unless it is NULL; returns the bytes it takes, NUL included
+ */
+static size_t join_lines(const JsonValue* array, char* out) {
+    size_t o = 0;
+    for (const JsonValue* v = array ? array->child : NULL; v; v = v->next) {
+        if (v->type != JSON_STRING) continue;
+        size_t n = strlen(json_string(v));
+        if (out && o > 0) out[o - 1] = '\n'; /* Over the NUL of the previous line */
+        if (out) memcpy(out + o, json_string(v), n + 1);
+        o += n + 1;
+    }
+    if (o == 0) {
+        if (out) out[0] = '\0';
+        o = 1;
+    }
+    return o;
+}
+
+/* The snapshot's SnapshotInfo, its strings in the same allocation; NULL when out of memory */
+static SnapshotInfo* new_info(const SnapshotRecord* rec, const char* id) {
+    const char* host = rec->hostname ? rec->hostname : "";
+    size_t host_len  = strlen(host) + 1;
+    size_t paths_len = join_lines(rec->paths, NULL);
+    size_t tags_len  = join_lines(rec->tags, NULL);
+    SnapshotInfo* info = (SnapshotInfo*)malloc(sizeof(SnapshotInfo) + host_len + paths_len + tags_len);
+    if (!info) return NULL;
+    char* text = (char*)(info + 1);
+    memcpy(text, host, host_len);
+    join_lines(rec->paths, text + host_len);
+    join_lines(rec->tags, text + host_len + paths_len);
+    info->id    = id;
+    info->time  = rec->time;
+    info->host  = text;
+    info->paths = text + host_len;
+    info->tags  = text + host_len + paths_len;
+    return info;
 }
 
 /* The placeholders of a time format, longest first where one is a prefix of another */
@@ -311,7 +368,7 @@ static char* put_digits(char* p, int value, int width) {
     return p + width;
 }
 
-/* The snapshot's own wall-clock time written by `format` (valid, see snapshot_tree.h) */
+/* The snapshot's own wall-clock time written by `format` (placeholders as in snapshot_tree.h) */
 static void time_name(const Timestamp* t, const char* format, char* out) {
     char* o = out;
     for (const char* p = format; *p;) {
@@ -373,7 +430,8 @@ static SnapshotTreeStatus build_from_records(const SnapshotRecord* records, size
     BuildNode* root = (BuildNode*)calloc(1, sizeof(BuildNode));
     tree->root = root;
     tree->ids = count ? (char**)calloc(count, sizeof(char*)) : NULL;
-    if (!root || (count && !tree->ids) || !(root->name = (char*)calloc(1, 1))) goto done;
+    tree->info = count ? (SnapshotInfo**)calloc(count, sizeof(SnapshotInfo*)) : NULL;
+    if (!root || (count && (!tree->ids || !tree->info)) || !(root->name = (char*)calloc(1, 1))) goto done;
     root->pub.name = root->name;
 
     BuildNode *ids, *snapshots, *hosts, *tags;
@@ -388,6 +446,12 @@ static SnapshotTreeStatus build_from_records(const SnapshotRecord* records, size
         char* id = (char*)malloc(id_len + 1);
         if (!id) goto done;
         memcpy(id, rec->id, id_len + 1);
+        SnapshotInfo* info = new_info(rec, id);
+        if (!info) {
+            free(id);
+            goto done;
+        }
+        tree->info[tree->snapshot_count] = info;
         tree->ids[tree->snapshot_count++] = id;
 
         char when[SNAPSHOT_TREE_TIME_FORMAT_MAX * 2 + 1], short_id[SNAPSHOT_TREE_SHORT_ID_CHARS + 1];
@@ -463,6 +527,8 @@ void snapshot_tree_free(SnapshotTree* tree) {
     free_node(tree->root);
     for (size_t i = 0; i < tree->snapshot_count; ++i) free(tree->ids[i]);
     free(tree->ids);
+    for (size_t i = 0; i < tree->snapshot_count; ++i) free(tree->info[i]);
+    free(tree->info);
     free(tree);
 }
 
@@ -472,6 +538,102 @@ const SnapshotNode* snapshot_tree_root(const SnapshotTree* tree) {
 
 size_t snapshot_tree_snapshot_count(const SnapshotTree* tree) {
     return tree ? tree->snapshot_count : 0;
+}
+
+/* A growable text buffer for snapshot_tree_csv(); `failed` once out of memory */
+typedef struct {
+    char* data;
+    size_t len, cap;
+    int failed;
+} CsvText;
+
+static void csv_put(CsvText* t, const char* text, size_t len) {
+    if (t->failed) return;
+    if (t->len + len + 1 > t->cap) {
+        size_t cap = t->cap ? t->cap * 2 : 4096;
+        while (cap < t->len + len + 1) cap *= 2;
+        char* p = (char*)realloc(t->data, cap);
+        if (!p) {
+            t->failed = 1;
+            return;
+        }
+        t->data = p;
+        t->cap  = cap;
+    }
+    memcpy(t->data + t->len, text, len);
+    t->len += len;
+    t->data[t->len] = '\0';
+}
+
+/*
+ * One CSV field (RFC 4180): quoted when it holds the separator, a quote or a line break, quotes
+ * doubled. A value that a spreadsheet would take for a formula (=, +, -, @, tab or CR first) gets a
+ * leading apostrophe, as OWASP advises against CSV injection: host names, paths and tags come from
+ * the backed-up systems.
+ */
+static void csv_field(CsvText* t, const char* value, char separator) {
+    int formula = value[0] != '\0' && strchr("=+-@\t\r", value[0]) != NULL;
+    int quote = strchr(value, separator) || strchr(value, '"') || strchr(value, '\n') || strchr(value, '\r');
+    if (quote) csv_put(t, "\"", 1);
+    if (formula) csv_put(t, "'", 1);
+    for (const char* p = value; *p; ++p) {
+        csv_put(t, p, 1);
+        if (*p == '"') csv_put(t, "\"", 1);
+    }
+    if (quote) csv_put(t, "\"", 1);
+}
+
+static int compare_info(const void* a, const void* b) {
+    const SnapshotInfo* x = *(const SnapshotInfo* const*)a;
+    const SnapshotInfo* y = *(const SnapshotInfo* const*)b;
+    int c = strcmp(x->host, y->host);
+    if (c == 0) c = strcmp(x->paths, y->paths);
+    if (c == 0) c = timestamp_compare(&x->time, &y->time);
+    return c != 0 ? c : strcmp(x->id, y->id);
+}
+
+char* snapshot_tree_csv(const SnapshotTree* tree, char separator, size_t* out_len) {
+    if (out_len) *out_len = 0;
+    if (!tree || separator == '\0' || separator == '"' || separator == '\n' || separator == '\r') return NULL;
+    size_t n = tree->snapshot_count;
+    const SnapshotInfo** order = (const SnapshotInfo**)malloc((n ? n : 1) * sizeof(SnapshotInfo*));
+    if (!order) return NULL;
+    for (size_t i = 0; i < n; ++i) order[i] = tree->info[i];
+    qsort(order, n, sizeof(SnapshotInfo*), compare_info);
+
+    CsvText t = {NULL, 0, 0, 0};
+    const char sep[2] = {separator, '\0'};
+    static const char* const header[] = {"snapshot", "host", "paths", "timestamp", "tags"};
+    csv_put(&t, "\xEF\xBB\xBF", 3); /* UTF-8 byte-order mark: spreadsheets then read the file as UTF-8 */
+    for (size_t c = 0; c < 5; ++c) {
+        if (c) csv_put(&t, sep, 1);
+        csv_put(&t, header[c], strlen(header[c]));
+    }
+    csv_put(&t, "\r\n", 2);
+    for (size_t i = 0; i < n; ++i) {
+        const SnapshotInfo* s = order[i];
+        char short_id[SNAPSHOT_TREE_SHORT_ID_CHARS + 1], when[SNAPSHOT_TREE_TIME_FORMAT_MAX * 2 + 1];
+        memcpy(short_id, s->id, SNAPSHOT_TREE_SHORT_ID_CHARS);
+        short_id[SNAPSHOT_TREE_SHORT_ID_CHARS] = '\0';
+        time_name(&s->time, "YYYY-MM-DD hh:mm:ss", when); /* A date and time spreadsheets recognise */
+        csv_field(&t, short_id, separator);
+        csv_put(&t, sep, 1);
+        csv_field(&t, s->host, separator);
+        csv_put(&t, sep, 1);
+        csv_field(&t, s->paths, separator);
+        csv_put(&t, sep, 1);
+        csv_field(&t, when, separator);
+        csv_put(&t, sep, 1);
+        csv_field(&t, s->tags, separator);
+        csv_put(&t, "\r\n", 2);
+    }
+    free(order);
+    if (t.failed) {
+        free(t.data);
+        return NULL;
+    }
+    if (out_len) *out_len = t.len;
+    return t.data;
 }
 
 static int ascii_casecmp(const char* a, const char* b) {

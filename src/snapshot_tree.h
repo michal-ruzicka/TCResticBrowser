@@ -83,6 +83,22 @@ typedef struct SnapshotTree SnapshotTree;
  */
 SnapshotTreeStatus snapshot_tree_build(const char* json, size_t len, const char* time_format, SnapshotTree** out);
 
+/* The file listing the snapshots, in a repository's folder beside ids, snapshots, hosts and tags */
+#define SNAPSHOT_TREE_CSV_NAME "snapshots.csv"
+
+/*
+ * The snapshots as CSV text for spreadsheets (heap, NUL-terminated; `*out_len` bytes without the
+ * NUL), or NULL when out of memory or for a separator that cannot separate (NUL, quote, line
+ * break): a UTF-8 byte-order mark, then RFC 4180 records with CRLF line ends and `separator`
+ * between the fields snapshot (short ID), host, paths, timestamp ("YYYY-MM-DD hh:mm:ss", the
+ * snapshot's own clock time) and tags, after a header line; host, paths and tags as restic
+ * reports them, not made Windows-safe, several paths or tags one per line in their field. Sorted
+ * by host, then paths, then time. A field is quoted when it holds the separator, a quote or a line
+ * break (quotes doubled), and one that starts like a spreadsheet formula (= + - @ tab CR) gets a
+ * leading apostrophe.
+ */
+char* snapshot_tree_csv(const SnapshotTree* tree, char separator, size_t* out_len);
+
 /* Releases a tree and every node obtained from it. NULL is accepted. */
 void snapshot_tree_free(SnapshotTree* tree);
 

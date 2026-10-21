@@ -209,6 +209,7 @@ documentation.
 | **List Repositories** | Open **Network Neighborhood** (`\\\`) -> **`TCResticBrowser`**. Changes to `TCResticBrowser.ini` take effect immediately on panel refresh (`Ctrl+R` / `F2`). |
 | **Browse Snapshots** | Enter a repository folder (`\<Alias>`). Prompted once for the repository password; once restic accepts it, it is kept in RAM (encrypted) for that alias across both panels for 30 minutes (see [Password Timeout](#password-timeout)). Up to 3 password attempts are allowed. The dialog's title starts with the repository alias (`MyLocalBackup - Restic repository password`), so a password manager that picks an entry by the title of the active window, such as KeePassXC Auto-Type, can offer the right password. |
 | **Connection Log** | Optional (`ConnectionLog=yes`): Total Commander's FTP connections toolbar, whose log window shows what the plugin is doing in the background - reading a whole snapshot (with progress every few seconds) or re-reading the snapshot list - and whose **Disconnect** forgets all passwords and everything read with them. See [Connection Log](#connection-log). |
+| **Snapshot List (`snapshots.csv`)** | Every repository folder also holds the file **`snapshots.csv`**: all snapshots with host, paths, time and tags, for Excel or another spreadsheet (`F3` to view, `F5` to copy, or open it). See [Snapshot List as a Spreadsheet](#snapshot-list-as-a-spreadsheet). |
 | **Forget Passwords** | While passwords are remembered, the plugin's root folder starts with **`🗑 Forget N Passwords`** (N is their number; `🗑 Forget 1 Password` for one). Press **Enter** on it to wipe them all at once; a message says how many were forgotten, the root folder is then re-read without the entry, and the next access asks again. The entry is not removed by itself when the passwords expire; it disappears the next time the root folder is read (`Ctrl+R`). |
 | **Explore Files** | Enter a snapshot through `snapshots`, `ids`, `hosts` or `tags` (or `latest`) and navigate the backed-up directory tree. The snapshot list is read once and then shown at once from memory; when it is older than a minute (`SnapshotListRefreshSeconds=`), as `restic mount` would re-read it, restic reads a new one in the background and the next listing (`Ctrl+R`) shows any new snapshots (see [Snapshot List Refresh](#snapshot-list-refresh)). |
 | **View File (`F3` / `Ctrl+Q`)** | Press **`F3`** (Lister) or **`Ctrl+Q`** (Quick View) on any file to stream it to a temporary location and view its contents. |
@@ -281,6 +282,49 @@ The toolbar is Total Commander's own FTP toolbar, so it says *FTP* and has
 a transfer mode list; the mode has no effect here: files always come out
 of the snapshot byte for byte, whatever it says, and the plugin changes no
 setting of Total Commander.
+
+### Snapshot List as a Spreadsheet
+
+Next to `hosts`, `ids`, `snapshots` and `tags`, every repository folder
+holds the file `snapshots.csv`, made by the plugin from the snapshot list
+it has already read (no extra restic run). It lists every snapshot, one per
+line, sorted by host, then paths, then time:
+
+| Column | Content |
+| --- | --- |
+| `snapshot` | Short ID, as `restic snapshots` prints it and as in `ids` |
+| `host` | Host name as restic recorded it |
+| `paths` | The backed-up paths, one per line within the cell when there are several |
+| `timestamp` | `YYYY-MM-DD hh:mm:ss`, the snapshot's own clock time (the time zone it was taken in), which spreadsheets read as a date and time |
+| `tags` | The tags, one per line within the cell; empty when there are none |
+
+The file is UTF-8 with a byte-order mark, so Excel shows non-ASCII host
+names and paths correctly, and follows RFC 4180: a cell that contains the
+separator, a quote or a line break is quoted, and quotes in it are
+doubled. A host name, path or tag that starts like a spreadsheet formula
+(`=`, `+`, `-`, `@`) gets a leading apostrophe, so opening the file never
+evaluates anything a backup put into its tags.
+
+Excel separates the columns of a CSV file by the *list separator* of your
+Windows regional settings (a semicolon in many European countries, a comma
+in the US), so the plugin uses that separator too. `CsvSeparator=` under
+`[Settings]` sets another one: `,`, `;`, `|` or `tab`.
+
+```ini
+[Settings]
+CsvSeparator=;
+```
+
+Opened by a double click, Excel guesses the type of every cell: a short
+ID made only of digits (`01234567`) or looking like a number with an
+exponent (`123456e7`) is turned into a number. To keep every ID as it is,
+import the file instead (*Data* -> *From Text/CSV*) and set the `snapshot`
+column to *Text*.
+
+The size and time Total Commander shows for the file are those of the
+snapshot list at the time of the listing; the file copied is made from
+the list cached at the time of the copy, so after a background refresh it
+may already include newer snapshots.
 
 ### File Names from Other Systems
 
@@ -519,6 +563,9 @@ SnapshotTimeFormat=YYYY-MM-DDThh.mm.ss
 SnapshotListRefreshSeconds=600
 ; Optional memory for complete snapshot listings in MiB (default: 512, 0 = off).
 SnapshotCacheMB=1024
+; Optional field separator of snapshots.csv: , ; | or tab
+; (default: the list separator of the Windows regional settings).
+CsvSeparator=;
 
 [Repositories]
 ; Format: <Alias>=<Repository Path or URL>

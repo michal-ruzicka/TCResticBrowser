@@ -202,6 +202,20 @@ ResticResult restic_list_snapshot_index(
 );
 
 /**
+ * Writes `len` bytes of `data` to `local_dest_path` the way restic_dump_file() writes a file: into
+ * a temporary file in the target folder that replaces the target only once it is complete, a
+ * pre-existing target left untouched on any failure; with `overwrite` FALSE an existing target is
+ * refused. `mtime` (optional) is applied to the new file. RESTIC_ERR_LOCAL_WRITE on failure.
+ */
+ResticResult restic_write_local_file(
+    const WCHAR* local_dest_path,
+    const void* data,
+    size_t len,
+    BOOL overwrite,
+    const FILETIME* mtime
+);
+
+/**
  * Extracts a single file from a snapshot (`restic dump --no-lock <snapshot_id> <filter_path>`)
  * and streams its raw content to `local_dest_path` using a 64 KB buffer.
  *

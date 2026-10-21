@@ -37,6 +37,7 @@ typedef struct {
     DWORD snapshot_cache_mb;             /* [Settings] SnapshotCacheMB: whole-snapshot listings; 0 = off */
     DWORD snapshot_list_refresh_s;       /* [Settings] SnapshotListRefreshSeconds: age that triggers a re-read */
     BOOL connection_log;                 /* [Settings] ConnectionLog: Total Commander's connections toolbar (default FALSE) */
+    char csv_separator;                  /* [Settings] CsvSeparator: , ; | or tab; 0 = the Windows list separator */
     char snapshot_time_format[SNAPSHOT_TREE_TIME_FORMAT_MAX + 1]; /* [Settings] SnapshotTimeFormat, UTF-8, always valid */
     BOOL snapshot_time_format_invalid;   /* The INI had an unusable SnapshotTimeFormat (default used) */
     ResticRepoEntry* repos;              /* Heap-allocated array of repository entries */
@@ -128,6 +129,8 @@ BOOL config_is_plain_file_name(const WCHAR* path);
  * snapshot_list_refresh_s is [Settings] SnapshotListRefreshSeconds (decimal seconds), or
  * CONFIG_DEFAULT_SNAPSHOT_LIST_REFRESH_S when it is missing or not such a number. connection_log is
  * [Settings] ConnectionLog (yes/no as for PasswordTimeoutResetOnUse; FALSE when missing).
+ * csv_separator is [Settings] CsvSeparator: ",", ";", "|" or "tab" (any case); 0 when missing or
+ * anything else, which means the list separator of the user's Windows regional settings.
  * Caller must release allocated resources via config_free().
  */
 BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config);

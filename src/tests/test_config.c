@@ -983,6 +983,24 @@ static void test_password_timeout_setting(void) {
         config_free(&cfg);
         EXPECT_TRUE(got == conn[i].expected, conn[i].what);
     }
+    static const struct { const char* ini; char expected; const char* what; } seps[] = {
+        {"[Settings]\r\nResticPath=restic.exe\r\n", 0, "CsvSeparator missing: the Windows list separator"},
+        {"[Settings]\r\nCsvSeparator=,\r\n", ',', "CsvSeparator=,"},
+        {"[Settings]\r\ncsvseparator = ; \r\nCsvSeparator=|\r\n", ';', "CsvSeparator ; trimmed, first occurrence"},
+        {"[Settings]\r\nCsvSeparator=|\r\n", '|', "CsvSeparator=|"},
+        {"[Settings]\r\nCsvSeparator=TAB\r\n", '\t', "CsvSeparator=tab, any case"},
+        {"[Settings]\r\nCsvSeparator=\";\"\r\n", ';', "CsvSeparator quoted"},
+        {"[Settings]\r\nCsvSeparator=\"\r\n", 0, "CsvSeparator quote refused"},
+        {"[Settings]\r\nCsvSeparator=;;\r\n", 0, "CsvSeparator of two characters refused"},
+        {"[Settings]\r\nCsvSeparator=x\r\nCsvSeparator=;\r\n", 0, "An invalid first CsvSeparator is not replaced"},
+    };
+    for (size_t i = 0; i < _countof(seps); ++i) {
+        write_text_file(ini_path, seps[i].ini);
+        config_load(&cfg);
+        char got = cfg.csv_separator;
+        config_free(&cfg);
+        EXPECT_TRUE(got == seps[i].expected, seps[i].what);
+    }
 
     static const struct { const char* ini; DWORD expected; const char* what; } cases[] = {
         {"[Settings]\r\nResticPath=restic.exe\r\n", 1800, "Missing setting: default"},

@@ -327,6 +327,47 @@ static void test_time_formats(void) {
                 "64 bytes accepted");
 }
 
+/* snapshots.csv: content, quoting, sorting, formula protection */
+static void test_csv(void) {
+    SnapshotTree* tree = build(
+        "[{\"time\":\"2026-10-19T08:00:00+02:00\",\"id\":\"" ID("b") "\",\"hostname\":\"pc,1\","
+        "\"paths\":[\"/home\",\"/etc\"],\"tags\":[\"say \\\"hi\\\"\",\"=1+2\"]},"
+        "{\"time\":\"2026-10-18T07:00:00Z\",\"id\":\"" ID("a") "\",\"hostname\":\"pc,1\",\"paths\":[\"/home\"]},"
+        "{\"time\":\"2026-10-17T06:00:00Z\",\"id\":\"" ID("c") "\",\"hostname\":\"alpha\","
+        "\"paths\":[\"C:\\\\Users\"],\"tags\":[\"-daily\",\"@x\",\"plain\"]},"
+        "{\"time\":\"2026-10-20T05:04:03-05:00\",\"id\":\"" ID("d") "\",\"hostname\":\"pc,1\",\"paths\":[\"/home\"]},"
+        "{\"time\":\"2026-10-16T00:00:00Z\",\"id\":\"" ID("e") "\"}]");
+    EXPECT_TRUE(tree != NULL, "Built");
+    size_t len = 0;
+    char* csv = snapshot_tree_csv(tree, ',', &len);
+    static const char expected[] =
+        "\xEF\xBB\xBF" "snapshot,host,paths,timestamp,tags\r\n"
+        "eeeeeeee,,,2026-10-16 00:00:00,\r\n"                                    /* No host sorts first */
+        "cccccccc,alpha,C:\\Users,2026-10-17 06:00:00,\"'-daily\n@x\nplain\"\r\n"
+        "aaaaaaaa,\"pc,1\",/home,2026-10-18 07:00:00,\r\n"                        /* Same host and paths: by time */
+        "dddddddd,\"pc,1\",/home,2026-10-20 05:04:03,\r\n"
+        "bbbbbbbb,\"pc,1\",\"/home\n/etc\",2026-10-19 08:00:00,\"say \"\"hi\"\"\n=1+2\"\r\n"; /* Paths after "/home" */
+    if (!csv || strcmp(csv, expected) != 0) printf("       got: %s\n", csv ? csv : "(null)");
+    EXPECT_TRUE(csv && strcmp(csv, expected) == 0 && len == strlen(expected),
+                "BOM, header, CRLF; sorted by host, paths, time; quoting, doubled quotes, lines in a field, "
+                "a value starting like a formula defused (a spreadsheet looks at the start of a field only)");
+    free(csv);
+    csv = snapshot_tree_csv(tree, ';', &len);
+    EXPECT_TRUE(csv && strstr(csv, "snapshot;host;paths;timestamp;tags\r\n") && strstr(csv, ";pc,1;/home;") &&
+                strstr(csv, "eeeeeeee;;;2026-10-16 00:00:00;\r\n"), "Another separator; a comma then needs no quotes");
+    free(csv);
+    EXPECT_TRUE(snapshot_tree_csv(tree, '"', &len) == NULL && snapshot_tree_csv(tree, '\n', &len) == NULL &&
+                snapshot_tree_csv(NULL, ',', &len) == NULL, "Unusable separators refused");
+    snapshot_tree_free(tree);
+
+    tree = build("null");
+    csv = snapshot_tree_csv(tree, ',', &len);
+    EXPECT_TRUE(csv && strcmp(csv, "\xEF\xBB\xBF" "snapshot,host,paths,timestamp,tags\r\n") == 0,
+                "An empty repository has the header only");
+    free(csv);
+    snapshot_tree_free(tree);
+}
+
 static void test_skipped_entries(void) {
     SnapshotTree* tree = build(
         "[1,\"x\",null,{},"
@@ -528,6 +569,7 @@ int main(void) {
     test_name_collisions();
     test_sanitized_names();
     test_time_formats();
+    test_csv();
     test_skipped_entries();
     test_many_snapshots();
     test_index_listing();

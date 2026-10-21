@@ -32,6 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-reading the snapshot list) - and its Disconnect button forgets all
   passwords and cached listings. Off by default, because only Disconnect can close the toolbar
   again; `🗑 Forget N Passwords` cannot.
+- **`snapshots.csv` in every repository folder.** A spreadsheet of all
+  snapshots - short ID, host, paths, time and tags, sorted by host, paths
+  and time - made from the snapshot list already read, as UTF-8 with a
+  byte-order mark for Excel. Columns are separated by the list separator of
+  the Windows regional settings, which Excel expects, or by the new
+  `CsvSeparator=` (`,`, `;`, `|` or `tab`).
 - **The password dialog names the repository in its title**
   (`<alias> - Restic repository password`), so password managers that
   choose an entry by window title, such as KeePassXC Auto-Type, can fill

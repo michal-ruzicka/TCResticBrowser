@@ -12,7 +12,8 @@
  * The first byte chooses what the rest is fed to: its low bit the parser, the next bits a time
  * format or a memory limit. Everything that parses is walked and the invariants the plugin relies
  * on are checked - every name is one Windows-safe path component, folders are sorted, unique and
- * found again by name, snapshot IDs are hexadecimal - so a violation aborts like a sanitizer finding.
+ * found again by name, snapshot IDs are hexadecimal, snapshots.csv reads back as one record of five
+ * fields per snapshot - so a violation aborts like a sanitizer finding.
  */
 #include <stddef.h>
 #include <stdint.h>
@@ -56,6 +57,41 @@ static void walk_tree(const SnapshotNode* dir, int depth) {
     }
 }
 
+/* Reads snapshots.csv back by RFC 4180: BOM, then `records` CRLF-terminated records of five fields */
+static void check_csv(const char* csv, size_t len, char sep, size_t records) {
+    CHECK(len >= 3 && memcmp(csv, "\xEF\xBB\xBF", 3) == 0 && strlen(csv) == len);
+    size_t i = 3, fields = 1, seen = 0;
+    while (i < len) {
+        if (csv[i] == '"') { /* A quoted field: up to the quote that is not doubled */
+            for (++i;; ++i) {
+                CHECK(i < len);
+                if (csv[i] == '"' && (i + 1 >= len || csv[i + 1] != '"')) break;
+                if (csv[i] == '"') ++i;
+            }
+            ++i;
+            CHECK(i < len && (csv[i] == sep || csv[i] == '\r'));
+        } else {
+            /* Unquoted: no quote, no line break; never a formula after the header */
+            CHECK(seen == 0 || !strchr("=+-@", csv[i]) || csv[i] == sep);
+            while (i < len && csv[i] != sep && csv[i] != '\r') {
+                CHECK(csv[i] != '"' && csv[i] != '\n');
+                ++i;
+            }
+            CHECK(i < len);
+        }
+        if (csv[i] == sep) {
+            ++fields;
+            ++i;
+            continue;
+        }
+        CHECK(i + 1 < len && csv[i + 1] == '\n' && fields == 5);
+        i += 2;
+        fields = 1;
+        ++seen;
+    }
+    CHECK(seen == records);
+}
+
 static void fuzz_tree(const char* data, size_t size, const char* format) {
     SnapshotTree* tree = NULL;
     SnapshotTreeStatus st = snapshot_tree_build(data, size, format, &tree);
@@ -64,6 +100,13 @@ static void fuzz_tree(const char* data, size_t size, const char* format) {
     const SnapshotNode* root = snapshot_tree_root(tree);
     CHECK(root->child_count == 4);
     walk_tree(root, 0);
+    static const char SEPARATORS[] = {',', ';', '|', '\t'};
+    char sep  = SEPARATORS[size % sizeof(SEPARATORS)];
+    size_t len = 0;
+    char* csv  = snapshot_tree_csv(tree, sep, &len);
+    CHECK(csv != NULL);
+    check_csv(csv, len, sep, snapshot_tree_snapshot_count(tree) + 1);
+    free(csv);
     snapshot_tree_free(tree);
 }
 

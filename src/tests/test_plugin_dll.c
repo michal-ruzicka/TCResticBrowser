@@ -980,6 +980,79 @@ static BOOL run_restic_backup(const WCHAR* restic_exe, const WCHAR* repo) {
     return code == 0;
 }
 
+/*
+ * snapshots.csv in the repository's folder (the E2E INI sets CsvSeparator=;): listed as a read-only
+ * file of its exact size, copied through FsGetFileW with the overwrite protocol, never a folder.
+ * `latest_id` is the short ID of the newer of the fixture's two snapshots (same host and paths).
+ */
+static void test_snapshots_csv(const Plugin* p, const WCHAR* dir, const WCHAR* some_id, const WCHAR* latest_id) {
+    WIN32_FIND_DATAW fd;
+    RemoteInfo ri;
+    memset(&ri, 0, sizeof(ri));
+    BOOL listed = FALSE;
+    HANDLE h = p->find_first_w(L"\\MainRepo", &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (wcscmp(fd.cFileName, L"snapshots.csv") != 0) continue;
+            listed = (fd.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY)) ==
+                         FILE_ATTRIBUTE_READONLY &&
+                     fd.nFileSizeHigh == 0 && fd.nFileSizeLow > 0 && fd.ftLastWriteTime.dwHighDateTime != 0xFFFFFFFF;
+            ri.SizeLow       = fd.nFileSizeLow;
+            ri.SizeHigh      = fd.nFileSizeHigh;
+            ri.LastWriteTime = fd.ftLastWriteTime;
+            ri.Attr          = (int)fd.dwFileAttributes;
+        } while (p->find_next_w(h, &fd));
+        p->find_close(h);
+    }
+    EXPECT_TRUE(listed, "snapshots.csv is listed as a read-only file with a size and the newest snapshot's time");
+
+    WCHAR local[MAX_PATH];
+    swprintf_s(local, MAX_PATH, L"%ls\\snapshots.csv", dir);
+    DeleteFileW(local);
+    EXPECT_TRUE(p->get_file_w(L"\\MainRepo\\snapshots.csv", local, 0, &ri) == FS_FILE_OK, "snapshots.csv copied");
+    static char text[4096];
+    DWORD got = 0;
+    HANDLE f  = CreateFileW(local, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    FILETIME mtime = {0};
+    if (f != INVALID_HANDLE_VALUE) {
+        if (!ReadFile(f, text, sizeof(text) - 1, &got, NULL)) got = 0;
+        GetFileTime(f, NULL, NULL, &mtime);
+        CloseHandle(f);
+    }
+    text[got] = '\0';
+    EXPECT_TRUE(got == ri.SizeLow, "The copy has exactly the listed size");
+    EXPECT_TRUE(CompareFileTime(&mtime, &ri.LastWriteTime) == 0, "The copy carries the listed time");
+    const char* header = "\xEF\xBB\xBFsnapshot;host;paths;timestamp;tags\r\n";
+    EXPECT_TRUE(strncmp(text, header, strlen(header)) == 0, "UTF-8 BOM, then the header with CsvSeparator=;");
+    char some_a[16] = {0}, latest_a[16] = {0};
+    WideCharToMultiByte(CP_UTF8, 0, some_id, -1, some_a, sizeof(some_a), NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, latest_id, -1, latest_a, sizeof(latest_a), NULL, NULL);
+    const char* first  = strstr(text, "\r\n");
+    const char* second = first ? strstr(first + 2, "\r\n") : NULL;
+    EXPECT_TRUE(first && second && strncmp(second + 2, latest_a, 8) == 0 &&
+                    strstr(second + 2, "\r\n") == text + got - 2,
+                "Two records sorted by time: the newer snapshot is the last line");
+    EXPECT_TRUE(strstr(text, some_a) != NULL && strstr(text, "\\test_fixture\\data") != NULL,
+                "The records hold the short IDs and the backed-up path");
+
+    EXPECT_TRUE(p->get_file_w(L"\\MainRepo\\snapshots.csv", local, 0, &ri) == FS_FILE_EXISTS,
+                "An existing copy is reported first (overwrite protocol)");
+    EXPECT_TRUE(p->get_file_w(L"\\MainRepo\\SNAPSHOTS.CSV", local, FS_COPYFLAGS_OVERWRITE, &ri) == FS_FILE_OK,
+                "... and replaced with FS_COPYFLAGS_OVERWRITE (the name compares ignoring case)");
+    SetLastError(0);
+    EXPECT_TRUE(p->find_first_w(L"\\MainRepo\\snapshots.csv", &fd) == INVALID_HANDLE_VALUE &&
+                    GetLastError() == ERROR_PATH_NOT_FOUND,
+                "snapshots.csv is not a folder");
+    SetLastError(0);
+    EXPECT_TRUE(p->find_first_w(L"\\MainRepo\\snapshots.csv\\x", &fd) == INVALID_HANDLE_VALUE &&
+                    GetLastError() == ERROR_PATH_NOT_FOUND &&
+                    p->get_file_w(L"\\MainRepo\\snapshots.csv\\x", local, FS_COPYFLAGS_OVERWRITE, &ri) == FS_FILE_NOTFOUND,
+                "Nothing is below snapshots.csv");
+    EXPECT_TRUE(p->get_file_w(L"\\MainRepo\\hosts\\snapshots.csv", local, FS_COPYFLAGS_OVERWRITE, &ri) == FS_FILE_NOTFOUND,
+                "snapshots.csv is only in the repository's folder");
+    DeleteFileW(local);
+}
+
 /* Scenario C: full end-to-end navigation (Level 0 -> Level 1 -> Level 2+, password retry & session) */
 static void test_live_end_to_end_navigation(void) {
     if (GetFileAttributesW(L"tmp\\restic.exe") == INVALID_FILE_ATTRIBUTES ||
@@ -1008,6 +1081,7 @@ static void test_live_end_to_end_navigation(void) {
         ini_text,
         sizeof(ini_text),
         "[Settings]\r\nResticPath=%s\r\nSnapshotTimeFormat=YYYY-MM-DDThh.mm.ss\r\nConnectionLog=yes\r\n"
+        "CsvSeparator=;\r\n"
         "[Logging]\r\nLogPath=%s\\log dir\\e2e.log\r\n"
         "[Repositories]\r\nMainRepo=%s\r\nSecondRepo=%s\r\nThirdRepo=%s\r\n"
         "ExtractRepo=%s\r\nHintRepo=%s\r\n"
@@ -1040,8 +1114,8 @@ static void test_live_end_to_end_navigation(void) {
 
     WIN32_FIND_DATAW fd;
     static WCHAR names[1024];
-    EXPECT_TRUE(list_names(&p, L"\\MainRepo", names, _countof(names)) && wcscmp(names, L"hosts|ids|snapshots|tags") == 0,
-                "Level 1 shows restic mount's folders after a password retry");
+    EXPECT_TRUE(list_names(&p, L"\\MainRepo", names, _countof(names)) && wcscmp(names, L"hosts|ids|snapshots|tags|snapshots.csv") == 0,
+                "Level 1 shows restic mount's folders and snapshots.csv after a password retry");
     EXPECT_TRUE(g_e2e_pwd_prompts == 2, "Prompted twice (initial + 1 retry after wrong password)");
     EXPECT_TRUE(wcsstr(g_e2e_last_prompt, L"Wrong password") != NULL, "Retry prompt tells the user the password was wrong");
     EXPECT_TRUE(wcscmp(g_e2e_last_title, L"MainRepo - Restic repository password") == 0,
@@ -1096,6 +1170,7 @@ static void test_live_end_to_end_navigation(void) {
     EXPECT_TRUE(p.find_first_w(L"\\MainRepo\\snapshots\\1999-01-01_00-00-00", &fd) == INVALID_HANDLE_VALUE &&
                 GetLastError() == ERROR_PATH_NOT_FOUND, "Unknown snapshot -> ERROR_PATH_NOT_FOUND");
     EXPECT_TRUE(g_e2e_pwd_prompts == 0 && g_e2e_msg_dialogs == 0, "No prompt and no dialog while browsing the tree");
+    test_snapshots_csv(&p, dir, short_id, latest_link + 9);
 
     /* The snapshot root is the same through latest and ids/ */
     static WCHAR via_latest[1024], via_id[1024];

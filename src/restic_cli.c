@@ -1482,3 +1482,37 @@ ResticResult restic_dump_file(
     CloseHandle(pi.hProcess);
     return result;
 }
+
+ResticResult restic_write_local_file(
+    const WCHAR* local_dest_path,
+    const void* data,
+    size_t len,
+    BOOL overwrite,
+    const FILETIME* mtime
+) {
+    if (!local_dest_path || local_dest_path[0] == L'\0' || (!data && len > 0)) return RESTIC_ERR_INVALID_ARG;
+    if (!overwrite && GetFileAttributesW(local_dest_path) != INVALID_FILE_ATTRIBUTES) return RESTIC_ERR_LOCAL_WRITE;
+
+    DumpState st; /* The same temporary file and atomic replacement as restic_dump_file */
+    memset(&st, 0, sizeof(st));
+    st.final_path = local_dest_path;
+    st.overwrite  = overwrite;
+    st.hLocal     = INVALID_HANDLE_VALUE;
+    st.part_path  = make_partial_path(local_dest_path);
+    if (!st.part_path) return RESTIC_ERR_OUT_OF_MEMORY;
+
+    ResticResult result = RESTIC_ERR_LOCAL_WRITE;
+    HANDLE hf = dump_get_partial(&st);
+    BOOL written = hf != INVALID_HANDLE_VALUE;
+    for (size_t done = 0; written && done < len;) {
+        DWORD part = len - done > DUMP_CHUNK_BYTES ? DUMP_CHUNK_BYTES : (DWORD)(len - done), got = 0;
+        written = WriteFile(hf, (const char*)data + done, part, &got, NULL) && got == part;
+        done += got;
+    }
+    if (written) result = dump_commit(&st, mtime);
+
+    if (st.hLocal != INVALID_HANDLE_VALUE) CloseHandle(st.hLocal);
+    if (st.part_created) DeleteFileW(st.part_path);
+    free(st.part_path);
+    return result;
+}
