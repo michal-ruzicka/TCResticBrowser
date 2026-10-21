@@ -169,6 +169,7 @@ TCResticBrowser/
 │   ├── config.c / config.h     # TCResticBrowser.ini resolution & parsing, binary resolution
 │   ├── restic_cli.c / .h       # Child process execution, Win32 pipes, snapshot/NDJSON parsing
 │   ├── json.c / json.h         # Minimal strict read-only JSON reader (portable C11, no Win32)
+│   ├── timestamp.c / .h        # RFC 3339 timestamps as restic writes them (portable C11, no Win32)
 │   ├── log.c / log.h           # Optional diagnostic log ([Logging] LogPath), off by default
 │   └── tests/
 │       ├── test_json.c         # JSON reader: strictness, escapes, surrogates, limits, exact integers
@@ -221,7 +222,7 @@ typedef struct {
 
 ### 7.4 Parsing Rules (`restic_parse_*`)
 
-- Timestamps (`restic_parse_iso8601_time`) must be complete RFC 3339 values as restic writes them: a fraction needs a digit, the zone is `Z`, `+HH`, `+HHMM` or `+HH:MM`, and nothing may follow.
+- Timestamps (`restic_parse_iso8601_time`, a FILETIME wrapper around the portable `timestamp_parse`) must be complete RFC 3339 values as restic writes them: a fraction needs a digit, the zone is `Z`, `+HH`, `+HHMM` or `+HH:MM`, and nothing may follow. The calendar is checked by `timestamp.c` itself, not by `SystemTimeToFileTime`, so every platform rejects the same dates (Wine's `SystemTimeToFileTime` accepts February 29 of a common year).
 - `snapshots --json`: a literal `null` is an empty list; entries with an invalid time or non-hex ID are skipped (the directory name must never contain separators). The name carries the 8-character `short_id`; when snapshots share it (likely from tens of thousands of snapshots on), they carry the shortest unique prefix of their full IDs instead (`unique_id_prefixes`, neighbours in sorted order), because `restic ls <prefix>` refuses an ambiguous prefix. Directory name = snapshot time **as recorded by Restic (its own UTC offset)**; the `FILETIME` fields are converted to UTC.
 - `ls --json` NDJSON: strict - a malformed line aborts with `RESTIC_ERR_JSON_PARSE` (stdout contains JSON only). Only direct children of the filter path are returned. The filtered directory's own node is consumed to prove existence: a filter other than `/` whose node is missing or is not a `dir` yields `RESTIC_ERR_PATH_NOT_FOUND`. This distinguishes "missing" from "empty directory", which Total Commander needs (`ERROR_NO_MORE_FILES` = exists but empty, any other error = does not exist).
 - Name safety (`is_safe_component`): only names that are exactly one path component are reported. Total Commander appends the reported name to build both the next virtual path and, on `F5`, the local target path, so a name containing `\` or `/` (a legal Linux file name such as `..\..\x`) would let a recursive copy write outside the chosen target directory. Names consisting only of dots and spaces (`.`, `..`, `...`, `.. `) are skipped too, because Win32 strips trailing dots and spaces from path components. Dot files and names merely ending in a dot are kept. Names legal elsewhere but not on Windows (`a:b`, `CON`, `a.`, `a?b`) are listed unchanged, so the panel shows what the backup holds; `FsGetFileW` refuses to write them (see 5).

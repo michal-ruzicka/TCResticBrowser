@@ -102,6 +102,7 @@ add_library(restic_core OBJECT
     restic_cli.c
     json.c
     log.c
+    timestamp.c
 )
 
 # ---------------------------------------------------------------------------

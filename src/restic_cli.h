@@ -60,7 +60,8 @@ typedef struct {
 
 /**
  * Parses an ISO-8601 / RFC3339 timestamp (e.g. "2026-10-18T16:28:15.182004+02:00")
- * into a UTC WIN32 FILETIME. Rejects malformed values and invalid calendar dates.
+ * into a UTC WIN32 FILETIME. Rejects malformed values and invalid calendar dates
+ * (timestamp_parse() in timestamp.h has the exact rules).
  */
 BOOL restic_parse_iso8601_time(const char* iso_str, FILETIME* out_ft);
 

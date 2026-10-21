@@ -20,9 +20,8 @@
 #include "json.h"
 #include "config.h"
 #include "log.h"
+#include "timestamp.h"
 
-/* 100-nanosecond FILETIME ticks per minute (timezone offset conversion) */
-#define FILETIME_TICKS_PER_MINUTE 600000000ULL
 /* Maximum accepted WFX path length in UTF-16 units (Total Commander allows 1023) */
 #define MAX_WFX_PATH 1024
 /* Worst-case UTF-8 size of a MAX_WFX_PATH UTF-16 path, plus NUL */
@@ -35,10 +34,6 @@
 /* ------------------------------------------------------------------------------------------ */
 /* Small helpers                                                                              */
 /* ------------------------------------------------------------------------------------------ */
-
-static BOOL is_ascii_digit(char c) {
-    return (c >= '0' && c <= '9');
-}
 
 static BOOL is_hex_string(const char* s) {
     if (!s || s[0] == '\0') return FALSE;
@@ -66,105 +61,13 @@ static void utf8_to_wide_trunc(const char* src, WCHAR* dst, size_t cap) {
 /* Time, naming and path helpers                                                              */
 /* ------------------------------------------------------------------------------------------ */
 
-static int parse_fixed_digits(const char* s, size_t count) {
-    int val = 0;
-    for (size_t i = 0; i < count; ++i) {
-        if (!is_ascii_digit(s[i])) return -1;
-        val = (val * 10) + (s[i] - '0');
-    }
-    return val;
-}
-
 BOOL restic_parse_iso8601_time(const char* iso_str, FILETIME* out_ft) {
-    if (!iso_str || !out_ft) return FALSE;
+    if (!out_ft) return FALSE;
     memset(out_ft, 0, sizeof(FILETIME));
-
-    if (strlen(iso_str) < 19) return FALSE;
-    if (iso_str[4] != '-' || iso_str[7] != '-' ||
-        (iso_str[10] != 'T' && iso_str[10] != 't' && iso_str[10] != ' ') ||
-        iso_str[13] != ':' || iso_str[16] != ':') {
-        return FALSE;
-    }
-
-    int year   = parse_fixed_digits(iso_str + 0, 4);
-    int month  = parse_fixed_digits(iso_str + 5, 2);
-    int day    = parse_fixed_digits(iso_str + 8, 2);
-    int hour   = parse_fixed_digits(iso_str + 11, 2);
-    int minute = parse_fixed_digits(iso_str + 14, 2);
-    int second = parse_fixed_digits(iso_str + 17, 2);
-
-    if (year < 1601 || month < 1 || month > 12 || day < 1 || day > 31 ||
-        hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 60) {
-        return FALSE;
-    }
-
-    SYSTEMTIME st;
-    memset(&st, 0, sizeof(st));
-    st.wYear   = (WORD)year;
-    st.wMonth  = (WORD)month;
-    st.wDay    = (WORD)day;
-    st.wHour   = (WORD)hour;
-    st.wMinute = (WORD)minute;
-    st.wSecond = (WORD)(second == 60 ? 59 : second); /* Leap second -> last valid second */
-
-    FILETIME ft;
-    if (!SystemTimeToFileTime(&st, &ft)) { /* Also rejects e.g. February 30 */
-        return FALSE;
-    }
-
-    /* Optional fractional seconds, kept up to 100 ns precision (7 digits) */
-    const char* p = iso_str + 19;
-    unsigned long long frac_ticks = 0;
-    if (*p == '.') {
-        ++p;
-        if (!is_ascii_digit(*p)) return FALSE; /* "." needs at least one digit */
-        unsigned long long multiplier = 1000000ULL;
-        while (is_ascii_digit(*p)) {
-            if (multiplier > 0) {
-                frac_ticks += (unsigned long long)(*p - '0') * multiplier;
-                multiplier /= 10ULL;
-            }
-            ++p;
-        }
-    }
-
-    /* Optional timezone designator: 'Z', '+HH:MM', '-HH:MM', '+HHMM', '-HHMM', '+HH'; then the end */
-    long long tz_offset_minutes = 0;
-    if (*p == 'Z' || *p == 'z') {
-        ++p;
-    } else if (*p == '+' || *p == '-') {
-        int sign = (*p == '+') ? 1 : -1;
-        ++p;
-        int tz_h = parse_fixed_digits(p, 2);
-        if (tz_h < 0 || tz_h > 23) return FALSE;
-        p += 2;
-        int tz_m = 0;
-        if (*p != '\0') {
-            if (*p == ':') ++p;
-            tz_m = parse_fixed_digits(p, 2);
-            if (tz_m < 0 || tz_m > 59) return FALSE;
-            p += 2;
-        }
-        tz_offset_minutes = (long long)sign * ((long long)tz_h * 60LL + (long long)tz_m);
-    }
-    if (*p != '\0') return FALSE; /* Trailing characters: not a timestamp restic writes */
-
-    ULARGE_INTEGER uli;
-    uli.LowPart  = ft.dwLowDateTime;
-    uli.HighPart = ft.dwHighDateTime;
-    uli.QuadPart += frac_ticks;
-
-    /* Local time with offset -> UTC: UTC = local - offset */
-    if (tz_offset_minutes > 0) {
-        unsigned long long delta = (unsigned long long)tz_offset_minutes * FILETIME_TICKS_PER_MINUTE;
-        if (uli.QuadPart < delta) return FALSE; /* Would precede the FILETIME epoch */
-        uli.QuadPart -= delta;
-    } else if (tz_offset_minutes < 0) {
-        uli.QuadPart += (unsigned long long)(-tz_offset_minutes) * FILETIME_TICKS_PER_MINUTE;
-    }
-
-    out_ft->dwLowDateTime  = uli.LowPart;
-    out_ft->dwHighDateTime = uli.HighPart;
+    Timestamp ts;
+    if (!timestamp_parse(iso_str, &ts)) return FALSE;
+    out_ft->dwLowDateTime  = (DWORD)(ts.utc_ticks & 0xFFFFFFFFULL);
+    out_ft->dwHighDateTime = (DWORD)(ts.utc_ticks >> 32);
     return TRUE;
 }
 
