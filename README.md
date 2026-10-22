@@ -351,6 +351,24 @@ is remembered as long as the repository's password is. The file's date
 is the moment restic was asked for the ID; until then the listing shows
 the date of `snapshots.csv`.
 
+### Dates in the Panels
+
+| Entry | Date shown |
+| --- | --- |
+| Repository folders, `🗑 Forget N Passwords` | None |
+| `hosts`, `ids`, `snapshots`, `tags`, a host's or a tag's folder | When the newest snapshot in it was taken; none if it holds no snapshot (`tags` when no snapshot has a tag) |
+| A snapshot's folder, also `latest` and `latest → …` | When the snapshot was taken |
+| Files and folders in a snapshot | Their modification time as restic recorded it (none if restic has none); creation and access time from restic's `ctime` and `atime` |
+| `snapshots.csv` | When restic was asked for the snapshot list it is made from |
+| `repository_id.txt` | When restic was asked for the ID; until then the date of `snapshots.csv` |
+
+Total Commander shows every date in your local time zone, while a
+snapshot's folder is named by the time on the clock where the snapshot
+was taken, so the two differ for a snapshot from another time zone. A
+copied file (`F5`) keeps its modification time. On Linux and macOS,
+restic's `ctime` is the time a file's metadata last changed, not when it
+was created.
+
 ### File Names from Other Systems
 
 Snapshots made on Linux or macOS can contain names that are legal there but
