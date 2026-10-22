@@ -160,7 +160,7 @@ Options → Plugins → File system plugins → Configure → Add**.
 
 ### Getting Restic
 
-This plugin uses the official **Restic** command-line binary (`restic.exe`) under the hood to communicate with local, network, and cloud repositories. It needs **restic 0.17.1 or newer**: older versions report a wrong password and a missing repository with the same exit code and print `ls` output the plugin does not read.
+This plugin uses the official **Restic** command-line binary (`restic.exe`) under the hood to communicate with local, network, and cloud repositories. It needs **restic 0.17.1 or newer**: older versions report a wrong password and a missing repository with the same exit code and print `ls` output the plugin does not read. The plugin checks the version of `restic.exe` before it opens a repository (once per file, again after the file is replaced) and refuses an older one with a message saying so.
 
 **[Restic](https://restic.net)** is a fast, secure, cross-platform backup program written in Go that uses authenticated encryption (AES-256 + Poly1305-AES) and content-defined deduplication.
 
@@ -793,8 +793,6 @@ Planned for later versions, in no particular order:
   it notices the closed pipe; so does a `restic` still reading a snapshot in
   the background when Total Commander exits. A job object with
   `KILL_ON_JOB_CLOSE` would end the whole process tree at once.
-- **Check the restic version.** Tell the user when `restic.exe` is older
-  than 0.17.1 instead of misreading its exit codes and output.
 
 ## Contributing
 

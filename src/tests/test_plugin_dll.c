@@ -406,7 +406,7 @@ static int   g_e2e_pwd_mode         = 0; /* 0 = wrong once then correct, 1 = alw
                                            5 = correct password with a trailing space once, then correct */
 static WCHAR g_e2e_last_prompt[256] = {0};
 static WCHAR g_e2e_last_title[512] = {0};
-static WCHAR g_e2e_last_msg[256]    = {0};
+static WCHAR g_e2e_last_msg[1024]   = {0}; /* report_plugin_error() writes up to 1024 */
 static WCHAR g_e2e_progress_target[512] = {0};
 static int   g_e2e_progress_percent = -1;
 static volatile LONG g_e2e_mt_failures = 0;
@@ -1699,6 +1699,81 @@ static void delete_tree(const WCHAR* path) {
     RemoveDirectoryW(path);
 }
 
+/*
+ * A restic older than 0.17.1 (fake_restic.exe, built next to this test, printing the version
+ * FAKE_RESTIC_VERSION names, as text with FAKE_RESTIC_VERSION_TEXT like restic before 0.17.0) is
+ * refused with a message before any prompt, and asked for its version once, not before every
+ * listing; 0.17.0, the first to answer in JSON, is still too old
+ */
+static void test_old_restic_refused(void) {
+    WCHAR fake[MAX_PATH], dir[MAX_PATH], ini[MAX_PATH], log_file[MAX_PATH];
+    DWORD len = GetModuleFileNameW(NULL, fake, MAX_PATH);
+    WCHAR* slash = (len > 0 && len < MAX_PATH) ? wcsrchr(fake, L'\\') : NULL;
+    EXPECT_TRUE(slash != NULL, "Locate the test's own folder");
+    wcscpy_s(slash + 1, MAX_PATH - (size_t)(slash + 1 - fake), L"fake_restic.exe");
+    if (GetFileAttributesW(fake) == INVALID_FILE_ATTRIBUTES) {
+        printf("[SKIP] fake_restic.exe not found next to the test: old restic test skipped.\n");
+        return;
+    }
+    EXPECT_TRUE(make_unique_dir(L"restic_dll_old", dir, MAX_PATH), "Create plugin directory (old restic)");
+    swprintf_s(ini, MAX_PATH, L"%ls\\TCResticBrowser.ini", dir);
+    swprintf_s(log_file, MAX_PATH, L"%ls\\old.log", dir);
+    DeleteFileW(log_file); /* Left by a run that stopped early: the directory is named after the process ID */
+    char fake_u8[MAX_PATH * 3] = {0}, log_u8[MAX_PATH * 3] = {0};
+    WideCharToMultiByte(CP_UTF8, 0, fake, -1, fake_u8, sizeof(fake_u8), NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, log_file, -1, log_u8, sizeof(log_u8), NULL, NULL);
+    static char ini_text[2048];
+    int n = snprintf(ini_text, sizeof(ini_text),
+                     "[Settings]\r\nResticPath=%s\r\nConnectionLog=off\r\n[Logging]\r\nLogPath=%s\r\n"
+                     "[Repositories]\r\nOld=C:\\no_such_restic_repo_999\r\n",
+                     fake_u8, log_u8);
+    EXPECT_TRUE(n > 0 && (size_t)n < sizeof(ini_text) && write_file(ini, ini_text), "Write INI (old restic)");
+
+    Plugin p;
+    EXPECT_TRUE(load_plugin_copy(dir, &p), "Load plugin copy (old restic)");
+    EXPECT_TRUE(p.init_w(45, (void*)e2e_progress_proc, (void*)e2e_log_proc, (void*)e2e_request_proc) == 0,
+                "Register Total Commander callbacks (old restic)");
+    SetEnvironmentVariableW(L"FAKE_RESTIC_VERSION", L"0.16.4");
+    SetEnvironmentVariableW(L"FAKE_RESTIC_VERSION_TEXT", L"1");
+    g_e2e_pwd_mode    = 1;
+    g_e2e_pwd_prompts = 0;
+    g_e2e_msg_dialogs = 0;
+    WIN32_FIND_DATAW fd;
+    for (int i = 0; i < 2; ++i) {
+        EXPECT_TRUE(p.find_first_w(L"\\Old\\snapshots", &fd) == INVALID_HANDLE_VALUE, "An old restic is not used");
+    }
+    SetEnvironmentVariableW(L"FAKE_RESTIC_VERSION_TEXT", NULL);
+    EXPECT_TRUE(g_e2e_pwd_prompts == 0 && g_e2e_msg_dialogs == 2 && wcsstr(g_e2e_last_msg, L"older than restic 0.17.0") &&
+                    wcsstr(g_e2e_last_msg, L"0.17.1 or newer"),
+                "... and each attempt says why, before any password prompt");
+
+    /* Another restic.exe (another file: checked anew) that answers in JSON, but is 0.17.0 */
+    WCHAR fake2[MAX_PATH];
+    swprintf_s(fake2, MAX_PATH, L"%ls\\restic-0.17.0.exe", dir);
+    char fake2_u8[MAX_PATH * 3] = {0};
+    WideCharToMultiByte(CP_UTF8, 0, fake2, -1, fake2_u8, sizeof(fake2_u8), NULL, NULL);
+    n = snprintf(ini_text, sizeof(ini_text),
+                 "[Settings]\r\nResticPath=%s\r\nConnectionLog=off\r\n[Logging]\r\nLogPath=%s\r\n"
+                 "[Repositories]\r\nOld=C:\\no_such_restic_repo_999\r\n",
+                 fake2_u8, log_u8);
+    EXPECT_TRUE(CopyFileW(fake, fake2, FALSE) && n > 0 && (size_t)n < sizeof(ini_text) && write_file(ini, ini_text),
+                "Point ResticPath at a restic 0.17.0");
+    SetEnvironmentVariableW(L"FAKE_RESTIC_VERSION", L"0.17.0");
+    g_e2e_msg_dialogs = 0;
+    EXPECT_TRUE(p.find_first_w(L"\\Old\\snapshots", &fd) == INVALID_HANDLE_VALUE && g_e2e_msg_dialogs == 1 &&
+                    wcsstr(g_e2e_last_msg, L"is restic 0.17.0") && g_e2e_pwd_prompts == 0,
+                "restic 0.17.0 is refused too, naming its version");
+    SetEnvironmentVariableW(L"FAKE_RESTIC_VERSION", NULL);
+    char* log_text = read_text_file(log_file);
+    int version_runs = 0;
+    for (const char* q = log_text; q && (q = strstr(q, " --json version")) != NULL; ++q) version_runs++;
+    free(log_text);
+    EXPECT_TRUE(version_runs == 2, "restic is asked for its version once per file");
+
+    unload_plugin_copy(&p, dir);
+    delete_tree(dir);
+}
+
 /* Lists \<alias>\snapshots; TRUE when it worked and has a latest folder */
 static BOOL lists_snapshots(const Plugin* p, const WCHAR* alias) {
     WCHAR path[MAX_PATH];
@@ -2071,6 +2146,7 @@ int main(void) {
     test_live_end_to_end_navigation();
     test_live_paths_with_spaces();
     test_live_repository_settings();
+    test_old_restic_refused();
 
     RemoveDirectoryW(g_user_dir);
     RemoveDirectoryW(appdata_dir);

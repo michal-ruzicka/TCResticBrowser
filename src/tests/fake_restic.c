@@ -47,6 +47,22 @@ int main(int argc, char** argv) {
         put_out(password);
         return 0;
     }
+    if (strcmp(mode, "version") == 0) {
+        /* `restic --json version`; FAKE_RESTIC_VERSION sets the version, FAKE_RESTIC_VERSION_TEXT
+           prints text instead of JSON, as restic did before 0.17.0 */
+        char version[64] = "0.19.1";
+        GetEnvironmentVariableA("FAKE_RESTIC_VERSION", version, sizeof(version));
+        if (GetEnvironmentVariableA("FAKE_RESTIC_VERSION_TEXT", NULL, 0) > 0) {
+            put_out("restic ");
+            put_out(version);
+            put_out(" compiled with go1.22.1 on windows/amd64\n");
+            return 0;
+        }
+        put_out("{\"message_type\":\"version\",\"version\":\"");
+        put_out(version);
+        put_out("\",\"go_version\":\"go1.26.4\",\"go_os\":\"windows\",\"go_arch\":\"amd64\"}\n");
+        return 0;
+    }
     if (strcmp(mode, "/args") == 0) { /* Every argument, each followed by '|' */
         for (int i = 1; i < argc; ++i) {
             put_out(argv[i]);

@@ -914,14 +914,93 @@ static BOOL password_worth_caching(ResticResult res) {
 }
 
 /*
- * TRUE when config_resolve_restic_path found restic.exe and the repository's [Repository: <alias>]
- * settings are usable; otherwise shows the reason (a configured ResticPath that is missing, no
- * restic.exe at all, a setting that cannot be used) before any password prompt
+ * The version of the restic.exe last checked, identified by its path, size and time, so that it is
+ * asked once per file rather than before every listing, and again when the file is replaced
+ */
+static SRWLOCK g_VersionLock = SRWLOCK_INIT;
+static struct {
+    WCHAR path[CONFIG_MAX_PATH];
+    ULONGLONG size, written; /* GetFileAttributesExW; 0/0 for none */
+    unsigned version;        /* RESTIC_VERSION(), or VERSION_BEFORE_JSON */
+} g_CheckedVersion;
+
+/* `restic --json version` printed no JSON: restic before 0.17.0 (or not restic) */
+#define VERSION_BEFORE_JSON 1u
+
+/*
+ * Why `restic_exe` cannot be used: a version older than RESTIC_MIN_VERSION, whose exit codes the
+ * plugin would misread - also one that does not report its version as JSON, which every restic
+ * since 0.17.0 does (fail closed: the version is then certainly too old, or the file no restic).
+ * Empty when it is recent enough, and when `restic version` could not be run at all (a failure to
+ * start, which the operation itself then reports).
+ */
+static void restic_version_problem(const WCHAR* restic_exe, WCHAR* problem, size_t cap) {
+    problem[0] = L'\0';
+    WIN32_FILE_ATTRIBUTE_DATA attr;
+    if (!GetFileAttributesExW(restic_exe, GetFileExInfoStandard, &attr)) return;
+    ULONGLONG size    = ((ULONGLONG)attr.nFileSizeHigh << 32) | attr.nFileSizeLow;
+    ULONGLONG written = ((ULONGLONG)attr.ftLastWriteTime.dwHighDateTime << 32) | attr.ftLastWriteTime.dwLowDateTime;
+    unsigned version  = 0;
+    AcquireSRWLockShared(&g_VersionLock);
+    if (_wcsicmp(g_CheckedVersion.path, restic_exe) == 0 && g_CheckedVersion.size == size &&
+        g_CheckedVersion.written == written) {
+        version = g_CheckedVersion.version;
+    }
+    ReleaseSRWLockShared(&g_VersionLock);
+
+    if (version == 0) {
+        ResticExecOptions opts = {60u * 1000u, NULL, NULL}; /* `restic version` opens nothing */
+        WCHAR err[512];
+        ResticResult res = restic_read_version(restic_exe, &opts, &version, err, _countof(err));
+        if (res == RESTIC_ERR_JSON_PARSE) {
+            log_write(L"%ls reports no version as JSON (it printed: %ls): older than restic 0.17.0", restic_exe, err);
+            version = VERSION_BEFORE_JSON;
+        } else if (res != RESTIC_OK) {
+            log_write(L"Version of %ls not known (%ls): not checked", restic_exe, err);
+            return;
+        } else {
+            log_write(L"%ls is restic %u.%u.%u", restic_exe, version / 1000000u, version / 1000u % 1000u,
+                      version % 1000u);
+        }
+        AcquireSRWLockExclusive(&g_VersionLock);
+        wcsncpy_s(g_CheckedVersion.path, CONFIG_MAX_PATH, restic_exe, _TRUNCATE);
+        g_CheckedVersion.size    = size;
+        g_CheckedVersion.written = written;
+        g_CheckedVersion.version = version;
+        ReleaseSRWLockExclusive(&g_VersionLock);
+    }
+    if (version == VERSION_BEFORE_JSON) {
+        _snwprintf_s(problem, cap, _TRUNCATE,
+                     L"%ls is older than restic 0.17.0 (it does not report its version as JSON), or not restic. "
+                     L"The plugin needs restic " RESTIC_MIN_VERSION_TEXT L" or newer: older versions report a wrong "
+                     L"password, a missing or locked repository all alike. Please update restic "
+                     L"(https://github.com/restic/restic/releases).",
+                     restic_exe);
+    } else if (version < RESTIC_MIN_VERSION) {
+        _snwprintf_s(problem, cap, _TRUNCATE,
+                     L"%ls is restic %u.%u.%u. The plugin needs restic " RESTIC_MIN_VERSION_TEXT L" or newer: older "
+                     L"versions report a wrong password, a missing or locked repository all alike. Please update "
+                     L"restic (https://github.com/restic/restic/releases).",
+                     restic_exe, version / 1000000u, version / 1000u % 1000u, version % 1000u);
+    }
+}
+
+/*
+ * TRUE when config_resolve_restic_path found restic.exe, it is recent enough and the repository's
+ * [Repository: <alias>] settings are usable; otherwise shows the reason (a configured ResticPath
+ * that is missing, no restic.exe at all, a restic older than RESTIC_MIN_VERSION, a setting that
+ * cannot be used) before any password prompt
  */
 static BOOL repository_usable(const ResticConfig* cfg, const ResticRepoEntry* repo) {
     if (!config_is_absolute_path(cfg->restic_path)) {
         report_plugin_error(repo->alias, cfg->restic_path_error[0] != L'\0' ? cfg->restic_path_error
                                                                             : L"restic.exe not found.");
+        return FALSE;
+    }
+    WCHAR problem[CONFIG_MAX_PATH + 256];
+    restic_version_problem(cfg->restic_path, problem, _countof(problem));
+    if (problem[0] != L'\0') {
+        report_plugin_error(repo->alias, problem);
         return FALSE;
     }
     if (repo->settings_error[0] != L'\0') {

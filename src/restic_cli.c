@@ -665,8 +665,8 @@ static const WCHAR* result_name(ResticResult r) {
 /* Logs the command about to run: the repository (credentials redacted) and the password length only */
 static void log_restic_start(const WCHAR* cmd_line, const ResticRepo* repo) {
     if (!log_enabled()) return;
-    WCHAR target[1024];
-    log_redact_target(repo->target, target, _countof(target));
+    WCHAR target[1024] = L"(none)";
+    if (has_text(repo->target)) log_redact_target(repo->target, target, _countof(target));
     log_write(L"restic run: %ls", cmd_line);
     if (has_text(repo->password)) {
         log_write(L"  repository: %ls; password: %u characters", target, (unsigned)wcslen(repo->password));
@@ -976,9 +976,11 @@ ResticResult restic_exec_command(
     const ResticExecOptions* options,
     ResticCommandOutput* out_result
 ) {
-    if (!restic_exe || !restic_repo_usable(repo) || !args || !out_result) {
+    static const ResticRepo kNoRepository = {0}; /* A command that opens no repository */
+    if (!restic_exe || (repo && !restic_repo_usable(repo)) || !args || !out_result) {
         return RESTIC_ERR_INVALID_ARG;
     }
+    if (!repo) repo = &kNoRepository;
     memset(out_result, 0, sizeof(ResticCommandOutput));
 
     /* Neither a relative name (current directory search) nor a file that is no Windows program */
@@ -1127,6 +1129,55 @@ ResticResult restic_list_snapshots(
         case SNAPSHOT_TREE_NO_MEMORY: res = RESTIC_ERR_OUT_OF_MEMORY; break;
         case SNAPSHOT_TREE_BAD_FORMAT: res = RESTIC_ERR_INVALID_ARG; break;
         default: res = RESTIC_ERR_JSON_PARSE; break;
+    }
+    restic_free_command_output(&cmd_out);
+    return res;
+}
+
+ResticResult restic_read_version(
+    const WCHAR* restic_exe,
+    const ResticExecOptions* options,
+    unsigned* out_version,
+    WCHAR* out_error_msg,
+    size_t err_capacity
+) {
+    if (out_error_msg && err_capacity > 0) out_error_msg[0] = L'\0';
+    if (!restic_exe || !out_version) return RESTIC_ERR_INVALID_ARG;
+    *out_version = 0;
+    ResticCommandOutput cmd_out;
+    ResticResult res = run_and_check(restic_exe, NULL, L"--json version", options, &cmd_out, out_error_msg, err_capacity);
+    if (res != RESTIC_OK) return res;
+
+    /*
+     * {"message_type":"version","version":"0.19.1",...}, also "0.19.1-dev (compiled manually)". Before
+     * 0.17.0 `version` ignored the global --json and printed text, which is therefore no version
+     */
+    unsigned part[3] = {0, 0, 0};
+    JsonDoc* doc = json_parse(cmd_out.output, cmd_out.length);
+    const JsonValue* root = doc ? json_root(doc) : NULL;
+    const char* type = json_string(json_object_get(root, "message_type"));
+    const char* p    = type && strcmp(type, "version") == 0 ? json_string(json_object_get(root, "version")) : NULL;
+    for (int i = 0; p && i < 3; ++i) {
+        if (*p < '0' || *p > '9') {
+            p = NULL;
+            break;
+        }
+        unsigned long n = 0;
+        while (*p >= '0' && *p <= '9' && n < 100000) n = n * 10 + (unsigned long)(*p++ - '0');
+        part[i] = (unsigned)n;
+        if (i < 2) p = (*p == '.') ? p + 1 : NULL;
+    }
+    json_free(doc);
+    if (p && part[0] < 1000 && part[1] < 1000 && part[2] < 1000) {
+        *out_version = RESTIC_VERSION(part[0], part[1], part[2]);
+    } else {
+        res = RESTIC_ERR_JSON_PARSE;
+        if (out_error_msg && err_capacity > 0) {
+            utf8_to_wide_trunc(cmd_out.output, out_error_msg, err_capacity);
+            for (WCHAR* c = out_error_msg; *c; ++c) {
+                if (*c == L'\r' || *c == L'\n') *c = L' ';
+            }
+        }
     }
     restic_free_command_output(&cmd_out);
     return res;

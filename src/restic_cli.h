@@ -163,7 +163,8 @@ ResticResult restic_list_index_directory(
 
 /**
  * Runs `restic_exe args` as a hidden child process (CREATE_NO_WINDOW) with the repository and its
- * credentials (ResticRepo) injected into its environment. `restic_exe` must contain a path separator
+ * credentials (ResticRepo) injected into its environment; `repo` NULL for a command that opens no
+ * repository (version). `restic_exe` must contain a path separator
  * (bare names are refused so the current directory is never searched). `args` is passed verbatim
  * and must already be quoted. Caller must release `out_result` with restic_free_command_output().
  */
@@ -179,6 +180,31 @@ ResticResult restic_exec_command(
  * Releases the buffers owned by a ResticCommandOutput.
  */
 void restic_free_command_output(ResticCommandOutput* result);
+
+/* A restic version as one number, comparable with < and >= */
+#define RESTIC_VERSION(major, minor, patch) ((major) * 1000000u + (minor) * 1000u + (patch))
+/*
+ * The oldest restic the plugin works with: exit codes 10 and 11 and message_type in ls --json came
+ * with 0.17.0, exit code 12 (wrong password) with 0.17.1; older versions answer all of them with
+ * exit code 1, which the plugin would misread
+ */
+#define RESTIC_MIN_VERSION RESTIC_VERSION(0, 17, 1)
+#define RESTIC_MIN_VERSION_TEXT L"0.17.1"
+
+/**
+ * Runs `restic --json version` and stores the version it reports ({"message_type":"version",
+ * "version":"0.19.1",...}, a suffix such as "-dev" ignored) as RESTIC_VERSION() in *out_version.
+ * RESTIC_ERR_JSON_PARSE, with the output in `out_error_msg`, when the output is not that: restic
+ * before 0.17.0 ignores the global --json there and prints text, so this means an older restic (or
+ * no restic at all). Other failures as for any command.
+ */
+ResticResult restic_read_version(
+    const WCHAR* restic_exe,
+    const ResticExecOptions* options,
+    unsigned* out_version,
+    WCHAR* out_error_msg,
+    size_t err_capacity
+);
 
 /* A repository ID as `restic cat config` prints it: 64 lowercase hexadecimal characters */
 #define RESTIC_REPOSITORY_ID_CHARS 64

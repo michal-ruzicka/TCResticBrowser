@@ -967,6 +967,10 @@ static void test_live_restic_cli(void) {
     ResticResult res;
     ResticCommandOutput out;
 
+    unsigned live_version = 0;
+    res = restic_read_version(restic_bin, NULL, &live_version, err, _countof(err));
+    EXPECT_TRUE(res == RESTIC_OK && live_version >= RESTIC_MIN_VERSION, "restic version read; the live restic is recent enough");
+
     /* Error mapping before the repository exists */
     SnapshotTree* tree = NULL;
     res = restic_list_snapshots(restic_bin, REPO(repo, password), NULL, NULL, &tree, err, _countof(err));
@@ -1388,6 +1392,44 @@ static void test_dump_with_fake_restic(void) {
     RemoveDirectoryW(dir);
 }
 
+/* restic_read_version against fake_restic.exe, which prints FAKE_RESTIC_VERSION as restic would */
+static void test_read_version(void) {
+    WCHAR fake[MAX_PATH];
+    DWORD len = GetModuleFileNameW(NULL, fake, MAX_PATH);
+    WCHAR* slash = (len > 0 && len < MAX_PATH) ? wcsrchr(fake, L'\\') : NULL;
+    EXPECT_TRUE(slash != NULL, "Locate the test's own folder");
+    wcscpy_s(slash + 1, MAX_PATH - (size_t)(slash + 1 - fake), L"fake_restic.exe");
+    static const struct {
+        const WCHAR* printed; /* NULL: the fake's default */
+        BOOL text;            /* Printed as text, as restic before 0.17.0 does */
+        ResticResult result;
+        unsigned version;
+    } cases[] = {
+        {NULL, FALSE, RESTIC_OK, RESTIC_VERSION(0, 19, 1)},
+        {L"0.17.0", FALSE, RESTIC_OK, RESTIC_VERSION(0, 17, 0)},
+        {L"0.17.1", FALSE, RESTIC_OK, RESTIC_MIN_VERSION},
+        {L"1.2.3-dev (compiled manually)", FALSE, RESTIC_OK, RESTIC_VERSION(1, 2, 3)},
+        {L"0.17", FALSE, RESTIC_ERR_JSON_PARSE, 0},
+        {L"v0.18.0", FALSE, RESTIC_ERR_JSON_PARSE, 0},
+        {L"0.18.99999999", FALSE, RESTIC_ERR_JSON_PARSE, 0},
+        {L"0.16.4", TRUE, RESTIC_ERR_JSON_PARSE, 0}, /* Text, however recent it says it is */
+        {L"0.19.1", TRUE, RESTIC_ERR_JSON_PARSE, 0},
+    };
+    for (size_t i = 0; i < _countof(cases); ++i) {
+        SetEnvironmentVariableW(L"FAKE_RESTIC_VERSION", cases[i].printed);
+        SetEnvironmentVariableW(L"FAKE_RESTIC_VERSION_TEXT", cases[i].text ? L"1" : NULL);
+        unsigned version = 12345;
+        WCHAR err[512];
+        ResticResult res = restic_read_version(fake, NULL, &version, err, _countof(err));
+        EXPECT_TRUE(res == cases[i].result && version == cases[i].version, "restic version parsed, or refused as not one");
+    }
+    SetEnvironmentVariableW(L"FAKE_RESTIC_VERSION", NULL);
+    SetEnvironmentVariableW(L"FAKE_RESTIC_VERSION_TEXT", NULL);
+    EXPECT_TRUE(RESTIC_VERSION(0, 17, 0) < RESTIC_MIN_VERSION && RESTIC_VERSION(0, 17, 1) == RESTIC_MIN_VERSION &&
+                    RESTIC_VERSION(0, 9, 999) < RESTIC_VERSION(0, 10, 0),
+                "Versions compare as numbers");
+}
+
 int main(void) {
     /* No modal system dialog (crash, missing disk, failed start) may stop an unattended CI run */
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
@@ -1414,6 +1456,7 @@ int main(void) {
     test_exec_line_streaming();
     test_repo_cache_generations();
     test_dump_with_fake_restic();
+    test_read_version();
     test_live_restic_cli();
 
 #if defined(_DEBUG) && !defined(__SANITIZE_ADDRESS__)

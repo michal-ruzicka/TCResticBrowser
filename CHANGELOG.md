@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sftp.command=`...) and is passed as `-o`. A repository with S3
   variables no longer inherits `AWS_*`, `MINIO_*` and `RESTIC_AWS_*`
   variables from Total Commander's environment.
+- **The restic version is checked.** A `restic.exe` older than 0.17.1,
+  whose exit codes the plugin would misread, is refused with a message
+  before a repository is opened, instead of failing in confusing ways.
 
 ## [v2.1.0] – 2026-10-22
 
