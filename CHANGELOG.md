@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v2.1.0] – 2026-10-22
 
 ### Added
 
@@ -276,6 +276,6 @@ by Pietro Partescano, the base of this fork was commit [c8481b43c9ab2867eee82471
   block.
 
 
-[Unreleased]: https://github.com/michal-ruzicka/TCResticBrowser/compare/v2.0.0...HEAD
+[v2.1.0]: https://github.com/michal-ruzicka/TCResticBrowser/compare/v2.0.0...v2.1.0
 [v2.0.0]: https://github.com/michal-ruzicka/TCResticBrowser/compare/c8481b43c9ab2867eee824719e3a9c6785db6c61...v2.0.0
 [v1.0.0]: https://github.com/goldfix/Restic_WFX_Plugin/tree/1.0.0

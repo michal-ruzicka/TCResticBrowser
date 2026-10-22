@@ -17,9 +17,9 @@
 > check that a published binary was built from the published source — see
 > [Reproducible Builds](#reproducible-builds).
 >
-> Since then, many more changes and improvements were proposed and implemented.
-> The full list, including upgrade notes for original 1.*x* users, is in the
-> [CHANGELOG.md](CHANGELOG.md).
+> Since then, **many more changes and improvements** were proposed and implemented.
+> The **full list**, including upgrade notes for original 1.*x* users, is **in the
+> [CHANGELOG.md](CHANGELOG.md)**.
 
 **A [Total Commander](https://www.ghisler.com/) File System plugin (WFX)
 that lets you browse [Restic](https://restic.net) backup repositories and
