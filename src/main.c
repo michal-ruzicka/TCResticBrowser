@@ -463,6 +463,8 @@ static void report_status(const WCHAR* text) {
  */
 static void conn_log(BOOL deferred, const WCHAR* alias, const WCHAR* format, ...) {
     if (!InterlockedCompareExchange(&g_Connected, 0, 0) || !g_LogProc) return;
+    /* Deferred lines come with the session lock held; during DLL unload no worker is started for them */
+    if (deferred && g_SessionShuttingDown) return;
     WCHAR text[1024];
     int n = _snwprintf_s(text, _countof(text), _TRUNCATE, L"[%ls] ", alias);
     if (n < 0) return;
@@ -893,6 +895,8 @@ static ResticResult run_with_password(
         if (res == RESTIC_ERR_WRONG_PASSWORD) {
             if (from_cache) {
                 session_forget(repo->alias, cached_generation);
+                /* Forgetting it dropped the repository's cache: what the typed password reads is kept */
+                cache_generation = repo_cache_generation();
                 conn_log(FALSE, repo->alias, L"The remembered password was refused by restic and forgotten");
             } else {
                 conn_log(FALSE, repo->alias, L"Password refused by restic");
@@ -1034,12 +1038,10 @@ static ResticResult walk_tree(const SnapshotTree* tree, const WCHAR* rest, BOOL 
     out->kind = REPO_PATH_FOLDER;
     if (!want_items) return RESTIC_OK;
     size_t csv_len = 0;
-    if (node == root) { /* The CSV file's size, for the panel and the copy progress */
-        char* csv = snapshot_tree_csv(tree, csv_sep, &csv_len);
-        if (!csv) return RESTIC_ERR_OUT_OF_MEMORY;
-        free(csv);
-    }
-    return tree_folder_items(node, node == root, csv_len, &out->items, &out->count);
+    char* csv      = node == root ? snapshot_tree_csv(tree, csv_sep, &csv_len) : NULL;
+    BOOL with_csv  = csv != NULL; /* Only its size is listed, for the panel and the copy progress */
+    free(csv);                    /* (No memory to make it: not listed) */
+    return tree_folder_items(node, with_csv, csv_len, &out->items, &out->count);
 }
 
 /*

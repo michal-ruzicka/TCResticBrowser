@@ -245,10 +245,12 @@ typedef struct {
     ULONGLONG progressed;
     size_t accounted;            /* This load's share of g_LoadingBytes */
     BOOL crowded;                /* Given up: the loads running side by side need more than the limit */
+    BOOL stopped;                /* Told to stop; its share is no longer counted */
 } LoadCancel;
 
 static BOOL load_cancelled(void* ctx) {
     LoadCancel* c = (LoadCancel*)ctx;
+    if (c->stopped) return TRUE;
     BOOL gone;
     if (c->index) {
         /* The listings kept and the ones being read stay within SnapshotCacheMB together: kept ones
@@ -261,6 +263,12 @@ static BOOL load_cancelled(void* ctx) {
         if (!gone && g_IndexBytes + g_LoadingBytes > g_IndexLimit) {
             make_room_locked(g_LoadingBytes, NULL);
             if (g_LoadingBytes > g_IndexLimit && g_LoadingBytes > growing) c->crowded = TRUE;
+        }
+        if (gone || c->crowded) {
+            /* Not counted while restic is being stopped, or the next load polling would give up too */
+            g_LoadingBytes -= c->accounted;
+            c->accounted = 0;
+            c->stopped   = TRUE;
         }
         ReleaseSRWLockExclusive(&g_CacheLock);
         if (c->crowded) return TRUE;
@@ -323,10 +331,10 @@ static IndexState finish_load(const LoadJob* job, SnapshotIndex* index, IndexSta
 static BOOL submit_worker(PTP_SIMPLE_CALLBACK worker, void* job) {
     HMODULE self = NULL;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCWSTR)(const void*)&g_CacheLock, &self)) {
-        self = NULL; /* No reference taken: nothing for FreeLibrary below */
+        return FALSE; /* Without a reference the DLL could be unmapped under the worker (being unloaded) */
     }
     if (TrySubmitThreadpoolCallback(worker, job, NULL)) return TRUE;
-    if (self) FreeLibrary(self);
+    FreeLibrary(self);
     return FALSE;
 }
 

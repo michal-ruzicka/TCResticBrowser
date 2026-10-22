@@ -464,13 +464,14 @@ static BOOL bytebuf_append(ByteBuf* b, const char* src, size_t n) {
 /*
  * Moves the bytes currently available in a pipe into buf, at most DRAIN_SLICE_BYTES per call so that
  * the caller still checks the timeout and ESC while a child floods its output. Sets *eof once the
- * pipe is closed.
+ * pipe is closed. Beyond `keep_max` bytes in buf (0: no limit) the rest is read and dropped; every
+ * byte read, kept or not, is added to *total.
  */
 #define DRAIN_SLICE_BYTES (1024u * 1024u)
 #define DRAIN_READ_BYTES  (64u * 1024u) /* At most per ReadFile, straight into the buffer */
 #define STDERR_KEEP_BYTES (1024u * 1024u)       /* Enough for any error message; the rest is read and dropped */
 #define STREAM_LINE_MAX_BYTES (16u * 1024u * 1024u) /* A streamed stdout line longer than this fails the command */
-static BOOL drain_pipe(HANDLE pipe, ByteBuf* buf, BOOL* eof, size_t keep_max) {
+static BOOL drain_pipe(HANDLE pipe, ByteBuf* buf, BOOL* eof, size_t keep_max, size_t* total) {
     char discard[4096];
     for (size_t taken = 0; !*eof && taken < DRAIN_SLICE_BYTES;) {
         DWORD avail = 0;
@@ -493,6 +494,7 @@ static BOOL drain_pipe(HANDLE pipe, ByteBuf* buf, BOOL* eof, size_t keep_max) {
             buf->data[buf->len] = '\0';
         }
         taken += got;
+        *total += got;
     }
     return TRUE;
 }
@@ -752,24 +754,28 @@ static ResticResult collect_output(
     size_t delivered = 0; /* Bytes of stdout passed to line_proc and no longer kept */
 
     for (BOOL exited = FALSE;;) {
-        size_t before = delivered + out->len + err->len;
-        if (!drain_pipe(out_pipe, out, &out_eof, 0) || !drain_pipe(err_pipe, err, &err_eof, STDERR_KEEP_BYTES)) {
+        size_t got = 0; /* Bytes read in this pass, also those of stderr beyond STDERR_KEEP_BYTES */
+        if (!drain_pipe(out_pipe, out, &out_eof, 0, &got) ||
+            !drain_pipe(err_pipe, err, &err_eof, STDERR_KEEP_BYTES, &got)) {
             return RESTIC_ERR_OUT_OF_MEMORY;
         }
-        BOOL got_data = delivered + out->len + err->len != before;
+        BOOL got_data = got != 0;
         if (line_proc) {
             ResticResult r = deliver_lines(out, line_proc, options->line_ctx, FALSE, &delivered);
             if (r != RESTIC_OK) return r;
             if (out->len > STREAM_LINE_MAX_BYTES) return RESTIC_ERR_JSON_PARSE; /* No line is that long */
         }
 
-        /* After the exit, read on until the pipes hold nothing more (a slice is at most 1 MiB) */
+        /*
+         * After the exit, read on until the pipes hold nothing more (a slice is at most 1 MiB); the
+         * timeout and ESC still apply, as a helper restic started may hold the pipes and keep writing
+         */
         if (exited) {
-            if (got_data) continue;
-            return line_proc ? deliver_lines(out, line_proc, options->line_ctx, TRUE, &delivered) : RESTIC_OK;
-        }
-        /* Only sleep when idle; wake immediately when the child exits */
-        if (!got_data && WaitForSingleObject(process, 20) == WAIT_OBJECT_0) {
+            if (!got_data) {
+                return line_proc ? deliver_lines(out, line_proc, options->line_ctx, TRUE, &delivered) : RESTIC_OK;
+            }
+        } else if (!got_data && WaitForSingleObject(process, 20) == WAIT_OBJECT_0) {
+            /* Only sleep when idle; wake immediately when the child exits */
             exited = TRUE;
             continue;
         }
@@ -1399,20 +1405,20 @@ ResticResult restic_dump_file(
 
         for (;;) {
             ULONGLONG before_out = st.written;
-            size_t before_err    = err.len;
+            size_t err_got       = 0; /* Also the stderr bytes beyond STDERR_KEEP_BYTES: activity too */
 
             result = dump_drain_stdout(out_pipe, &st, &out_eof);
             if (result != RESTIC_OK) break;
-            if (!drain_pipe(err_pipe, &err, &err_eof, STDERR_KEEP_BYTES)) {
+            if (!drain_pipe(err_pipe, &err, &err_eof, STDERR_KEEP_BYTES, &err_got)) {
                 result = RESTIC_ERR_OUT_OF_MEMORY;
                 break;
             }
 
-            if (st.written != before_out || err.len != before_err) {
+            if (st.written != before_out || err_got != 0) {
                 st.last_activity = GetTickCount64();
             } else if (WaitForSingleObject(pi.hProcess, 20) == WAIT_OBJECT_0) {
                 result = dump_drain_stdout(out_pipe, &st, &out_eof);
-                if (result == RESTIC_OK && !drain_pipe(err_pipe, &err, &err_eof, STDERR_KEEP_BYTES)) {
+                if (result == RESTIC_OK && !drain_pipe(err_pipe, &err, &err_eof, STDERR_KEEP_BYTES, &err_got)) {
                     result = RESTIC_ERR_OUT_OF_MEMORY;
                 }
                 break;
