@@ -576,6 +576,12 @@ static BOOL parse_yes(const WCHAR* text) {
                     wcscmp(text, L"1") == 0);
 }
 
+/* TRUE for no/false/off/0 (case-insensitive) */
+static BOOL parse_no(const WCHAR* text) {
+    return text && (_wcsicmp(text, L"no") == 0 || _wcsicmp(text, L"false") == 0 || _wcsicmp(text, L"off") == 0 ||
+                    wcscmp(text, L"0") == 0);
+}
+
 BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
     if (!out_config) return FALSE;
     memset(out_config, 0, sizeof(ResticConfig));
@@ -583,6 +589,7 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
     out_config->password_timeout_s = CONFIG_DEFAULT_PASSWORD_TIMEOUT_S;
     out_config->snapshot_cache_mb  = CONFIG_DEFAULT_SNAPSHOT_CACHE_MB;
     out_config->snapshot_list_refresh_s = CONFIG_DEFAULT_SNAPSHOT_LIST_REFRESH_S;
+    out_config->connection_log     = TRUE;
     strcpy_s(out_config->snapshot_time_format, sizeof(out_config->snapshot_time_format),
              SNAPSHOT_TREE_DEFAULT_TIME_FORMAT);
 
@@ -666,8 +673,8 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
             continue;
         }
         if (ini_in_section(&reader, L"Settings") && _wcsicmp(alias, L"ConnectionLog") == 0) {
-            /* First occurrence wins; anything but a recognised "yes" keeps the default (no) */
-            if (!connection_log_seen) out_config->connection_log = parse_yes(target);
+            /* First occurrence wins; anything but a recognised "no" keeps the default (yes) */
+            if (!connection_log_seen) out_config->connection_log = !parse_no(target);
             connection_log_seen = TRUE;
             continue;
         }

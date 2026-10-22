@@ -1080,7 +1080,7 @@ static void test_live_end_to_end_navigation(void) {
     int ini_len = snprintf(
         ini_text,
         sizeof(ini_text),
-        "[Settings]\r\nResticPath=%s\r\nSnapshotTimeFormat=YYYY-MM-DDThh.mm.ss\r\nConnectionLog=yes\r\n"
+        "[Settings]\r\nResticPath=%s\r\nSnapshotTimeFormat=YYYY-MM-DDThh.mm.ss\r\n" /* ConnectionLog: default */
         "CsvSeparator=;\r\n"
         "[Logging]\r\nLogPath=%s\\log dir\\e2e.log\r\n"
         "[Repositories]\r\nMainRepo=%s\r\nSecondRepo=%s\r\nThirdRepo=%s\r\n"
@@ -1241,7 +1241,7 @@ static void test_live_end_to_end_navigation(void) {
     p.find_close(h);
     EXPECT_TRUE(g_e2e_pwd_prompts == 1, "Alternating between two panels' repositories never re-prompts");
 
-    /* ConnectionLog=yes: one connection for all repositories, announced once */
+    /* The connection log (on by default): one connection for all repositories, announced once */
     EXPECT_TRUE(conn_log_count(L"1:CONNECT \\\n") == 1 && conn_log_count(L"1:CONNECT") == 1,
                 "One connection (MSGTYPE_CONNECT \"CONNECT \\\"), announced when a repository was first used, "
                 "not again for another repository nor after the forget entry");
@@ -1585,7 +1585,8 @@ static void test_live_paths_with_spaces(void) {
     int ini_len = snprintf(
         ini_text,
         sizeof(ini_text),
-        "[Settings]\r\nResticPath=%s\r\nPasswordTimeoutSeconds=5\r\n[Logging]\r\nLogPath=%s\\spaces.log\r\n"
+        "[Settings]\r\nResticPath=%s\r\nPasswordTimeoutSeconds=5\r\nConnectionLog=off\r\n"
+        "[Logging]\r\nLogPath=%s\\spaces.log\r\n"
         "[Repositories]\r\n"
         "Plain=%s\r\nTrailing Backslash=%s\\\r\nQuoted=\"%s\"\r\nQuoted Trailing=\"%s\\\"\r\nTimed=%s\r\n",
         exe_u8, dir_u8, repo_u8, repo_u8, repo_u8, repo_u8, repo_u8
@@ -1595,7 +1596,7 @@ static void test_live_paths_with_spaces(void) {
 
     Plugin p;
     EXPECT_TRUE(load_plugin_copy(dir, &p), "Load plugin copy from a folder with spaces");
-    int connects_before = conn_log_count(L"1:CONNECT"); /* ConnectionLog is off by default: none here */
+    int connects_before = conn_log_count(L"1:CONNECT"); /* ConnectionLog=off: none here */
     EXPECT_TRUE(p.init_w(43, (void*)e2e_progress_proc, (void*)e2e_log_proc, (void*)e2e_request_proc) == 0,
                 "Register Total Commander callbacks (spaces)");
 
@@ -1643,7 +1644,7 @@ static void test_live_paths_with_spaces(void) {
        in active use outlives the timeout; once it is left alone the password expires */
     int reset_len = snprintf(
         ini_text, sizeof(ini_text),
-        "[Settings]\r\nResticPath=%s\r\nPasswordTimeoutSeconds=4\r\nPasswordTimeoutResetOnUse=yes\r\n"
+        "[Settings]\r\nResticPath=%s\r\nPasswordTimeoutSeconds=4\r\nPasswordTimeoutResetOnUse=yes\r\nConnectionLog=off\r\n"
         "[Logging]\r\nLogPath=%s\\spaces.log\r\n[Repositories]\r\nSliding=%s\r\n",
         exe_u8, dir_u8, repo_u8);
     EXPECT_TRUE(reset_len > 0 && (size_t)reset_len < sizeof(ini_text) && write_file(ini, ini_text),
@@ -1664,7 +1665,7 @@ static void test_live_paths_with_spaces(void) {
        the background for the next listing */
     int fresh_len = snprintf(
         ini_text, sizeof(ini_text),
-        "[Settings]\r\nResticPath=%s\r\nSnapshotListRefreshSeconds=1\r\n"
+        "[Settings]\r\nResticPath=%s\r\nSnapshotListRefreshSeconds=1\r\nConnectionLog=off\r\n"
         "[Logging]\r\nLogPath=%s\\spaces.log\r\n[Repositories]\r\nFresh=%s\r\n",
         exe_u8, dir_u8, repo_u8);
     EXPECT_TRUE(fresh_len > 0 && (size_t)fresh_len < sizeof(ini_text) && write_file(ini, ini_text),
@@ -1688,7 +1689,7 @@ static void test_live_paths_with_spaces(void) {
     count_entries(&p, L"\\Fresh\\snapshots", &after);
     EXPECT_TRUE(after == 6 && g_e2e_pwd_prompts == 1, "The next listing shows the new snapshot, without a prompt");
     EXPECT_TRUE(conn_log_count(L"1:CONNECT") == connects_before && conn_log_count(L"[Fresh]") == 0,
-                "Without ConnectionLog=yes no connection is announced and nothing goes to its log");
+                "With ConnectionLog=off no connection is announced and nothing goes to its log");
 
     unload_plugin_copy(&p, dir);
     DeleteFileW(ini);

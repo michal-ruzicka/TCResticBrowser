@@ -36,7 +36,7 @@ typedef struct {
     BOOL password_timeout_reset_on_use;  /* [Settings] PasswordTimeoutResetOnUse (default FALSE) */
     DWORD snapshot_cache_mb;             /* [Settings] SnapshotCacheMB: whole-snapshot listings; 0 = off */
     DWORD snapshot_list_refresh_s;       /* [Settings] SnapshotListRefreshSeconds: age that triggers a re-read */
-    BOOL connection_log;                 /* [Settings] ConnectionLog: Total Commander's connections toolbar (default FALSE) */
+    BOOL connection_log;                 /* [Settings] ConnectionLog: Total Commander's connections toolbar (default TRUE) */
     char csv_separator;                  /* [Settings] CsvSeparator: , ; | or tab; 0 = the Windows list separator */
     char snapshot_time_format[SNAPSHOT_TREE_TIME_FORMAT_MAX + 1]; /* [Settings] SnapshotTimeFormat, UTF-8, always valid */
     BOOL snapshot_time_format_invalid;   /* The INI had an unusable SnapshotTimeFormat (default used) */
@@ -128,7 +128,7 @@ BOOL config_is_plain_file_name(const WCHAR* path);
  * SNAPSHOT_TREE_DEFAULT_TIME_FORMAT (and snapshot_time_format_invalid is set if one was given).
  * snapshot_list_refresh_s is [Settings] SnapshotListRefreshSeconds (decimal seconds), or
  * CONFIG_DEFAULT_SNAPSHOT_LIST_REFRESH_S when it is missing or not such a number. connection_log is
- * [Settings] ConnectionLog (yes/no as for PasswordTimeoutResetOnUse; FALSE when missing).
+ * [Settings] ConnectionLog: FALSE for no/false/off/0 (any case), otherwise TRUE, also when missing.
  * csv_separator is [Settings] CsvSeparator: ",", ";", "|" or "tab" (any case); 0 when missing or
  * anything else, which means the list separator of the user's Windows regional settings.
  * Caller must release allocated resources via config_free().

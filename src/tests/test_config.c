@@ -971,10 +971,15 @@ static void test_password_timeout_setting(void) {
         EXPECT_TRUE(got == resets[i].expected, resets[i].what);
     }
     static const struct { const char* ini; BOOL expected; const char* what; } conn[] = {
-        {"[Settings]\r\nResticPath=restic.exe\r\n", FALSE, "ConnectionLog off by default"},
+        {"[Settings]\r\nResticPath=restic.exe\r\n", TRUE, "ConnectionLog on by default"},
+        {"[Settings]\r\nConnectionLog=no\r\n", FALSE, "ConnectionLog=no"},
+        {"[Settings]\r\nConnectionLog=FALSE\r\n", FALSE, "ConnectionLog=FALSE, any case"},
+        {"[Settings]\r\nConnectionLog=off\r\n", FALSE, "ConnectionLog=off"},
+        {"[Settings]\r\nConnectionLog=0\r\n", FALSE, "ConnectionLog=0"},
         {"[Settings]\r\nConnectionLog=yes\r\n", TRUE, "ConnectionLog=yes"},
-        {"[Settings]\r\nconnectionlog = On \r\nConnectionLog=no\r\n", TRUE, "ConnectionLog first occurrence"},
-        {"[Settings]\r\nConnectionLog=sometimes\r\n", FALSE, "ConnectionLog unrecognised: off"},
+        {"[Settings]\r\nconnectionlog = Off \r\nConnectionLog=yes\r\n", FALSE, "ConnectionLog first occurrence, trimmed"},
+        {"[Settings]\r\nConnectionLog=sometimes\r\n", TRUE, "ConnectionLog unrecognised: on"},
+        {"[Logging]\r\nConnectionLog=no\r\n", TRUE, "ConnectionLog outside [Settings] ignored"},
     };
     for (size_t i = 0; i < _countof(conn); ++i) {
         write_text_file(ini_path, conn[i].ini);

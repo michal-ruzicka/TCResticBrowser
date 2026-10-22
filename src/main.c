@@ -424,7 +424,7 @@ static void session_forget(const WCHAR* alias, ULONGLONG generation) {
 
 
 /*
- * Total Commander's connection log ([Settings] ConnectionLog=yes). When a repository is first used,
+ * Total Commander's connection log ([Settings] ConnectionLog, on unless "no"). When a repository is first used,
  * before its password is asked for (as an FTP plugin announces a connection when it starts
  * connecting, so that the log shows how it went), the plugin announces one connection for all its
  * repositories (LogProc MSGTYPE_CONNECT, "CONNECT \\", the WFX SDK's root "for a single possible

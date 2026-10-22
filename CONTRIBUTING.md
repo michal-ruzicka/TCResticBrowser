@@ -397,7 +397,7 @@ Total Commander process
     │                                target (F5, F3, Ctrl+Q)
     ├── RequestProcW (TC callback)   repository password, kept in memory
     │                                per alias, passed as RESTIC_PASSWORD
-    └── LogProcW (TC callback)       with ConnectionLog=yes: one CONNECT \ for all
+    └── LogProcW (TC callback)       unless ConnectionLog=no: one CONNECT \ for all
                                      repositories when one is first used, before
                                      its password is asked for; passwords, restic
                                      runs and background work as MSGTYPE_DETAILS,
