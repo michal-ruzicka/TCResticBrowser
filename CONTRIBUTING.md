@@ -37,6 +37,11 @@ it up to date with every change.
   against `RESTIC_ZIP_SHA256` there (`Get-FileHash -Algorithm SHA256`), the
   `.exe` inside copied to `tmp\restic.exe` (the 64-bit `restic.exe` serves the
   x86 tests too).
+- *(Optional, but CI has it)* `tmp\rclone.exe`: the live test of an `rclone:`
+  repository (rclone's local backend over the test repository) needs it and
+  reports `[SKIP]` without it. Again the version CI pins, `RCLONE_VERSION`
+  and `RCLONE_ZIP_SHA256`, `rclone.exe` from
+  `rclone-v<version>-windows-amd64.zip` of the rclone GitHub release.
 
 Nothing else: no Bash, no Python, no .NET. The plugin is pure C11 / Win32,
 linked against the static MSVC runtime, and contains no third-party code.
@@ -126,7 +131,7 @@ are not shipped in the ZIP) and run from the repository root:
 | `test_snapshot_tree` | RFC 3339 timestamps, the `restic mount` folder tree and the whole-snapshot index (portable C, also builds with gcc/clang and sanitizers): naming, `SnapshotTimeFormat`, `-1` suffixes, `latest`, `latest → <folder>` and `latest → <short ID>`, host and tag names made Windows-safe, `snapshots.csv` (quoting, sort order, formula defusing), the index's walk order, limits and lookups |
 | `test_config` | `TCResticBrowser.ini` lookup and parsing, `restic.exe` resolution (never from the current directory), root listing, the inert plugin without an INI |
 | `test_restic_cli` | `ls` parser, argument quoting, child-process handling with `cmd.exe` and a fake `restic` stand-in (`fake_restic.exe`), line streaming, and live tests against `tmp\restic.exe` (including every folder listed identically from the whole-snapshot index and from `restic ls`) |
-| `test_plugin_dll` | Loads the built DLL like Total Commander does: exact export surface, icon and version resources, INI lookup, and live navigation (the `restic mount` folders, background listings and refreshes) and extraction through the WFX API |
+| `test_plugin_dll` | Loads the built DLL like Total Commander does: exact export surface, icon and version resources, INI lookup, and live navigation (the `restic mount` folders, background listings and refreshes) and extraction through the WFX API, also of an `rclone:` repository with `tmp\rclone.exe` |
 
 [AGENT.md](AGENT.md#87-test-suites-srctests) lists every case. Run them
 manually after a build:

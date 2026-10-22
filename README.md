@@ -691,8 +691,13 @@ LinuxServerSftp=sftp:backupuser@192.168.1.20:/srv/restic/repo
 AwsS3=s3:s3.amazonaws.com/my-backup-bucket/restic
 LocalMinio=s3:http://192.168.1.60:9000/restic-backups
 
-; 6. Rclone backend (Google Drive, OneDrive, Dropbox, Box, etc.)
+; 6. Rclone backend (Google Drive, OneDrive, Dropbox, Box, etc.). restic starts
+;    rclone.exe from PATH; rclone.program in a [Repository: <Alias>] section
+;    names another one. Cancelling ends rclone together with restic.
 GoogleDrive=rclone:gdrive:Backups/restic_repo
+
+[Repository: GoogleDrive]
+rclone.program=C:\Tools\rclone\rclone.exe
 
 ; The password comes from a file, not from a dialog
 [Repository: LocalDocs]
@@ -780,14 +785,6 @@ How the reader is tested:
   JSONTestSuite and real Restic output: about 90 million inputs without a
   sanitizer finding or a violated invariant; code coverage stopped growing
   within the first minute.
-
-## Expected Future Work
-
-Planned for later versions, in no particular order:
-
-- **Verified rclone backends.** Check (and add tests) that `rclone:`
-  repositories work through the plugin; restic handles them itself, so no
-  problems are expected.
 
 ## Contributing
 

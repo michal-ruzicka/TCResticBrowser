@@ -13,6 +13,7 @@
 #define _UNICODE
 #endif
 #include <windows.h>
+#include <tlhelp32.h>
 #include <stdio.h>
 #include <stdlib.h>
 #if defined(_DEBUG) && !defined(__SANITIZE_ADDRESS__)
@@ -1905,6 +1906,110 @@ static void test_live_repository_settings(void) {
     delete_tree(dir);
 }
 
+/* Number of running processes whose executable is named `exe_name` */
+static int count_processes(const WCHAR* exe_name) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return -1;
+    PROCESSENTRY32W pe;
+    pe.dwSize = sizeof(pe);
+    int n = 0;
+    for (BOOL more = Process32FirstW(snap, &pe); more; more = Process32NextW(snap, &pe)) {
+        if (_wcsicmp(pe.szExeFile, exe_name) == 0) n++;
+    }
+    CloseHandle(snap);
+    return n;
+}
+
+/* Waits up to `ms` for the number of `exe_name` processes to drop to `count`; TRUE when it did */
+static BOOL processes_back_to(const WCHAR* exe_name, int count, DWORD ms) {
+    for (DWORD waited = 0;; waited += 250) {
+        int n = count_processes(exe_name);
+        if (n >= 0 && n <= count) return TRUE;
+        if (waited >= ms) return FALSE;
+        Sleep(250);
+    }
+}
+
+/*
+ * Scenario F: an rclone: repository (rclone's on-the-fly local backend over the fixture repository,
+ * tmp\rclone.exe named by rclone.program as a plain path) lists, opens a snapshot, copies a file,
+ * reports a wrong password as wrong (exit code 12 through rclone) and can be cancelled; no rclone
+ * process outlives the restic that started it.
+ */
+static void test_live_rclone_repository(void) {
+    if (GetFileAttributesW(L"tmp\\restic.exe") == INVALID_FILE_ATTRIBUTES ||
+        GetFileAttributesW(L"tmp\\rclone.exe") == INVALID_FILE_ATTRIBUTES ||
+        GetFileAttributesW(L"tmp\\test_fixture\\repo\\config") == INVALID_FILE_ATTRIBUTES) {
+        printf("[SKIP] tmp\\restic.exe, tmp\\rclone.exe or tmp\\test_fixture\\repo not found: rclone E2E test skipped.\n");
+        return;
+    }
+    WCHAR restic_abs[MAX_PATH] = {0}, rclone_abs[MAX_PATH] = {0}, repo_abs[MAX_PATH] = {0};
+    GetFullPathNameW(L"tmp\\restic.exe", MAX_PATH, restic_abs, NULL);
+    GetFullPathNameW(L"tmp\\rclone.exe", MAX_PATH, rclone_abs, NULL);
+    GetFullPathNameW(L"tmp\\test_fixture\\repo", MAX_PATH, repo_abs, NULL);
+    WCHAR dir[MAX_PATH], ini[MAX_PATH];
+    EXPECT_TRUE(make_unique_dir(L"restic_dll_rclone", dir, MAX_PATH), "Create plugin directory (rclone)");
+    swprintf_s(ini, MAX_PATH, L"%ls\\TCResticBrowser.ini", dir);
+
+    char restic_u8[MAX_PATH * 3] = {0}, rclone_u8[MAX_PATH * 3] = {0}, repo_u8[MAX_PATH * 3] = {0},
+         dir_u8[MAX_PATH * 3] = {0};
+    WideCharToMultiByte(CP_UTF8, 0, restic_abs, -1, restic_u8, sizeof(restic_u8), NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, rclone_abs, -1, rclone_u8, sizeof(rclone_u8), NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, repo_abs, -1, repo_u8, sizeof(repo_u8), NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, dir, -1, dir_u8, sizeof(dir_u8), NULL, NULL);
+    static char ini_text[8192]; /* Static: /analyze (C6262) caps a frame at 16 KB */
+    int n = snprintf(ini_text, sizeof(ini_text),
+                     "[Settings]\r\nResticPath=%s\r\n[Logging]\r\nLogPath=%s\\rclone.log\r\n"
+                     "[Repositories]\r\nRclone=rclone::local:%s\r\nRcloneWrong=rclone::local:%s\r\n"
+                     "RcloneCancel=rclone::local:%s\r\n"
+                     "[Repository: Rclone]\r\nrclone.program=%s\r\n"
+                     "[Repository: RcloneWrong]\r\nrclone.program=%s\r\n"
+                     "[Repository: RcloneCancel]\r\nrclone.program=\"%s\"\r\nrclone.args=serve restic --stdio\r\n",
+                     restic_u8, dir_u8, repo_u8, repo_u8, repo_u8, rclone_u8, rclone_u8, rclone_u8);
+    EXPECT_TRUE(n > 0 && (size_t)n < sizeof(ini_text) && write_file(ini, ini_text), "Write INI (rclone)");
+
+    int rclones_before = count_processes(L"rclone.exe");
+    Plugin p;
+    EXPECT_TRUE(load_plugin_copy(dir, &p), "Load plugin copy (rclone)");
+    EXPECT_TRUE(p.init_w(46, (void*)e2e_progress_proc, (void*)e2e_log_proc, (void*)e2e_request_proc) == 0,
+                "Register Total Commander callbacks (rclone)");
+
+    g_e2e_pwd_mode    = 1;
+    g_e2e_pwd_prompts = 0;
+    g_e2e_msg_dialogs = 0;
+    EXPECT_TRUE(lists_snapshots(&p, L"Rclone") && g_e2e_pwd_prompts == 1 && g_e2e_msg_dialogs == 0,
+                "The snapshots of an rclone: repository are listed");
+    static WCHAR data_path[MAX_PATH * 2];
+    EXPECT_TRUE(descend_to_fixture_data(&p, L"\\Rclone\\snapshots\\latest", 0, data_path, _countof(data_path)),
+                "... and a snapshot is browsed down to the fixture's data folder");
+    WCHAR remote[MAX_PATH * 3], local[MAX_PATH];
+    swprintf_s(remote, _countof(remote), L"%ls\\readme.txt", data_path);
+    swprintf_s(local, MAX_PATH, L"%ls\\readme.txt", dir);
+    DeleteFileW(local); /* Left by an earlier run that stopped early */
+    RemoteInfo ri = {5, 0, {0x802D2000, 0x01D5EF01}, FILE_ATTRIBUTE_READONLY};
+    EXPECT_TRUE(p.get_file_w(remote, local, 0, &ri) == FS_FILE_OK && GetFileAttributesW(local) != INVALID_FILE_ATTRIBUTES &&
+                    g_e2e_msg_dialogs == 0,
+                "A file is copied out of it");
+
+    g_e2e_pwd_mode    = 2; /* Always wrong */
+    g_e2e_pwd_prompts = 0;
+    g_e2e_msg_dialogs = 0;
+    EXPECT_TRUE(!lists_snapshots(&p, L"RcloneWrong") && g_e2e_pwd_prompts == 3 && g_e2e_msg_dialogs == 1,
+                "A wrong password is recognised as one through rclone (asked three times)");
+
+    g_e2e_pwd_mode    = 1;
+    g_e2e_force_abort = TRUE;
+    EXPECT_TRUE(!lists_snapshots(&p, L"RcloneCancel"), "ESC cancels a listing of an rclone: repository");
+    g_e2e_force_abort = FALSE;
+    EXPECT_TRUE(lists_snapshots(&p, L"RcloneCancel"),
+                "rclone.program quoted, with rclone.args of its own, works too");
+
+    unload_plugin_copy(&p, dir);
+    EXPECT_TRUE(rclones_before >= 0 && processes_back_to(L"rclone.exe", rclones_before, 30000),
+                "No rclone process outlives the restic that started it");
+    delete_tree(dir);
+}
+
 /*
  * Scenario D: paths with spaces, written the ways a user would write them in TCResticBrowser.ini -
  * ResticPath and repository paths with spaces, unquoted and quoted, with and without a trailing
@@ -2147,6 +2252,7 @@ int main(void) {
     test_live_paths_with_spaces();
     test_live_repository_settings();
     test_old_restic_refused();
+    test_live_rclone_repository();
 
     RemoveDirectoryW(g_user_dir);
     RemoveDirectoryW(appdata_dir);

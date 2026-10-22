@@ -27,6 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sftp.command=`...) and is passed as `-o`. A repository with S3
   variables no longer inherits `AWS_*`, `MINIO_*` and `RESTIC_AWS_*`
   variables from Total Commander's environment.
+- **`rclone:` repositories are tested.** A live test lists, browses and
+  copies from a repository through rclone (its local backend, the rclone
+  release pinned in CI) and checks that no rclone process is left behind.
+  restic's `-o` options are now passed as restic reads them (a CSV field
+  where the value has a quote or comma), and `rclone.program`,
+  `sftp.command`, `rclone.args` and `sftp.args`, which restic splits into
+  a command line itself, are written and checked like `PasswordCommand`.
 - **`ESC` ends restic's helper processes too.** restic now runs in a job
   object, so cancelling, a timeout or closing Total Commander ends the
   `rclone`, `ssh` or password command it started as well, instead of
