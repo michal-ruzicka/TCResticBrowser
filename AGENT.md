@@ -236,7 +236,7 @@ typedef struct {
 
 ### 7.2 Invoking `restic.exe` via Win32 Pipes (`src/restic_cli.c`)
 
-`restic_exec_command(exe, repo, password, args, options, out)` is the single process-spawning primitive:
+`restic_exec_command(exe, repo, args, options, out)` is the single process-spawning primitive; `repo` (`ResticRepo`) carries the repository target and every credential restic gets for it, so each restic call - also the background workers' - receives them the same way:
 
 - **Executable:** must contain a path separator (bare names refused, see 3.3). The command line is built in a heap buffer sized from the inputs (limit 32767 chars, `RESTIC_ERR_INVALID_ARG` beyond it) - never in a fixed stack buffer, because `swprintf_s` aborts the host process on overflow.
 - **Two pipes, two streams:** stdout and stderr use separate anonymous pipes. With `--json` stdout carries only the payload, while `{"message_type":"exit_error",...}` and warnings go to **stderr** (verified against restic 0.19.1). **Minimum restic: 0.17.1** - exit codes 10/11 and `message_type` in `ls --json` arrived in 0.17.0, exit code 12 (wrong password) in 0.17.1; older versions answer both with exit code 1. Merging them would corrupt JSON parsing whenever Restic prints a warning.

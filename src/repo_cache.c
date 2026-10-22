@@ -370,11 +370,12 @@ static VOID CALLBACK load_index_worker(PTP_CALLBACK_INSTANCE instance, PVOID con
     if (job->password_source(job->alias, password, _countof(password)) &&
         (index = snapshot_index_new(limit)) != NULL) {
         LoadCancel cancel = {job->generation, job->alias, job, index, started, started, 0, started, 0, FALSE};
+        ResticRepo access = {job->target, password};
         ResticExecOptions opts;
         memset(&opts, 0, sizeof(opts));
         opts.cancel_proc = load_cancelled;
         opts.cancel_ctx  = &cancel;
-        res = restic_list_snapshot_index(job->restic_exe, job->target, password, job->snapshot_id, &opts, index,
+        res = restic_list_snapshot_index(job->restic_exe, &access, job->snapshot_id, &opts, index,
                                          &index_status, err, _countof(err));
         AcquireSRWLockExclusive(&g_CacheLock);
         g_LoadingBytes -= cancel.accounted; /* From now on counted as kept, or not at all */
@@ -520,12 +521,13 @@ static VOID CALLBACK refresh_tree_worker(PTP_CALLBACK_INSTANCE instance, PVOID c
 
     if (job->password_source(job->alias, password, _countof(password))) {
         LoadCancel cancel = {job->generation, job->alias, NULL, NULL, started, started, 0, started, 0, FALSE};
+        ResticRepo access = {job->target, password};
         ResticExecOptions opts;
         memset(&opts, 0, sizeof(opts));
         opts.timeout_ms  = BACKGROUND_TIMEOUT_MS;
         opts.cancel_proc = load_cancelled;
         opts.cancel_ctx  = &cancel;
-        res = restic_list_snapshots(job->restic_exe, job->target, password, job->time_format, &opts, &tree, err,
+        res = restic_list_snapshots(job->restic_exe, &access, job->time_format, &opts, &tree, err,
                                     _countof(err));
     }
     SecureZeroMemory(password, sizeof(password));

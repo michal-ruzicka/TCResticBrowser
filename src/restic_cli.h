@@ -44,6 +44,15 @@ typedef BOOL (*ResticDumpProgressProc)(ULONGLONG bytes_written, void* user_data)
  */
 typedef ResticResult (*ResticLineProc)(const char* line, size_t len, void* user_data);
 
+/*
+ * A repository and the credentials restic gets for it: `target` as RESTIC_REPOSITORY and
+ * `password` as RESTIC_PASSWORD, both in the child's environment, never on its command line.
+ */
+typedef struct {
+    const WCHAR* target;   /* Repository path or URL */
+    const WCHAR* password; /* The repository password */
+} ResticRepo;
+
 /**
  * Optional execution controls. Pass NULL to use defaults (no timeout, not cancellable).
  */
@@ -128,15 +137,14 @@ ResticResult restic_list_index_directory(
 );
 
 /**
- * Runs `restic_exe args` as a hidden child process (CREATE_NO_WINDOW) with RESTIC_REPOSITORY and
- * RESTIC_PASSWORD injected into its environment. `restic_exe` must contain a path separator
+ * Runs `restic_exe args` as a hidden child process (CREATE_NO_WINDOW) with the repository and its
+ * credentials (ResticRepo) injected into its environment. `restic_exe` must contain a path separator
  * (bare names are refused so the current directory is never searched). `args` is passed verbatim
  * and must already be quoted. Caller must release `out_result` with restic_free_command_output().
  */
 ResticResult restic_exec_command(
     const WCHAR* restic_exe,
-    const WCHAR* repo_target,
-    const WCHAR* password,
+    const ResticRepo* repo,
     const WCHAR* args,
     const ResticExecOptions* options,
     ResticCommandOutput* out_result
@@ -157,8 +165,7 @@ void restic_free_command_output(ResticCommandOutput* result);
  */
 ResticResult restic_read_repository_id(
     const WCHAR* restic_exe,
-    const WCHAR* repo_target,
-    const WCHAR* password,
+    const ResticRepo* repo,
     const ResticExecOptions* options,
     char* out_id,
     WCHAR* out_error_msg,
@@ -173,8 +180,7 @@ ResticResult restic_read_repository_id(
  */
 ResticResult restic_list_snapshots(
     const WCHAR* restic_exe,
-    const WCHAR* repo_target,
-    const WCHAR* password,
+    const ResticRepo* repo,
     const char* time_format,
     const ResticExecOptions* options,
     SnapshotTree** out_tree,
@@ -189,8 +195,7 @@ ResticResult restic_list_snapshots(
  */
 ResticResult restic_list_directory(
     const WCHAR* restic_exe,
-    const WCHAR* repo_target,
-    const WCHAR* password,
+    const ResticRepo* repo,
     const char* snapshot_id,
     const WCHAR* subpath_w,
     const ResticExecOptions* options,
@@ -209,8 +214,7 @@ ResticResult restic_list_directory(
  */
 ResticResult restic_list_snapshot_index(
     const WCHAR* restic_exe,
-    const WCHAR* repo_target,
-    const WCHAR* password,
+    const ResticRepo* repo,
     const char* snapshot_id,
     const ResticExecOptions* options,
     SnapshotIndex* index,
@@ -251,8 +255,7 @@ ResticResult restic_write_local_file(
  */
 ResticResult restic_dump_file(
     const WCHAR* restic_exe,
-    const WCHAR* repo_target,
-    const WCHAR* password,
+    const ResticRepo* repo,
     const char* snapshot_id,
     const WCHAR* subpath_w,
     const WCHAR* local_dest_path,

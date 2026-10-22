@@ -223,7 +223,7 @@ typedef struct {
 typedef struct {
     const ResticConfig* cfg;
     const ResticRepoEntry* repo;
-    const WCHAR* password;
+    const ResticRepo* access; /* repo's target with the password, as restic gets them */
     BOOL trusted;
     const ResticExecOptions* exec;
     ULONGLONG generation;    /* repo_cache_generation() before the operation */
@@ -898,7 +898,8 @@ static ResticResult run_with_password(
         }
 
         err_msg[0] = L'\0';
-        RepoCall call = {cfg, repo, password, from_cache, exec, cache_generation, err_msg, err_cap};
+        ResticRepo access = {repo->target, password};
+        RepoCall call     = {cfg, repo, &access, from_cache, exec, cache_generation, err_msg, err_cap};
         res = op(&call, ctx);
 
         if (res == RESTIC_ERR_WRONG_PASSWORD) {
@@ -1110,7 +1111,7 @@ static ResticResult resolve_repo_path(const RepoCall* call, const WCHAR* rest, B
 
     SnapshotTree* tree = NULL;
     ULONGLONG started = GetTickCount64();
-    ResticResult res = restic_list_snapshots(call->cfg->restic_path, call->repo->target, call->password,
+    ResticResult res = restic_list_snapshots(call->cfg->restic_path, call->access,
                                              call->cfg->snapshot_time_format, call->exec, &tree, call->err, call->err_cap);
     if (res != RESTIC_OK) return res;
     log_write(L"Snapshots of '%ls': %u", call->repo->alias, (unsigned)snapshot_tree_snapshot_count(tree));
@@ -1161,7 +1162,7 @@ static ResticResult list_operation(const RepoCall* call, void* ctx_ptr) {
             }
             /* Until then one `restic ls` per folder, as before */
             ULONGLONG started = GetTickCount64();
-            res = restic_list_directory(call->cfg->restic_path, call->repo->target, call->password,
+            res = restic_list_directory(call->cfg->restic_path, call->access,
                                         where.snapshot_id, where.subpath, call->exec, &ctx->items, &ctx->count,
                                         call->err, call->err_cap);
             if (res == RESTIC_OK) {
@@ -1598,7 +1599,7 @@ static ResticResult write_repository_id(const RepoCall* call, const GetFileConte
         GetSystemTimeAsFileTime(&now);
         read_at           = ((ULONGLONG)now.dwHighDateTime << 32) | now.dwLowDateTime;
         ULONGLONG started = GetTickCount64();
-        ResticResult res  = restic_read_repository_id(call->cfg->restic_path, call->repo->target, call->password,
+        ResticResult res  = restic_read_repository_id(call->cfg->restic_path, call->access,
                                                       call->exec, text, call->err, call->err_cap);
         if (res != RESTIC_OK) return res;
         conn_log(FALSE, call->repo->alias, L"Repository ID read by restic in %.1f s",
@@ -1629,7 +1630,7 @@ static ResticResult get_file_operation(const RepoCall* call, void* ctx_ptr) {
     if (where.kind != REPO_PATH_SNAPSHOT || *sp == L'\0') {
         return RESTIC_ERR_PATH_NOT_FOUND; /* A folder above the snapshots, or a snapshot itself */
     }
-    return restic_dump_file(call->cfg->restic_path, call->repo->target, call->password, where.snapshot_id,
+    return restic_dump_file(call->cfg->restic_path, call->access, where.snapshot_id,
                             where.subpath, ctx->local_name, ctx->overwrite, ctx->mtime, WFX_RESTIC_TIMEOUT_MS,
                             wfx_dump_progress_callback, ctx->progress, call->err, call->err_cap);
 }

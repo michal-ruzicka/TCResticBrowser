@@ -514,7 +514,7 @@ static const WCHAR* const kStrippedEnvKeys[] = {
  * minus conflicting RESTIC_* credential variables, plus RESTIC_REPOSITORY and RESTIC_PASSWORD.
  * The caller must wipe the block with SecureZeroMemory before releasing it.
  */
-static WCHAR* build_child_environment(const WCHAR* repo_target, const WCHAR* password, size_t* out_chars) {
+static WCHAR* build_child_environment(const ResticRepo* repo, size_t* out_chars) {
     *out_chars = 0;
     LPWCH parent_env = GetEnvironmentStringsW();
     size_t parent_chars = 0;
@@ -523,8 +523,8 @@ static WCHAR* build_child_environment(const WCHAR* repo_target, const WCHAR* pas
         parent_chars += wcslen(p) + 1;
     }
 
-    size_t total_cap = parent_chars + wcslen(L"RESTIC_REPOSITORY=") + wcslen(repo_target) + 1 +
-                       wcslen(L"RESTIC_PASSWORD=") + wcslen(password) + 1 + 1;
+    size_t total_cap = parent_chars + wcslen(L"RESTIC_REPOSITORY=") + wcslen(repo->target) + 1 +
+                       wcslen(L"RESTIC_PASSWORD=") + wcslen(repo->password) + 1 + 1;
     WCHAR* block = (WCHAR*)calloc(total_cap, sizeof(WCHAR));
     if (!block) {
         if (parent_env) FreeEnvironmentStringsW(parent_env);
@@ -548,10 +548,10 @@ static WCHAR* build_child_environment(const WCHAR* repo_target, const WCHAR* pas
     }
     if (parent_env) FreeEnvironmentStringsW(parent_env);
 
-    int n = swprintf_s(block + offset, total_cap - offset, L"RESTIC_REPOSITORY=%ls", repo_target);
+    int n = swprintf_s(block + offset, total_cap - offset, L"RESTIC_REPOSITORY=%ls", repo->target);
     if (n < 0) goto fail;
     offset += (size_t)n + 1;
-    n = swprintf_s(block + offset, total_cap - offset, L"RESTIC_PASSWORD=%ls", password);
+    n = swprintf_s(block + offset, total_cap - offset, L"RESTIC_PASSWORD=%ls", repo->password);
     if (n < 0) goto fail;
     offset += (size_t)n + 1;
 
@@ -589,12 +589,12 @@ static const WCHAR* result_name(ResticResult r) {
 }
 
 /* Logs the command about to run: the repository (credentials redacted) and the password length only */
-static void log_restic_start(const WCHAR* cmd_line, const WCHAR* repo_target, const WCHAR* password) {
+static void log_restic_start(const WCHAR* cmd_line, const ResticRepo* repo) {
     if (!log_enabled()) return;
-    WCHAR repo[1024];
-    log_redact_target(repo_target, repo, _countof(repo));
+    WCHAR target[1024];
+    log_redact_target(repo->target, target, _countof(target));
     log_write(L"restic run: %ls", cmd_line);
-    log_write(L"  repository: %ls; password: %u characters", repo, (unsigned)wcslen(password));
+    log_write(L"  repository: %ls; password: %u characters", target, (unsigned)wcslen(repo->password));
 }
 
 /* Logs how a run ended, with restic's stderr (line breaks shown as " | ") */
@@ -886,13 +886,12 @@ static void build_error_message(const ByteBuf* out, const ByteBuf* err, WCHAR* d
 
 ResticResult restic_exec_command(
     const WCHAR* restic_exe,
-    const WCHAR* repo_target,
-    const WCHAR* password,
+    const ResticRepo* repo,
     const WCHAR* args,
     const ResticExecOptions* options,
     ResticCommandOutput* out_result
 ) {
-    if (!restic_exe || !repo_target || !password || !args || !out_result) {
+    if (!restic_exe || !repo || !repo->target || !repo->password || !args || !out_result) {
         return RESTIC_ERR_INVALID_ARG;
     }
     memset(out_result, 0, sizeof(ResticCommandOutput));
@@ -913,7 +912,7 @@ ResticResult restic_exec_command(
     swprintf_s(cmd_line, cmd_chars, L"\"%ls\" %ls", restic_exe, args);
 
     size_t env_chars = 0;
-    WCHAR* env_block = build_child_environment(repo_target, password, &env_chars);
+    WCHAR* env_block = build_child_environment(repo, &env_chars);
     if (!env_block) {
         free(cmd_line);
         return RESTIC_ERR_OUT_OF_MEMORY;
@@ -922,7 +921,7 @@ ResticResult restic_exec_command(
     HANDLE out_pipe = NULL, err_pipe = NULL;
     PROCESS_INFORMATION pi;
     ULONGLONG started = GetTickCount64();
-    log_restic_start(cmd_line, repo_target, password);
+    log_restic_start(cmd_line, repo);
     BOOL spawned = spawn_hidden(cmd_line, env_block, &out_pipe, &err_pipe, &pi);
     DWORD spawn_error = spawned ? 0 : GetLastError();
 
@@ -989,15 +988,14 @@ void restic_free_command_output(ResticCommandOutput* result) {
 /* Runs a Restic command; on failure copies the reason into out_error_msg and frees the output */
 static ResticResult run_and_check(
     const WCHAR* restic_exe,
-    const WCHAR* repo_target,
-    const WCHAR* password,
+    const ResticRepo* repo,
     const WCHAR* args,
     const ResticExecOptions* options,
     ResticCommandOutput* cmd_out,
     WCHAR* out_error_msg,
     size_t err_capacity
 ) {
-    ResticResult res = restic_exec_command(restic_exe, repo_target, password, args, options, cmd_out);
+    ResticResult res = restic_exec_command(restic_exe, repo, args, options, cmd_out);
     if (res != RESTIC_OK) {
         if (out_error_msg && err_capacity > 0) {
             wcsncpy_s(out_error_msg, err_capacity, cmd_out->error_message, _TRUNCATE);
@@ -1009,8 +1007,7 @@ static ResticResult run_and_check(
 
 ResticResult restic_list_snapshots(
     const WCHAR* restic_exe,
-    const WCHAR* repo_target,
-    const WCHAR* password,
+    const ResticRepo* repo,
     const char* time_format,
     const ResticExecOptions* options,
     SnapshotTree** out_tree,
@@ -1019,14 +1016,14 @@ ResticResult restic_list_snapshots(
 ) {
     if (out_error_msg && err_capacity > 0) out_error_msg[0] = L'\0';
     if (out_tree) *out_tree = NULL;
-    if (!restic_exe || !repo_target || !password || !out_tree) {
+    if (!restic_exe || !repo || !repo->target || !repo->password || !out_tree) {
         return RESTIC_ERR_INVALID_ARG;
     }
 
     FILETIME now; /* When restic was asked: the time of what is made from its answer (snapshots.csv) */
     GetSystemTimeAsFileTime(&now);
     ResticCommandOutput cmd_out;
-    ResticResult res = run_and_check(restic_exe, repo_target, password, L"snapshots --json --no-lock",
+    ResticResult res = run_and_check(restic_exe, repo, L"snapshots --json --no-lock",
                                      options, &cmd_out, out_error_msg, err_capacity);
     if (res != RESTIC_OK) return res;
 
@@ -1045,8 +1042,7 @@ ResticResult restic_list_snapshots(
 
 ResticResult restic_read_repository_id(
     const WCHAR* restic_exe,
-    const WCHAR* repo_target,
-    const WCHAR* password,
+    const ResticRepo* repo,
     const ResticExecOptions* options,
     char* out_id,
     WCHAR* out_error_msg,
@@ -1054,12 +1050,12 @@ ResticResult restic_read_repository_id(
 ) {
     if (out_error_msg && err_capacity > 0) out_error_msg[0] = L'\0';
     if (out_id) out_id[0] = '\0';
-    if (!restic_exe || !repo_target || !password || !out_id) {
+    if (!restic_exe || !repo || !repo->target || !repo->password || !out_id) {
         return RESTIC_ERR_INVALID_ARG;
     }
 
     ResticCommandOutput cmd_out;
-    ResticResult res = run_and_check(restic_exe, repo_target, password, L"cat config --json --no-lock", options,
+    ResticResult res = run_and_check(restic_exe, repo, L"cat config --json --no-lock", options,
                                      &cmd_out, out_error_msg, err_capacity);
     if (res != RESTIC_OK) return res;
 
@@ -1078,8 +1074,7 @@ ResticResult restic_read_repository_id(
 
 ResticResult restic_list_directory(
     const WCHAR* restic_exe,
-    const WCHAR* repo_target,
-    const WCHAR* password,
+    const ResticRepo* repo,
     const char* snapshot_id,
     const WCHAR* subpath_w,
     const ResticExecOptions* options,
@@ -1090,7 +1085,7 @@ ResticResult restic_list_directory(
 ) {
     if (out_error_msg && err_capacity > 0) out_error_msg[0] = L'\0';
     /* The snapshot ID goes on the command line unquoted: only hexadecimal IDs are accepted */
-    if (!restic_exe || !repo_target || !password || !out_items || !out_count ||
+    if (!restic_exe || !repo || !repo->target || !repo->password || !out_items || !out_count ||
         !is_hex_string(snapshot_id) || strlen(snapshot_id) > 64) {
         return RESTIC_ERR_INVALID_ARG;
     }
@@ -1117,7 +1112,7 @@ ResticResult restic_list_directory(
     free(quoted_filter);
 
     ResticCommandOutput cmd_out;
-    ResticResult res = run_and_check(restic_exe, repo_target, password, args, options, &cmd_out,
+    ResticResult res = run_and_check(restic_exe, repo, args, options, &cmd_out,
                                      out_error_msg, err_capacity);
     free(args);
     if (res != RESTIC_OK) return res;
@@ -1144,8 +1139,7 @@ static ResticResult feed_index_line(const char* line, size_t len, void* ctx) {
 
 ResticResult restic_list_snapshot_index(
     const WCHAR* restic_exe,
-    const WCHAR* repo_target,
-    const WCHAR* password,
+    const ResticRepo* repo,
     const char* snapshot_id,
     const ResticExecOptions* options,
     SnapshotIndex* index,
@@ -1156,7 +1150,7 @@ ResticResult restic_list_snapshot_index(
     if (out_error_msg && err_capacity > 0) out_error_msg[0] = L'\0';
     if (out_index_status) *out_index_status = SNAPSHOT_INDEX_OK;
     /* The snapshot ID goes on the command line unquoted: only hexadecimal IDs are accepted */
-    if (!restic_exe || !repo_target || !password || !index || !is_hex_string(snapshot_id) ||
+    if (!restic_exe || !repo || !repo->target || !repo->password || !index || !is_hex_string(snapshot_id) ||
         strlen(snapshot_id) > 64) {
         return RESTIC_ERR_INVALID_ARG;
     }
@@ -1171,7 +1165,7 @@ ResticResult restic_list_snapshot_index(
     opts.line_ctx  = &feed;
 
     ResticCommandOutput cmd_out;
-    ResticResult res = run_and_check(restic_exe, repo_target, password, args, &opts, &cmd_out, out_error_msg,
+    ResticResult res = run_and_check(restic_exe, repo, args, &opts, &cmd_out, out_error_msg,
                                      err_capacity);
     if (res == RESTIC_OK) {
         restic_free_command_output(&cmd_out);
@@ -1335,8 +1329,7 @@ static ResticResult dump_commit(DumpState* st, const FILETIME* mtime) {
 
 ResticResult restic_dump_file(
     const WCHAR* restic_exe,
-    const WCHAR* repo_target,
-    const WCHAR* password,
+    const ResticRepo* repo,
     const char* snapshot_id,
     const WCHAR* subpath_w,
     const WCHAR* local_dest_path,
@@ -1349,7 +1342,7 @@ ResticResult restic_dump_file(
     size_t err_capacity
 ) {
     if (out_error_msg && err_capacity > 0) out_error_msg[0] = L'\0';
-    if (!restic_exe || !repo_target || !password || !snapshot_id || !subpath_w ||
+    if (!restic_exe || !repo || !repo->target || !repo->password || !snapshot_id || !subpath_w ||
         !local_dest_path || local_dest_path[0] == L'\0' || !is_hex_string(snapshot_id) ||
         strlen(snapshot_id) > 64) {
         return RESTIC_ERR_INVALID_ARG;
@@ -1404,7 +1397,7 @@ ResticResult restic_dump_file(
 
     size_t env_chars = 0;
     WCHAR* env_block = (st.part_path && st.chunk)
-                           ? build_child_environment(repo_target, password, &env_chars)
+                           ? build_child_environment(repo, &env_chars)
                            : NULL;
     if (!env_block) {
         free(cmd_line);
@@ -1416,7 +1409,7 @@ ResticResult restic_dump_file(
     HANDLE out_pipe = NULL, err_pipe = NULL;
     PROCESS_INFORMATION pi;
     ULONGLONG started = GetTickCount64();
-    log_restic_start(cmd_line, repo_target, password);
+    log_restic_start(cmd_line, repo);
     BOOL spawned = spawn_hidden(cmd_line, env_block, &out_pipe, &err_pipe, &pi);
     DWORD spawn_error = spawned ? 0 : GetLastError();
     SecureZeroMemory(env_block, env_chars * sizeof(WCHAR));
