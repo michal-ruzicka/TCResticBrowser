@@ -1290,6 +1290,8 @@ int main(void) {
     _CrtSetReportFile(_CRT_WARN, _CRTDBG_FILE_STDERR);
     _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
     _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
+    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE); /* Invalid parameters, e.g. an overflowing wcscat_s */
+    _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
 #endif
     printf("Running Restic CLI & JSON Parser Unit/Integration Tests...\n");
 

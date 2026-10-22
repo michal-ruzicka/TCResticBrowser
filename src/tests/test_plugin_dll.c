@@ -15,6 +15,9 @@
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
+#if defined(_DEBUG) && !defined(__SANITIZE_ADDRESS__)
+#include <crtdbg.h>
+#endif
 #include <string.h>
 #include <wchar.h>
 #include "version.h"
@@ -843,21 +846,35 @@ static void test_e2e_extraction_edge_cases(const Plugin* p, const WCHAR* dir, co
     g_e2e_pwd_mode    = saved_mode;
 }
 
-/* Recursively descends the first directory at each depth until the fixture "data" directory is found */
-/* Lists `path` and joins the entry names with '|' (sorted as the plugin returns them); FALSE on error */
+/*
+ * Lists `path` and joins the entry names with '|' (sorted as the plugin returns them); FALSE on
+ * error and when they do not fit into `cap` characters. Checked here, not left to wcscat_s: its
+ * overflow is an invalid parameter, which the Debug CRT reports in a modal dialog that stops an
+ * unattended run, and which the Release CRT lets pass with an emptied buffer.
+ */
 static BOOL list_names(const Plugin* p, const WCHAR* path, WCHAR* out, size_t cap) {
     WIN32_FIND_DATAW fd;
     out[0] = L'\0';
     HANDLE h = p->find_first_w((WCHAR*)path, &fd);
     if (h == INVALID_HANDLE_VALUE) return FALSE;
+    BOOL fits   = TRUE;
+    size_t used = 0;
     do {
-        if (out[0] != L'\0') wcscat_s(out, cap, L"|");
-        wcscat_s(out, cap, fd.cFileName);
+        size_t len = wcslen(fd.cFileName);
+        if (used + (used > 0 ? 1 : 0) + len >= cap) {
+            fits = FALSE;
+            continue;
+        }
+        if (used > 0) out[used++] = L'|';
+        wmemcpy(out + used, fd.cFileName, len);
+        used += len;
+        out[used] = L'\0';
     } while (p->find_next_w(h, &fd));
     p->find_close(h);
-    return TRUE;
+    return fits;
 }
 
+/* Recursively descends the first directory at each depth until the fixture "data" directory is found */
 static BOOL descend_to_fixture_data(
     const Plugin* p,
     const WCHAR* current_path,
@@ -911,7 +928,8 @@ static int count_restic_runs(const WCHAR* log_file) {
  * are listed without running restic, and forgetting the password drops what was read
  */
 static void test_e2e_snapshot_cache(const Plugin* p, const WCHAR* dir, const WCHAR* data_path) {
-    static WCHAR log_file[MAX_PATH], sub[MAX_PATH * 2], names[4096], names_again[4096];
+    /* data\many holds 300 names of 60 characters: room for all of them */
+    static WCHAR log_file[MAX_PATH], sub[MAX_PATH * 2], names[4096], names_again[32768];
     swprintf_s(log_file, _countof(log_file), L"%ls\\log dir\\e2e.log", dir);
     BOOL read = FALSE;
     for (int i = 0; i < 600 && !read; ++i) { /* Up to two minutes */
@@ -1856,9 +1874,15 @@ static DWORD WINAPI watchdog_thread(void* arg) {
         printf("[FAIL] Watchdog: no check finished for %u minutes; the last one was %s:%ld: %s\n", WATCHDOG_MINUTES,
                g_last_check_function, (long)g_last_check_line, g_last_check);
         if (TryAcquireSRWLockShared(&g_e2e_conn_log_lock)) {
+            /* As UTF-8: printf("%ls") would stop at the first character the C locale cannot show (→) */
+            static char tail[3000 * 3 + 1];
             size_t len = wcslen(g_e2e_conn_log);
-            printf("       End of the connection log:\n%ls\n", g_e2e_conn_log + (len > 3000 ? len - 3000 : 0));
+            int n = WideCharToMultiByte(CP_UTF8, 0, g_e2e_conn_log + (len > 3000 ? len - 3000 : 0), -1, tail,
+                                        (int)sizeof(tail), NULL, NULL);
             ReleaseSRWLockShared(&g_e2e_conn_log_lock);
+            printf("       End of the connection log:\n");
+            if (n > 1) fwrite(tail, 1, (size_t)n - 1, stdout);
+            printf("\n");
         }
         fflush(stdout);
         TerminateProcess(GetCurrentProcess(), 3);
@@ -1868,6 +1892,15 @@ static DWORD WINAPI watchdog_thread(void* arg) {
 int main(void) {
     /* No modal system dialog (crash, missing disk, failed start) may stop an unattended CI run */
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+#if defined(_DEBUG) && !defined(__SANITIZE_ADDRESS__)
+    /* Nor may a Debug CRT report: it goes to stderr (the plugin's own CRT does the same, see DllMain) */
+    _CrtSetReportMode(_CRT_WARN, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_WARN, _CRTDBG_FILE_STDERR);
+    _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
+    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
+#endif
     HANDLE watchdog = CreateThread(NULL, 0, watchdog_thread, NULL, 0, NULL);
     if (watchdog) CloseHandle(watchdog);
     printf("Running Restic WFX plugin DLL smoke tests...\n");

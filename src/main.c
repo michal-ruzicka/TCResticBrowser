@@ -1219,6 +1219,19 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
     if (fdwReason == DLL_PROCESS_ATTACH) {
         /* No DisableThreadLibraryCalls: Microsoft advises against it with the static CRT (/MT) */
         config_set_plugin_dir_from_module((HMODULE)hinstDLL);
+#if defined(_DEBUG) && !defined(__SANITIZE_ADDRESS__)
+        /*
+         * Debug builds only (build.cmd check): the plugin's own static CRT reports an assertion or
+         * an invalid parameter to stderr and the debugger, not in a modal dialog that would stop an
+         * unattended test run with nobody to click it
+         */
+        _CrtSetReportMode(_CRT_WARN, _CRTDBG_MODE_FILE | _CRTDBG_MODE_DEBUG);
+        _CrtSetReportFile(_CRT_WARN, _CRTDBG_FILE_STDERR);
+        _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE | _CRTDBG_MODE_DEBUG);
+        _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
+        _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE | _CRTDBG_MODE_DEBUG);
+        _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
+#endif
     } else if (fdwReason == DLL_PROCESS_DETACH) {
         release_password_session(lpvReserved != NULL);
     }
