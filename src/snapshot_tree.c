@@ -53,6 +53,7 @@ struct SnapshotTree {
     size_t snapshot_count;
     char** ids;          /* Owned copies of the full IDs the nodes point to */
     SnapshotInfo** info; /* snapshot_count entries, in the order of the IDs */
+    uint64_t listed_at;  /* snapshot_tree_set_listed_at() */
 };
 
 static uint64_t hash_key(const BuildNode* parent, const char* name) {
@@ -540,6 +541,16 @@ size_t snapshot_tree_snapshot_count(const SnapshotTree* tree) {
     return tree ? tree->snapshot_count : 0;
 }
 
+void snapshot_tree_set_listed_at(SnapshotTree* tree, uint64_t time) {
+    if (tree) tree->listed_at = time;
+}
+
+uint64_t snapshot_tree_listed_at(const SnapshotTree* tree) {
+    return tree ? tree->listed_at : 0;
+}
+
+static int ascii_casecmp(const char* a, const char* b);
+
 /* A growable text buffer for snapshot_tree_csv(); `failed` once out of memory */
 typedef struct {
     char* data;
@@ -592,8 +603,8 @@ static void csv_field(CsvText* t, const char* value, char separator) {
 static int compare_info(const void* a, const void* b) {
     const SnapshotInfo* x = *(const SnapshotInfo* const*)a;
     const SnapshotInfo* y = *(const SnapshotInfo* const*)b;
-    int c = strcmp(x->host, y->host);
-    if (c == 0) c = strcmp(x->paths, y->paths);
+    int c = ascii_casecmp(x->host, y->host); /* "PC" and "pc" next to each other */
+    if (c == 0) c = ascii_casecmp(x->paths, y->paths);
     if (c == 0) c = timestamp_compare(&x->time, &y->time);
     return c != 0 ? c : strcmp(x->id, y->id);
 }

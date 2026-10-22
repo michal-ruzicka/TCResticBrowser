@@ -980,6 +980,23 @@ static BOOL run_restic_backup(const WCHAR* restic_exe, const WCHAR* repo) {
     return code == 0;
 }
 
+/* TRUE for a time within the last hour (and not ahead of the clock) */
+static BOOL is_recent(const FILETIME* t) {
+    FILETIME now;
+    GetSystemTimeAsFileTime(&now);
+    ULONGLONG n = ((ULONGLONG)now.dwHighDateTime << 32) | now.dwLowDateTime;
+    ULONGLONG v = ((ULONGLONG)t->dwHighDateTime << 32) | t->dwLowDateTime;
+    return v <= n + 600000000ull && n - v < 36000000000ull; /* 1 min ahead, 1 hour back */
+}
+
+static BOOL file_mtime(const WCHAR* path, FILETIME* out) {
+    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE) return FALSE;
+    BOOL ok = GetFileTime(f, NULL, NULL, out);
+    CloseHandle(f);
+    return ok;
+}
+
 /*
  * snapshots.csv in the repository's folder (the E2E INI sets CsvSeparator=;): listed as a read-only
  * file of its exact size, copied through FsGetFileW with the overwrite protocol, never a folder.
@@ -990,9 +1007,11 @@ static void test_snapshots_csv(const Plugin* p, const WCHAR* dir, const WCHAR* s
     RemoteInfo ri;
     memset(&ri, 0, sizeof(ri));
     BOOL listed = FALSE;
+    FILETIME newest_snapshot = {0, 0};
     HANDLE h = p->find_first_w(L"\\MainRepo", &fd);
     if (h != INVALID_HANDLE_VALUE) {
         do {
+            if (wcscmp(fd.cFileName, L"snapshots") == 0) newest_snapshot = fd.ftLastWriteTime;
             if (wcscmp(fd.cFileName, L"snapshots.csv") != 0) continue;
             listed = (fd.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY)) ==
                          FILE_ATTRIBUTE_READONLY &&
@@ -1004,7 +1023,9 @@ static void test_snapshots_csv(const Plugin* p, const WCHAR* dir, const WCHAR* s
         } while (p->find_next_w(h, &fd));
         p->find_close(h);
     }
-    EXPECT_TRUE(listed, "snapshots.csv is listed as a read-only file with a size and the newest snapshot's time");
+    EXPECT_TRUE(listed, "snapshots.csv is listed as a read-only file with a size and a time");
+    EXPECT_TRUE(is_recent(&ri.LastWriteTime) && CompareFileTime(&ri.LastWriteTime, &newest_snapshot) > 0,
+                "Its time is when restic listed the snapshots, after the newest one was taken");
 
     WCHAR local[MAX_PATH];
     swprintf_s(local, MAX_PATH, L"%ls\\snapshots.csv", dir);
@@ -1091,6 +1112,9 @@ static void test_repository_id(const Plugin* p, const WCHAR* dir) {
         p->find_close(h);
     }
     EXPECT_TRUE(listed, "repository_id.txt is listed as a read-only file of 66 bytes");
+    EXPECT_TRUE(ri.LastWriteTime.dwHighDateTime == 0xFFFFFFFF, "No time before restic was asked for the ID");
+    FILETIME asked;
+    GetSystemTimeAsFileTime(&asked);
 
     WCHAR local[MAX_PATH];
     swprintf_s(local, MAX_PATH, L"%ls\\repository_id.txt", dir);
@@ -1110,6 +1134,17 @@ static void test_repository_id(const Plugin* p, const WCHAR* dir) {
                 "... and replaced by the same ID (the name compares ignoring case)");
     EXPECT_TRUE(conn_log_count(L"Repository ID read by restic") == reads_before + 1 && g_e2e_pwd_prompts == prompts,
                 "restic read the ID once, without a prompt; the second copy came from the cache");
+    FILETIME copied = {0, 0}, relisted = {0, 0};
+    h = p->find_first_w(L"\\MainRepo", &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (wcscmp(fd.cFileName, L"repository_id.txt") == 0) relisted = fd.ftLastWriteTime;
+        } while (p->find_next_w(h, &fd));
+        p->find_close(h);
+    }
+    EXPECT_TRUE(file_mtime(local, &copied) && CompareFileTime(&copied, &asked) >= 0 && is_recent(&copied) &&
+                    CompareFileTime(&copied, &relisted) == 0,
+                "The copy has the time restic was asked for the ID, which the listing now shows too");
     SetLastError(0);
     EXPECT_TRUE(p->find_first_w(L"\\MainRepo\\repository_id.txt", &fd) == INVALID_HANDLE_VALUE &&
                     GetLastError() == ERROR_PATH_NOT_FOUND &&

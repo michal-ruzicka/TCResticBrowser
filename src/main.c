@@ -212,6 +212,7 @@ typedef struct {
     const WCHAR* subpath;    /* REPO_PATH_SNAPSHOT: L"" or "\..." inside the snapshot */
     char* csv;               /* REPO_PATH_CSV: the file's content (heap) */
     size_t csv_len;
+    uint64_t csv_time;       /* REPO_PATH_CSV: when restic listed the snapshots (FILETIME ticks) */
 } RepoPath;
 
 /*
@@ -959,6 +960,11 @@ static char csv_separator(const ResticConfig* cfg) {
     return ',';
 }
 
+static FILETIME filetime_of(uint64_t time) {
+    FILETIME ft = {(DWORD)(time & 0xFFFFFFFFULL), (DWORD)(time >> 32)};
+    return ft;
+}
+
 static void set_find_time(WIN32_FIND_DATAW* fd, uint64_t time) {
     if (time == 0) {
         FS_SET_TIME_UNKNOWN(fd->ftLastWriteTime);
@@ -972,11 +978,12 @@ static void set_find_time(WIN32_FIND_DATAW* fd, uint64_t time) {
 
 /*
  * The children of a tree folder as Total Commander directory entries (heap array); the repository's
- * own folder (`repo_folder`) also holds REPOSITORY_ID_FILE_NAME and, with `csv` set,
- * SNAPSHOT_TREE_CSV_NAME, a file of `csv_len` bytes
+ * own folder (`repo_folder`) also holds REPOSITORY_ID_FILE_NAME (no time: list_operation adds it once
+ * the ID is known) and, with `csv` set, SNAPSHOT_TREE_CSV_NAME, a file of `csv_len` bytes from
+ * `csv_time`
  */
 static ResticResult tree_folder_items(const SnapshotNode* dir, BOOL repo_folder, BOOL csv, size_t csv_len,
-                                      WIN32_FIND_DATAW** out_items, size_t* out_count) {
+                                      uint64_t csv_time, WIN32_FIND_DATAW** out_items, size_t* out_count) {
     *out_items = NULL;
     *out_count = 0;
     if (dir->child_count == 0 && !repo_folder) return RESTIC_OK;
@@ -997,9 +1004,9 @@ static ResticResult tree_folder_items(const SnapshotNode* dir, BOOL repo_folder,
         fd->dwFileAttributes = FILE_ATTRIBUTE_READONLY;
         fd->nFileSizeLow     = (DWORD)((ULONGLONG)csv_len & 0xFFFFFFFFULL);
         fd->nFileSizeHigh    = (DWORD)((ULONGLONG)csv_len >> 32);
-        set_find_time(fd, dir->time);
+        set_find_time(fd, csv_time);
     }
-    if (repo_folder) { /* Its size is known before restic is asked for the ID; its time is not */
+    if (repo_folder) { /* Its size is known before restic is asked for the ID */
         WIN32_FIND_DATAW* fd = &items[n++];
         wcscpy_s(fd->cFileName, MAX_PATH, L"" REPOSITORY_ID_FILE_NAME);
         fd->dwFileAttributes = FILE_ATTRIBUTE_READONLY;
@@ -1035,8 +1042,9 @@ static ResticResult walk_tree(const SnapshotTree* tree, const WCHAR* rest, BOOL 
                 out->kind = REPO_PATH_NOT_FOUND; /* A file, not a folder */
                 return RESTIC_OK;
             }
-            out->kind = REPO_PATH_CSV;
-            out->csv  = snapshot_tree_csv(tree, csv_sep, &out->csv_len);
+            out->kind     = REPO_PATH_CSV;
+            out->csv      = snapshot_tree_csv(tree, csv_sep, &out->csv_len);
+            out->csv_time = snapshot_tree_listed_at(tree);
             return out->csv ? RESTIC_OK : RESTIC_ERR_OUT_OF_MEMORY;
         }
         if (named && node == root && _stricmp(name, REPOSITORY_ID_FILE_NAME) == 0) {
@@ -1062,7 +1070,8 @@ static ResticResult walk_tree(const SnapshotTree* tree, const WCHAR* rest, BOOL 
     char* csv      = node == root ? snapshot_tree_csv(tree, csv_sep, &csv_len) : NULL;
     BOOL with_csv  = csv != NULL; /* Only its size is listed, for the panel and the copy progress */
     free(csv);                    /* (No memory to make it: not listed) */
-    return tree_folder_items(node, node == root, with_csv, csv_len, &out->items, &out->count);
+    return tree_folder_items(node, node == root, with_csv, csv_len, snapshot_tree_listed_at(tree), &out->items,
+                             &out->count);
 }
 
 /*
@@ -1126,10 +1135,20 @@ static ResticResult list_operation(const RepoCall* call, void* ctx_ptr) {
     ResticResult res = resolve_repo_path(call, ctx->rest, TRUE, &where);
     if (res != RESTIC_OK) return res;
     switch (where.kind) {
-        case REPO_PATH_FOLDER:
+        case REPO_PATH_FOLDER: {
             ctx->items = where.items;
             ctx->count = where.count;
+            /* repository_id.txt carries the time restic was asked for the ID, once it was */
+            ULONGLONG id_at = 0;
+            if (call->trusted && repo_cache_get_repository_id(call->repo->alias, call->repo->target, NULL, &id_at)) {
+                for (size_t i = 0; i < ctx->count; ++i) {
+                    if (wcscmp(ctx->items[i].cFileName, L"" REPOSITORY_ID_FILE_NAME) == 0) {
+                        set_find_time(&ctx->items[i], id_at);
+                    }
+                }
+            }
             return RESTIC_OK;
+        }
         case REPO_PATH_SNAPSHOT: {
             strcpy_s(ctx->snapshot_id, sizeof(ctx->snapshot_id), where.snapshot_id);
             /* The whole snapshot read before: no restic at all */
@@ -1560,17 +1579,22 @@ static BOOL rest_is_file(const WCHAR* rest, const WCHAR* name) {
 /* The repository's ID and CRLF into the local file: from the cache, or else `restic cat config` */
 static ResticResult write_repository_id(const RepoCall* call, const GetFileContext* ctx) {
     char text[REPOSITORY_ID_FILE_BYTES + 1];
-    if (!call->trusted || !repo_cache_get_repository_id(call->repo->alias, call->repo->target, text)) {
+    ULONGLONG read_at = 0; /* The file's time: when restic was asked for the ID */
+    if (!call->trusted || !repo_cache_get_repository_id(call->repo->alias, call->repo->target, text, &read_at)) {
+        FILETIME now;
+        GetSystemTimeAsFileTime(&now);
+        read_at           = ((ULONGLONG)now.dwHighDateTime << 32) | now.dwLowDateTime;
         ULONGLONG started = GetTickCount64();
         ResticResult res  = restic_read_repository_id(call->cfg->restic_path, call->repo->target, call->password,
                                                       call->exec, text, call->err, call->err_cap);
         if (res != RESTIC_OK) return res;
         conn_log(FALSE, call->repo->alias, L"Repository ID read by restic in %.1f s",
                  (double)(GetTickCount64() - started) / 1000.0);
-        repo_cache_put_repository_id(call->repo->alias, call->repo->target, text, call->generation);
+        repo_cache_put_repository_id(call->repo->alias, call->repo->target, text, read_at, call->generation);
     }
     memcpy(text + RESTIC_REPOSITORY_ID_CHARS, "\r\n", 3);
-    return restic_write_local_file(ctx->local_name, text, REPOSITORY_ID_FILE_BYTES, ctx->overwrite, ctx->mtime);
+    FILETIME mtime = filetime_of(read_at);
+    return restic_write_local_file(ctx->local_name, text, REPOSITORY_ID_FILE_BYTES, ctx->overwrite, &mtime);
 }
 
 static ResticResult get_file_operation(const RepoCall* call, void* ctx_ptr) {
@@ -1580,7 +1604,10 @@ static ResticResult get_file_operation(const RepoCall* call, void* ctx_ptr) {
     ResticResult res = resolve_repo_path(call, ctx->rest, FALSE, &where);
     if (res != RESTIC_OK) return res;
     if (where.kind == REPO_PATH_CSV) {
-        res = restic_write_local_file(ctx->local_name, where.csv, where.csv_len, ctx->overwrite, ctx->mtime);
+        /* The time of the snapshot list it was made from, which may be newer than the one listed */
+        FILETIME mtime = filetime_of(where.csv_time);
+        res = restic_write_local_file(ctx->local_name, where.csv, where.csv_len, ctx->overwrite,
+                                      where.csv_time ? &mtime : NULL);
         free(where.csv);
         return res;
     }

@@ -168,8 +168,8 @@ ResticResult restic_read_repository_id(
 /**
  * Runs `restic snapshots --json --no-lock` and builds the restic mount folder tree from it
  * (snapshot_tree.h), naming snapshot folders by `time_format` (UTF-8, NULL: the default); release
- * it with snapshot_tree_free(). On failure `out_error_msg` (optional) receives the reason reported
- * by Restic.
+ * it with snapshot_tree_free(), its snapshot_tree_listed_at() the time restic was started. On
+ * failure `out_error_msg` (optional) receives the reason reported by Restic.
  */
 ResticResult restic_list_snapshots(
     const WCHAR* restic_exe,

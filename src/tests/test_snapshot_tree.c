@@ -368,6 +368,21 @@ static void test_csv(void) {
     free(csv);
     snapshot_tree_free(tree);
 
+    /* Hosts and paths ignore ASCII case: "alpha" before "Zeta", "/archive" before "/Data" */
+    tree = build("[{\"time\":\"2026-10-19T08:00:00Z\",\"id\":\"" ID("1") "\",\"hostname\":\"Zeta\",\"paths\":[\"/x\"]},"
+                 "{\"time\":\"2026-10-19T08:00:00Z\",\"id\":\"" ID("2") "\",\"hostname\":\"alpha\",\"paths\":[\"/Data\"]},"
+                 "{\"time\":\"2026-10-19T08:00:00Z\",\"id\":\"" ID("3") "\",\"hostname\":\"ALPHA\",\"paths\":[\"/archive\"]}]");
+    csv = snapshot_tree_csv(tree, ',', &len);
+    const char* a3 = csv ? strstr(csv, "\r\n33333333,") : NULL;
+    const char* a2 = csv ? strstr(csv, "\r\n22222222,") : NULL;
+    const char* z1 = csv ? strstr(csv, "\r\n11111111,") : NULL;
+    EXPECT_TRUE(a3 && a2 && z1 && a3 < a2 && a2 < z1, "Sorted by host and paths ignoring case");
+    free(csv);
+    EXPECT_TRUE(snapshot_tree_listed_at(tree) == 0, "No listing time until it is set");
+    snapshot_tree_set_listed_at(tree, 133000000000000000ull);
+    EXPECT_TRUE(snapshot_tree_listed_at(tree) == 133000000000000000ull, "The listing time as set");
+    snapshot_tree_free(tree);
+
     tree = build("[]");
     EXPECT_TRUE(snapshot_tree_csv(tree, '"', &len) == NULL && snapshot_tree_csv(tree, '\n', &len) == NULL &&
                 snapshot_tree_csv(NULL, ',', &len) == NULL, "Unusable separators refused");

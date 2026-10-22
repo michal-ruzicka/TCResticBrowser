@@ -1023,13 +1023,18 @@ ResticResult restic_list_snapshots(
         return RESTIC_ERR_INVALID_ARG;
     }
 
+    FILETIME now; /* When restic was asked: the time of what is made from its answer (snapshots.csv) */
+    GetSystemTimeAsFileTime(&now);
     ResticCommandOutput cmd_out;
     ResticResult res = run_and_check(restic_exe, repo_target, password, L"snapshots --json --no-lock",
                                      options, &cmd_out, out_error_msg, err_capacity);
     if (res != RESTIC_OK) return res;
 
     switch (snapshot_tree_build(cmd_out.output, cmd_out.length, time_format, out_tree)) {
-        case SNAPSHOT_TREE_OK: res = RESTIC_OK; break;
+        case SNAPSHOT_TREE_OK:
+            snapshot_tree_set_listed_at(*out_tree, ((uint64_t)now.dwHighDateTime << 32) | now.dwLowDateTime);
+            res = RESTIC_OK;
+            break;
         case SNAPSHOT_TREE_NO_MEMORY: res = RESTIC_ERR_OUT_OF_MEMORY; break;
         case SNAPSHOT_TREE_BAD_FORMAT: res = RESTIC_ERR_INVALID_ARG; break;
         default: res = RESTIC_ERR_JSON_PARSE; break;

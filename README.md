@@ -290,7 +290,8 @@ setting of Total Commander.
 Next to `hosts`, `ids`, `snapshots` and `tags`, every repository folder
 holds the file `snapshots.csv`, made by the plugin from the snapshot list
 it has already read (no extra restic run). It lists every snapshot, one per
-line, sorted by host, then paths, then time:
+line, sorted by host, then paths (both regardless of upper and lower
+case), then time:
 
 | Column | Content |
 | --- | --- |
@@ -329,10 +330,11 @@ host name or tag such as `1-2` into a date. Quoting does not prevent it
 value as it is, import the file instead (*Data* -> *From Text/CSV*) and
 set those columns to *Text*.
 
-The size and time Total Commander shows for the file are those of the
-snapshot list at the time of the listing; the file copied is made from
-the list cached at the time of the copy, so after a background refresh it
-may already include newer snapshots.
+The file's date is the moment restic was asked for the snapshot list it
+is made from. The size and date Total Commander shows are those of the
+list at the time of the listing; the file copied is made from the list
+cached at the time of the copy and carries that list's date, so after a
+background refresh it may already include newer snapshots.
 
 ### Repository ID
 
@@ -345,8 +347,9 @@ from its original, and it is what tools that track repositories
 
 The file is listed at once, since its size is always the same (66 bytes);
 restic is asked for the ID only when you view or copy it, and the answer
-is remembered as long as the repository's password is. It has no date of
-its own.
+is remembered as long as the repository's password is. The file's date
+is the moment restic was asked for the ID; until then the listing shows
+none.
 
 ### File Names from Other Systems
 

@@ -33,14 +33,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`🗑 Forget N Passwords` cannot); the new `ConnectionLog=no` keeps it
   away.
 - **`snapshots.csv` in every repository folder.** A spreadsheet of all
-  snapshots - short ID, host, paths, time, tags and full ID, sorted by host, paths
-  and time - made from the snapshot list already read, as UTF-8 with a
+  snapshots - short ID, host, paths, time, tags and full ID, sorted by host
+  and paths regardless of case, then time - made from the snapshot list
+  already read and dated when restic listed the snapshots, as UTF-8 with a
   byte-order mark for Excel. Columns are separated by the list separator of
   the Windows regional settings, which Excel expects, or by the new
   `CsvSeparator=` (`,`, `;`, `|` or `tab`).
 - **`repository_id.txt` in every repository folder**, with the
-  repository's full ID (`restic cat config`) on one CRLF-terminated line;
-  restic is asked for it only when the file is viewed or copied.
+  repository's full ID (`restic cat config`) on one CRLF-terminated line,
+  dated when restic was asked for it; restic is asked only when the file
+  is viewed or copied.
 - **The password dialog names the repository in its title**
   (`<alias> - Restic repository password`), so password managers that
   choose an entry by window title, such as KeePassXC Auto-Type, can fill

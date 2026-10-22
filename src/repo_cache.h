@@ -103,13 +103,18 @@ void repo_cache_put_tree(const WCHAR* alias, const WCHAR* target, const char* ti
                          ULONGLONG generation);
 
 /*
- * Copies the cached ID of the repository (`restic cat config`) into `out_id`
- * (RESTIC_REPOSITORY_ID_CHARS + 1 bytes); FALSE when it has not been read
+ * Copies the cached ID of the repository (`restic cat config`) into `out_id` (optional,
+ * RESTIC_REPOSITORY_ID_CHARS + 1 bytes) and when restic was asked for it, as FILETIME ticks, into
+ * `out_read_at` (optional); FALSE when it has not been read
  */
-BOOL repo_cache_get_repository_id(const WCHAR* alias, const WCHAR* target, char* out_id);
+BOOL repo_cache_get_repository_id(const WCHAR* alias, const WCHAR* target, char* out_id, ULONGLONG* out_read_at);
 
-/* Caches the repository's ID unless a repository was forgotten since `generation` was obtained */
-void repo_cache_put_repository_id(const WCHAR* alias, const WCHAR* target, const char* id, ULONGLONG generation);
+/*
+ * Caches the repository's ID, read by restic started at `read_at` (FILETIME ticks), unless a
+ * repository was forgotten since `generation` was obtained
+ */
+void repo_cache_put_repository_id(const WCHAR* alias, const WCHAR* target, const char* id, ULONGLONG read_at,
+                                  ULONGLONG generation);
 
 /* Drops everything cached for the alias (any target), e.g. when its password is wiped */
 void repo_cache_forget(const WCHAR* alias);

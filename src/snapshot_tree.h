@@ -93,10 +93,10 @@ SnapshotTreeStatus snapshot_tree_build(const char* json, size_t len, const char*
  * between the fields "short ID", host, paths, timestamp ("YYYY-MM-DD hh:mm:ss", the snapshot's
  * own clock time), tags and "full ID", after a header line; host, paths and tags as restic reports
  * them, not made Windows-safe, several paths or tags one per line in their field. Sorted by host,
- * then paths, then time. A field is quoted when it holds the separator, a quote or a line
- * break (quotes doubled). A spreadsheet formula character (= + - @ tab CR) gets an apostrophe before
- * it at the start of a value and after any of , ; | tab LF CR " - wherever a reader, also one
- * splitting at another separator, could start a cell with it.
+ * then paths (both ignoring ASCII case), then time. A field is quoted when it holds the separator,
+ * a quote or a line break (quotes doubled). A spreadsheet formula character (= + - @ tab CR) gets an
+ * apostrophe before it at the start of a value and after any of , ; | tab LF CR " - wherever a
+ * reader, also one splitting at another separator, could start a cell with it.
  */
 char* snapshot_tree_csv(const SnapshotTree* tree, char separator, size_t* out_len);
 
@@ -108,6 +108,10 @@ const SnapshotNode* snapshot_tree_root(const SnapshotTree* tree);
 
 /* Number of snapshots in the tree */
 size_t snapshot_tree_snapshot_count(const SnapshotTree* tree);
+
+/* When restic was asked for the snapshots, as FILETIME ticks (UTC): the time of snapshots.csv; 0 unset */
+void snapshot_tree_set_listed_at(SnapshotTree* tree, uint64_t time);
+uint64_t snapshot_tree_listed_at(const SnapshotTree* tree);
 
 /*
  * The child of `dir` named `name` (UTF-8); an exact match first, otherwise the first one equal

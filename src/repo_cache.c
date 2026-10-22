@@ -60,6 +60,7 @@ struct RepoEntry {
     ULONGLONG refresh_tried_at; /* When the last one started */
     IndexEntry* indexes;
     char repository_id[RESTIC_REPOSITORY_ID_CHARS + 1]; /* From `restic cat config`; "" until read */
+    ULONGLONG repository_id_at;                         /* FILETIME ticks: when restic was asked for it */
     RepoEntry* next;
 };
 
@@ -664,20 +665,25 @@ void repo_cache_put_tree(const WCHAR* alias, const WCHAR* target, const char* ti
     snapshot_tree_free(tree); /* Not cached: a repository was forgotten meanwhile */
 }
 
-BOOL repo_cache_get_repository_id(const WCHAR* alias, const WCHAR* target, char* out_id) {
+BOOL repo_cache_get_repository_id(const WCHAR* alias, const WCHAR* target, char* out_id, ULONGLONG* out_read_at) {
     AcquireSRWLockShared(&g_CacheLock);
     const RepoEntry* r = find_repo_locked(alias, target);
     BOOL found         = r && r->repository_id[0] != '\0';
-    if (found) memcpy(out_id, r->repository_id, sizeof(r->repository_id));
+    if (found && out_id) memcpy(out_id, r->repository_id, sizeof(r->repository_id));
+    if (found && out_read_at) *out_read_at = r->repository_id_at;
     ReleaseSRWLockShared(&g_CacheLock);
     return found;
 }
 
-void repo_cache_put_repository_id(const WCHAR* alias, const WCHAR* target, const char* id, ULONGLONG generation) {
+void repo_cache_put_repository_id(const WCHAR* alias, const WCHAR* target, const char* id, ULONGLONG read_at,
+                                  ULONGLONG generation) {
     if (strlen(id) != RESTIC_REPOSITORY_ID_CHARS) return;
     AcquireSRWLockExclusive(&g_CacheLock);
     RepoEntry* r = generation_valid_locked(alias, generation) ? get_repo_locked(alias, target) : NULL;
-    if (r) memcpy(r->repository_id, id, sizeof(r->repository_id));
+    if (r) {
+        memcpy(r->repository_id, id, sizeof(r->repository_id));
+        r->repository_id_at = read_at;
+    }
     ReleaseSRWLockExclusive(&g_CacheLock);
 }
 
