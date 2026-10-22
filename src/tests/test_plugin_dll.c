@@ -1098,10 +1098,12 @@ static void test_repository_id(const Plugin* p, const WCHAR* dir) {
     WIN32_FIND_DATAW fd;
     RemoteInfo ri;
     memset(&ri, 0, sizeof(ri));
-    BOOL listed = FALSE;
-    HANDLE h    = p->find_first_w(L"\\MainRepo", &fd);
+    BOOL listed  = FALSE;
+    FILETIME csv = {0, 0};
+    HANDLE h     = p->find_first_w(L"\\MainRepo", &fd);
     if (h != INVALID_HANDLE_VALUE) {
         do {
+            if (wcscmp(fd.cFileName, L"snapshots.csv") == 0) csv = fd.ftLastWriteTime;
             if (wcscmp(fd.cFileName, L"repository_id.txt") != 0) continue;
             listed = (fd.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY)) ==
                          FILE_ATTRIBUTE_READONLY && fd.nFileSizeHigh == 0 && fd.nFileSizeLow == 66;
@@ -1112,7 +1114,8 @@ static void test_repository_id(const Plugin* p, const WCHAR* dir) {
         p->find_close(h);
     }
     EXPECT_TRUE(listed, "repository_id.txt is listed as a read-only file of 66 bytes");
-    EXPECT_TRUE(ri.LastWriteTime.dwHighDateTime == 0xFFFFFFFF, "No time before restic was asked for the ID");
+    EXPECT_TRUE(ri.LastWriteTime.dwHighDateTime != 0xFFFFFFFF && CompareFileTime(&ri.LastWriteTime, &csv) == 0,
+                "Before restic was asked for the ID, the time of snapshots.csv");
     FILETIME asked;
     GetSystemTimeAsFileTime(&asked);
 

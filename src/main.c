@@ -978,9 +978,9 @@ static void set_find_time(WIN32_FIND_DATAW* fd, uint64_t time) {
 
 /*
  * The children of a tree folder as Total Commander directory entries (heap array); the repository's
- * own folder (`repo_folder`) also holds REPOSITORY_ID_FILE_NAME (no time: list_operation adds it once
- * the ID is known) and, with `csv` set, SNAPSHOT_TREE_CSV_NAME, a file of `csv_len` bytes from
- * `csv_time`
+ * own folder (`repo_folder`) also holds REPOSITORY_ID_FILE_NAME and, with `csv` set,
+ * SNAPSHOT_TREE_CSV_NAME, a file of `csv_len` bytes; both dated `csv_time` (list_operation dates the
+ * former by `restic cat config` instead once the ID is known)
  */
 static ResticResult tree_folder_items(const SnapshotNode* dir, BOOL repo_folder, BOOL csv, size_t csv_len,
                                       uint64_t csv_time, WIN32_FIND_DATAW** out_items, size_t* out_count) {
@@ -1011,7 +1011,7 @@ static ResticResult tree_folder_items(const SnapshotNode* dir, BOOL repo_folder,
         wcscpy_s(fd->cFileName, MAX_PATH, L"" REPOSITORY_ID_FILE_NAME);
         fd->dwFileAttributes = FILE_ATTRIBUTE_READONLY;
         fd->nFileSizeLow     = REPOSITORY_ID_FILE_BYTES;
-        FS_SET_TIME_UNKNOWN(fd->ftLastWriteTime);
+        set_find_time(fd, csv_time);
     }
     *out_items = items;
     *out_count = n;

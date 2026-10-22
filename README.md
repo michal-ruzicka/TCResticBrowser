@@ -349,7 +349,7 @@ The file is listed at once, since its size is always the same (66 bytes);
 restic is asked for the ID only when you view or copy it, and the answer
 is remembered as long as the repository's password is. The file's date
 is the moment restic was asked for the ID; until then the listing shows
-none.
+the date of `snapshots.csv`.
 
 ### File Names from Other Systems
 
