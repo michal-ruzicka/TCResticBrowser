@@ -1235,8 +1235,9 @@ static void test_live_end_to_end_navigation(void) {
         repo_a,
         long_alias
     );
-    for (int i = 1; i <= 10; ++i) { /* More aliases than session slots (8) */
-        ini_len += snprintf(ini_text + ini_len, sizeof(ini_text) - (size_t)ini_len, "Slot%02d=%s\r\n", i, repo_a);
+    for (int i = 1; i <= 10 && ini_len > 0 && (size_t)ini_len < sizeof(ini_text); ++i) { /* More than 8 slots */
+        int wrote = snprintf(ini_text + ini_len, sizeof(ini_text) - (size_t)ini_len, "Slot%02d=%s\r\n", i, repo_a);
+        ini_len = wrote < 0 || (size_t)wrote >= sizeof(ini_text) - (size_t)ini_len ? -1 : ini_len + wrote;
     }
     EXPECT_TRUE(ini_len > 0 && (size_t)ini_len < sizeof(ini_text), "E2E INI fits its buffer");
     EXPECT_TRUE(write_file(ini, ini_text), "Write E2E INI");

@@ -688,9 +688,11 @@ static void test_large_repository_list(void) {
     char* content = (char*)malloc(cap);
     EXPECT_TRUE(content != NULL, "Allocate INI content");
     size_t len = (size_t)snprintf(content, cap, "[Repositories]\r\n  Spaced Alias  =  D:\\path with spaces\\repo  \r\n");
-    for (int i = 0; i < REPO_COUNT; ++i) {
-        len += (size_t)snprintf(content + len, cap - len,
+    for (int i = 0; i < REPO_COUNT && len < cap; ++i) {
+        int wrote = snprintf(content + len, cap - len,
             "Repo_%03d=D:\\Backups\\A\\Rather\\Long\\Directory\\Structure\\For\\Repository\\Number\\%03d\r\n", i, i);
+        if (wrote < 0 || (size_t)wrote >= cap - len) break; /* Cut short: the repository count below fails */
+        len += (size_t)wrote;
     }
     BOOL written = write_text_file(ini_path, content);
     free(content);
