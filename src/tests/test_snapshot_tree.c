@@ -422,10 +422,20 @@ static void test_many_snapshots(void) {
     size_t len = 0;
     json[len++] = '[';
     for (size_t i = 0; i < n; ++i) {
-        len += (size_t)snprintf(json + len, cap - len,
-                                "%s{\"time\":\"2026-10-%02uT%02u:00:00Z\",\"id\":\"%08x%056x\",\"hostname\":\"h%u\",\"tags\":[\"t\"]}",
-                                i ? "," : "", (unsigned)(i % 28 + 1), (unsigned)(i % 3), (unsigned)(i % 1000),
-                                (unsigned)i, (unsigned)(i % 7));
+        size_t avail = cap - len;
+        int wrote = snprintf(json + len, avail,
+                             "%s{\"time\":\"2026-10-%02uT%02u:00:00Z\",\"id\":\"%08x%056x\",\"hostname\":\"h%u\",\"tags\":[\"t\"]}",
+                             i ? "," : "", (unsigned)(i % 28 + 1), (unsigned)(i % 3), (unsigned)(i % 1000),
+                             (unsigned)i, (unsigned)(i % 7));
+        if (wrote < 0 || (size_t)wrote >= avail) {
+            free(json);
+            EXPECT_TRUE(0, "JSON buffer overflow while formatting test data");
+        }
+        len += (size_t)wrote;
+    }
+    if (cap - len < 2) {
+        free(json);
+        EXPECT_TRUE(0, "JSON buffer overflow while finalizing test data");
     }
     json[len++] = ']';
     json[len] = '\0';
