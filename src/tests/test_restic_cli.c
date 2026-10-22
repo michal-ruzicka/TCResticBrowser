@@ -888,9 +888,23 @@ static void test_live_restic_cli(void) {
 
     WCHAR* q_data = restic_quote_arg(data);
     WCHAR args[2048];
+    char repo_id[RESTIC_REPOSITORY_ID_CHARS + 1];
+    res = restic_read_repository_id(restic_bin, repo, password, NULL, repo_id, err, _countof(err));
+    EXPECT_TRUE(res == RESTIC_ERR_REPO_NOT_FOUND && repo_id[0] == '\0', "Repository ID of a missing repository");
+
     res = restic_exec_command(restic_bin, repo, password, L"init --json --repository-version 2", NULL, &out);
     EXPECT_TRUE(res == RESTIC_OK, "restic init with a password containing quotes, %PATH% and CJK text");
+    /* {"message_type":"initialized","id":"<64 hex>",...} */
+    char init_id[RESTIC_REPOSITORY_ID_CHARS + 1] = {0};
+    const char* id_at = out.output ? strstr(out.output, "\"id\":\"") : NULL;
+    if (id_at) memcpy(init_id, id_at + 6, RESTIC_REPOSITORY_ID_CHARS);
     restic_free_command_output(&out);
+
+    res = restic_read_repository_id(restic_bin, repo, password, NULL, repo_id, err, _countof(err));
+    EXPECT_TRUE(res == RESTIC_OK && strlen(repo_id) == RESTIC_REPOSITORY_ID_CHARS && strcmp(repo_id, init_id) == 0,
+                "restic cat config gives the ID restic init reported");
+    res = restic_read_repository_id(restic_bin, repo, L"wrong password", NULL, repo_id, err, _countof(err));
+    EXPECT_TRUE(res == RESTIC_ERR_WRONG_PASSWORD && repo_id[0] == '\0', "Repository ID with a wrong password");
 
     res = restic_list_snapshots(restic_bin, repo, L"wrong password", NULL, NULL, &tree, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_WRONG_PASSWORD, "Wrong password -> RESTIC_ERR_WRONG_PASSWORD");

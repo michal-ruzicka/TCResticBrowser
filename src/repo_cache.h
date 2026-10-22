@@ -7,7 +7,7 @@
  * What the plugin keeps in memory about each repository between two Total Commander calls: the
  * restic mount folder tree built from its last `restic snapshots` (snapshot_tree.h), and the
  * complete listing of the snapshots the user has entered (snapshot_index.h), read by one
- * `restic ls` per snapshot in the background (repo_cache_load_index).
+ * `restic ls` per snapshot in the background (repo_cache_load_index), and the repository's ID.
  *
  * A repository is identified by its alias and target together, so editing the INI never mixes two
  * repositories. Everything about a repository is dropped together with its cached password
@@ -101,6 +101,15 @@ ULONGLONG repo_cache_generation(void);
  * unless a repository was forgotten since `generation` was obtained */
 void repo_cache_put_tree(const WCHAR* alias, const WCHAR* target, const char* time_format, SnapshotTree* tree,
                          ULONGLONG generation);
+
+/*
+ * Copies the cached ID of the repository (`restic cat config`) into `out_id`
+ * (RESTIC_REPOSITORY_ID_CHARS + 1 bytes); FALSE when it has not been read
+ */
+BOOL repo_cache_get_repository_id(const WCHAR* alias, const WCHAR* target, char* out_id);
+
+/* Caches the repository's ID unless a repository was forgotten since `generation` was obtained */
+void repo_cache_put_repository_id(const WCHAR* alias, const WCHAR* target, const char* id, ULONGLONG generation);
 
 /* Drops everything cached for the alias (any target), e.g. when its password is wiped */
 void repo_cache_forget(const WCHAR* alias);

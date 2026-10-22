@@ -147,6 +147,24 @@ ResticResult restic_exec_command(
  */
 void restic_free_command_output(ResticCommandOutput* result);
 
+/* A repository ID as `restic cat config` prints it: 64 lowercase hexadecimal characters */
+#define RESTIC_REPOSITORY_ID_CHARS 64
+
+/**
+ * Runs `restic cat config --json --no-lock` and copies the repository's ID into `out_id`
+ * (RESTIC_REPOSITORY_ID_CHARS + 1 bytes). An ID that is not 64 lowercase hexadecimal characters is
+ * RESTIC_ERR_JSON_PARSE. On failure `out_error_msg` (optional) receives the reason reported by Restic.
+ */
+ResticResult restic_read_repository_id(
+    const WCHAR* restic_exe,
+    const WCHAR* repo_target,
+    const WCHAR* password,
+    const ResticExecOptions* options,
+    char* out_id,
+    WCHAR* out_error_msg,
+    size_t err_capacity
+);
+
 /**
  * Runs `restic snapshots --json --no-lock` and builds the restic mount folder tree from it
  * (snapshot_tree.h), naming snapshot folders by `time_format` (UTF-8, NULL: the default); release

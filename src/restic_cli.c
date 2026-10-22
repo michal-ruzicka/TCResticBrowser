@@ -1038,6 +1038,39 @@ ResticResult restic_list_snapshots(
     return res;
 }
 
+ResticResult restic_read_repository_id(
+    const WCHAR* restic_exe,
+    const WCHAR* repo_target,
+    const WCHAR* password,
+    const ResticExecOptions* options,
+    char* out_id,
+    WCHAR* out_error_msg,
+    size_t err_capacity
+) {
+    if (out_error_msg && err_capacity > 0) out_error_msg[0] = L'\0';
+    if (out_id) out_id[0] = '\0';
+    if (!restic_exe || !repo_target || !password || !out_id) {
+        return RESTIC_ERR_INVALID_ARG;
+    }
+
+    ResticCommandOutput cmd_out;
+    ResticResult res = run_and_check(restic_exe, repo_target, password, L"cat config --json --no-lock", options,
+                                     &cmd_out, out_error_msg, err_capacity);
+    if (res != RESTIC_OK) return res;
+
+    res = RESTIC_ERR_JSON_PARSE;
+    JsonDoc* doc = json_parse(cmd_out.output, cmd_out.length);
+    const char* id = doc ? json_string(json_object_get(json_root(doc), "id")) : NULL;
+    if (id && strlen(id) == RESTIC_REPOSITORY_ID_CHARS &&
+        strspn(id, "0123456789abcdef") == RESTIC_REPOSITORY_ID_CHARS) {
+        memcpy(out_id, id, RESTIC_REPOSITORY_ID_CHARS + 1);
+        res = RESTIC_OK;
+    }
+    json_free(doc);
+    restic_free_command_output(&cmd_out);
+    return res;
+}
+
 ResticResult restic_list_directory(
     const WCHAR* restic_exe,
     const WCHAR* repo_target,

@@ -389,10 +389,12 @@ Total Commander process
     │                                    -> restic mount's tree from `restic snapshots --json`,
     │                                       cached, re-read in the background after 60 s
     │                                \<alias>\snapshots.csv -> generated from that tree
+    │                                \<alias>\repository_id.txt -> fixed size, ID read on copy
     │                                …\<snapshot>\…      -> restic ls --json (one level) until
     │                                    the background `restic ls` of the whole snapshot is
     │                                    read, then from memory
-    ├── FsGetFileW                   restic dump (or the generated snapshots.csv)
+    ├── FsGetFileW                   restic dump (or the generated snapshots.csv,
+    │                                or the ID from `restic cat config --json`)
     │                                -> temporary file -> atomic replace of the
     │                                target (F5, F3, Ctrl+Q)
     ├── RequestProcW (TC callback)   repository password, kept in memory

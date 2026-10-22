@@ -38,6 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   byte-order mark for Excel. Columns are separated by the list separator of
   the Windows regional settings, which Excel expects, or by the new
   `CsvSeparator=` (`,`, `;`, `|` or `tab`).
+- **`repository_id.txt` in every repository folder**, with the
+  repository's full ID (`restic cat config`) on one CRLF-terminated line;
+  restic is asked for it only when the file is viewed or copied.
 - **The password dialog names the repository in its title**
   (`<alias> - Restic repository password`), so password managers that
   choose an entry by window title, such as KeePassXC Auto-Type, can fill

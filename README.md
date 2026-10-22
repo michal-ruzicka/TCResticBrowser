@@ -65,7 +65,8 @@ to list and extract data and never modifies a repository.
 │   │       ├── latest\
 │   │       ├── latest → 2026-10-18_09-30-00\
 │   │       └── latest → a1b2c3d4\
-│   └── snapshots.csv                       <-- All snapshots, for a spreadsheet
+│   ├── snapshots.csv                       <-- All snapshots, for a spreadsheet
+│   └── repository_id.txt                   <-- The repository's ID
 └── CloudS3Backup\
 ```
 
@@ -210,7 +211,7 @@ documentation.
 | **List Repositories** | Open **Network Neighborhood** (`\\\`) -> **`TCResticBrowser`**. Changes to `TCResticBrowser.ini` take effect immediately on panel refresh (`Ctrl+R` / `F2`). |
 | **Browse Snapshots** | Enter a repository folder (`\<Alias>`). Prompted once for the repository password; once restic accepts it, it is kept in RAM (encrypted) for that alias across both panels for 30 minutes (see [Password Timeout](#password-timeout)). Up to 3 password attempts are allowed. The dialog's title starts with the repository alias (`MyLocalBackup - Restic repository password`), so a password manager that picks an entry by the title of the active window, such as KeePassXC Auto-Type, can offer the right password. |
 | **Connection Log** | Total Commander's FTP connections toolbar (unless `ConnectionLog=no`), whose log window shows what the plugin is doing in the background - reading a whole snapshot (with progress every few seconds) or re-reading the snapshot list - and whose **Disconnect** forgets all passwords and everything read with them. See [Connection Log](#connection-log). |
-| **Snapshot List (`snapshots.csv`)** | Every repository folder also holds the file **`snapshots.csv`**: all snapshots with host, paths, time, tags and full ID, for Excel or another spreadsheet (`F3` to view, `F5` to copy, or open it). See [Snapshot List as a Spreadsheet](#snapshot-list-as-a-spreadsheet). |
+| **Snapshot List (`snapshots.csv`)** | Every repository folder also holds the file **`snapshots.csv`**: all snapshots with host, paths, time, tags and full ID, for Excel or another spreadsheet (`F3` to view, `F5` to copy, or open it). See [Snapshot List as a Spreadsheet](#snapshot-list-as-a-spreadsheet). Next to it, **`repository_id.txt`** holds the repository's ID (see [Repository ID](#repository-id)). |
 | **Forget Passwords** | While passwords are remembered, the plugin's root folder starts with **`🗑 Forget N Passwords`** (N is their number; `🗑 Forget 1 Password` for one). Press **Enter** on it to wipe them all at once; a message says how many were forgotten, the root folder is then re-read without the entry, and the next access asks again. The entry is not removed by itself when the passwords expire; it disappears the next time the root folder is read (`Ctrl+R`). |
 | **Explore Files** | Enter a snapshot through `snapshots`, `ids`, `hosts` or `tags` (or `latest`) and navigate the backed-up directory tree. The snapshot list is read once and then shown at once from memory; when it is older than a minute (`SnapshotListRefreshSeconds=`), as `restic mount` would re-read it, restic reads a new one in the background and the next listing (`Ctrl+R`) shows any new snapshots (see [Snapshot List Refresh](#snapshot-list-refresh)). |
 | **View File (`F3` / `Ctrl+Q`)** | Press **`F3`** (Lister) or **`Ctrl+Q`** (Quick View) on any file to stream it to a temporary location and view its contents. |
@@ -332,6 +333,20 @@ The size and time Total Commander shows for the file are those of the
 snapshot list at the time of the listing; the file copied is made from
 the list cached at the time of the copy, so after a background refresh it
 may already include newer snapshots.
+
+### Repository ID
+
+Every repository folder also holds `repository_id.txt`: one line with
+the repository's full 64-character ID, as `restic cat config` reports it,
+ended by a Windows line break (CRLF). The ID tells two repositories apart
+whatever their location or alias, for example a copy of a repository
+from its original, and it is what tools that track repositories
+(monitoring, backup inventories) use to identify one.
+
+The file is listed at once, since its size is always the same (66 bytes);
+restic is asked for the ID only when you view or copy it, and the answer
+is remembered as long as the repository's password is. It has no date of
+its own.
 
 ### File Names from Other Systems
 

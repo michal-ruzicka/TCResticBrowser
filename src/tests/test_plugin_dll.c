@@ -1058,6 +1058,69 @@ static void test_snapshots_csv(const Plugin* p, const WCHAR* dir, const WCHAR* s
     DeleteFileW(local);
 }
 
+/* Reads a small local file into `text` (NUL-terminated); its length, or -1 */
+static int read_small_file(const WCHAR* path, char* text, DWORD cap) {
+    DWORD got = 0;
+    HANDLE f  = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE) return -1;
+    BOOL ok = ReadFile(f, text, cap - 1, &got, NULL);
+    CloseHandle(f);
+    text[ok ? got : 0] = '\0';
+    return ok ? (int)got : -1;
+}
+
+/*
+ * repository_id.txt beside snapshots.csv: listed with its fixed size (64 hexadecimal characters and
+ * CRLF), read by restic once and then taken from the cache, never a folder
+ */
+static void test_repository_id(const Plugin* p, const WCHAR* dir) {
+    WIN32_FIND_DATAW fd;
+    RemoteInfo ri;
+    memset(&ri, 0, sizeof(ri));
+    BOOL listed = FALSE;
+    HANDLE h    = p->find_first_w(L"\\MainRepo", &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (wcscmp(fd.cFileName, L"repository_id.txt") != 0) continue;
+            listed = (fd.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY)) ==
+                         FILE_ATTRIBUTE_READONLY && fd.nFileSizeHigh == 0 && fd.nFileSizeLow == 66;
+            ri.SizeLow       = fd.nFileSizeLow;
+            ri.LastWriteTime = fd.ftLastWriteTime;
+            ri.Attr          = (int)fd.dwFileAttributes;
+        } while (p->find_next_w(h, &fd));
+        p->find_close(h);
+    }
+    EXPECT_TRUE(listed, "repository_id.txt is listed as a read-only file of 66 bytes");
+
+    WCHAR local[MAX_PATH];
+    swprintf_s(local, MAX_PATH, L"%ls\\repository_id.txt", dir);
+    DeleteFileW(local);
+    int reads_before = conn_log_count(L"Repository ID read by restic");
+    int prompts      = g_e2e_pwd_prompts;
+    static char first[128], second[128];
+    EXPECT_TRUE(p->get_file_w(L"\\MainRepo\\repository_id.txt", local, 0, &ri) == FS_FILE_OK &&
+                    read_small_file(local, first, sizeof(first)) == 66,
+                "repository_id.txt copied: 66 bytes");
+    EXPECT_TRUE(strspn(first, "0123456789abcdef") == 64 && strcmp(first + 64, "\r\n") == 0,
+                "One line: the 64-character ID and a Windows line end");
+    EXPECT_TRUE(p->get_file_w(L"\\MainRepo\\repository_id.txt", local, 0, &ri) == FS_FILE_EXISTS,
+                "An existing copy is reported first (overwrite protocol)");
+    EXPECT_TRUE(p->get_file_w(L"\\MainRepo\\Repository_ID.TXT", local, FS_COPYFLAGS_OVERWRITE, &ri) == FS_FILE_OK &&
+                    read_small_file(local, second, sizeof(second)) == 66 && strcmp(first, second) == 0,
+                "... and replaced by the same ID (the name compares ignoring case)");
+    EXPECT_TRUE(conn_log_count(L"Repository ID read by restic") == reads_before + 1 && g_e2e_pwd_prompts == prompts,
+                "restic read the ID once, without a prompt; the second copy came from the cache");
+    SetLastError(0);
+    EXPECT_TRUE(p->find_first_w(L"\\MainRepo\\repository_id.txt", &fd) == INVALID_HANDLE_VALUE &&
+                    GetLastError() == ERROR_PATH_NOT_FOUND &&
+                    p->get_file_w(L"\\MainRepo\\repository_id.txt\\x", local, FS_COPYFLAGS_OVERWRITE, &ri) ==
+                        FS_FILE_NOTFOUND &&
+                    p->get_file_w(L"\\MainRepo\\ids\\repository_id.txt", local, FS_COPYFLAGS_OVERWRITE, &ri) ==
+                        FS_FILE_NOTFOUND,
+                "repository_id.txt is no folder, has nothing below it and is only in the repository's folder");
+    DeleteFileW(local);
+}
+
 /* Scenario C: full end-to-end navigation (Level 0 -> Level 1 -> Level 2+, password retry & session) */
 static void test_live_end_to_end_navigation(void) {
     if (GetFileAttributesW(L"tmp\\restic.exe") == INVALID_FILE_ATTRIBUTES ||
@@ -1119,8 +1182,9 @@ static void test_live_end_to_end_navigation(void) {
 
     WIN32_FIND_DATAW fd;
     static WCHAR names[1024];
-    EXPECT_TRUE(list_names(&p, L"\\MainRepo", names, _countof(names)) && wcscmp(names, L"hosts|ids|snapshots|tags|snapshots.csv") == 0,
-                "Level 1 shows restic mount's folders and snapshots.csv after a password retry");
+    EXPECT_TRUE(list_names(&p, L"\\MainRepo", names, _countof(names)) &&
+                    wcscmp(names, L"hosts|ids|snapshots|tags|snapshots.csv|repository_id.txt") == 0,
+                "Level 1 shows restic mount's folders, snapshots.csv and repository_id.txt after a password retry");
     EXPECT_TRUE(g_e2e_pwd_prompts == 2, "Prompted twice (initial + 1 retry after wrong password)");
     EXPECT_TRUE(wcsstr(g_e2e_last_prompt, L"Wrong password") != NULL, "Retry prompt tells the user the password was wrong");
     EXPECT_TRUE(wcscmp(g_e2e_last_title, L"MainRepo - Restic repository password") == 0,
@@ -1176,6 +1240,7 @@ static void test_live_end_to_end_navigation(void) {
                 GetLastError() == ERROR_PATH_NOT_FOUND, "Unknown snapshot -> ERROR_PATH_NOT_FOUND");
     EXPECT_TRUE(g_e2e_pwd_prompts == 0 && g_e2e_msg_dialogs == 0, "No prompt and no dialog while browsing the tree");
     test_snapshots_csv(&p, dir, short_id, latest_link + 9);
+    test_repository_id(&p, dir);
 
     /* The snapshot root is the same through latest and ids/ */
     static WCHAR via_latest[1024], via_id[1024];

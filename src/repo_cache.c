@@ -59,6 +59,7 @@ struct RepoEntry {
     BOOL refreshing;   /* A background `restic snapshots` is running */
     ULONGLONG refresh_tried_at; /* When the last one started */
     IndexEntry* indexes;
+    char repository_id[RESTIC_REPOSITORY_ID_CHARS + 1]; /* From `restic cat config`; "" until read */
     RepoEntry* next;
 };
 
@@ -661,6 +662,23 @@ void repo_cache_put_tree(const WCHAR* alias, const WCHAR* target, const char* ti
     }
     ReleaseSRWLockExclusive(&g_CacheLock);
     snapshot_tree_free(tree); /* Not cached: a repository was forgotten meanwhile */
+}
+
+BOOL repo_cache_get_repository_id(const WCHAR* alias, const WCHAR* target, char* out_id) {
+    AcquireSRWLockShared(&g_CacheLock);
+    const RepoEntry* r = find_repo_locked(alias, target);
+    BOOL found         = r && r->repository_id[0] != '\0';
+    if (found) memcpy(out_id, r->repository_id, sizeof(r->repository_id));
+    ReleaseSRWLockShared(&g_CacheLock);
+    return found;
+}
+
+void repo_cache_put_repository_id(const WCHAR* alias, const WCHAR* target, const char* id, ULONGLONG generation) {
+    if (strlen(id) != RESTIC_REPOSITORY_ID_CHARS) return;
+    AcquireSRWLockExclusive(&g_CacheLock);
+    RepoEntry* r = generation_valid_locked(alias, generation) ? get_repo_locked(alias, target) : NULL;
+    if (r) memcpy(r->repository_id, id, sizeof(r->repository_id));
+    ReleaseSRWLockExclusive(&g_CacheLock);
 }
 
 void repo_cache_forget(const WCHAR* alias) {
