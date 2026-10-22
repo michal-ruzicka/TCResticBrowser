@@ -105,5 +105,5 @@ void repo_cache_put_tree(const WCHAR* alias, const WCHAR* target, const char* ti
 /* Drops everything cached for the alias (any target), e.g. when its password is wiped */
 void repo_cache_forget(const WCHAR* alias);
 
-/* Drops everything (FsInitW, the forget command, DLL unload) */
+/* Drops everything (FsInitW, the forget entry, Disconnect, DLL unload) */
 void repo_cache_clear(void);

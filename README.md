@@ -59,12 +59,13 @@ to list and extract data and never modifies a repository.
 │   │   ├── latest\                         <-- The newest snapshot
 │   │   ├── latest → 2026-10-18_09-30-00\   <-- The same, saying which folder it is
 │   │   └── latest → a1b2c3d4\              <-- The same, saying which snapshot ID
-│   └── tags\
-│       └── daily\
-│           ├── 2026-10-18_09-30-00\
-│           ├── latest\
-│           ├── latest → 2026-10-18_09-30-00\
-│           └── latest → a1b2c3d4\
+│   ├── tags\
+│   │   └── daily\
+│   │       ├── 2026-10-18_09-30-00\
+│   │       ├── latest\
+│   │       ├── latest → 2026-10-18_09-30-00\
+│   │       └── latest → a1b2c3d4\
+│   └── snapshots.csv                       <-- All snapshots, for a spreadsheet
 └── CloudS3Backup\
 ```
 
@@ -274,8 +275,8 @@ buttons that matter here:
 There is one connection for all repositories, so one Disconnect is always
 enough. Only Disconnect closes it: `🗑 Forget N Passwords` or a password
 timeout forget the passwords but cannot close Total Commander's toolbar, so
-it stays (the log says so) until you press Disconnect; the next accepted
-password reuses it. That is why the toolbar is off by
+it stays (the log says so) until you press Disconnect; the next use of a
+repository reuses it. That is why the toolbar is off by
 default.
 
 The toolbar is Total Commander's own FTP toolbar, so it says *FTP* and has
@@ -641,7 +642,7 @@ sizes as exact 64-bit integers instead of going through floating point.
 
 The reader is generic: it understands any valid JSON, not just a list of
 expected keywords. The plugin looks up the few fields it uses (`id`,
-`time`, `hostname`, `tags`, `name`, `type`, `size`, `mtime`, `atime`,
+`time`, `hostname`, `tags`, `paths`, `name`, `type`, `size`, `mtime`, `atime`,
 `ctime`, `path`, `message_type`, `message`), so fields and message types that a newer
 Restic adds are simply ignored; a missing field skips the entry or leaves its
 size or time unknown, and a line that is not valid JSON fails the listing

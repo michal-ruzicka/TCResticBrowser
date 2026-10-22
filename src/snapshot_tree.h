@@ -78,7 +78,7 @@ typedef struct SnapshotTree SnapshotTree;
 /*
  * Builds the tree from `len` bytes of `restic snapshots --json` output (a literal null is an empty
  * repository), naming the snapshot folders by `time_format` (NULL: the default). Entries without
- * a valid time or a hexadecimal ID of 8 to 64 characters are skipped. Release the tree with
+ * a valid time or a lowercase hexadecimal ID of 8 to 64 characters are skipped. Release the tree with
  * snapshot_tree_free().
  */
 SnapshotTreeStatus snapshot_tree_build(const char* json, size_t len, const char* time_format, SnapshotTree** out);

@@ -1081,7 +1081,6 @@ static ResticResult resolve_repo_path(const RepoCall* call, const WCHAR* rest, B
                                              call->cfg->snapshot_time_format, call->exec, &tree, call->err, call->err_cap);
     if (res != RESTIC_OK) return res;
     log_write(L"Snapshots of '%ls': %u", call->repo->alias, (unsigned)snapshot_tree_snapshot_count(tree));
-    /* (Logged before the password is announced as a connection the first time, so seen from then on) */
     conn_log(FALSE, call->repo->alias, L"Snapshot list read: %u snapshots, %.1f s",
              (unsigned)snapshot_tree_snapshot_count(tree), (double)(GetTickCount64() - started) / 1000.0);
     res = walk_tree(tree, rest, want_items, csv_separator(call->cfg), out);
@@ -1261,9 +1260,10 @@ static void log_configuration(const ResticConfig* cfg) {
     log_write(L"  RootName: %ls; LogPath: %ls", cfg->root_name, log_path);
     WCHAR time_format[SNAPSHOT_TREE_TIME_FORMAT_MAX + 1] = {0};
     MultiByteToWideChar(CP_UTF8, 0, cfg->snapshot_time_format, -1, time_format, (int)_countof(time_format));
-    log_write(L"  SnapshotTimeFormat: %ls%ls; SnapshotCacheMB: %lu", time_format,
+    BOOL capped = sizeof(void*) == 4 && cfg->snapshot_cache_mb > 512; /* See load_config */
+    log_write(L"  SnapshotTimeFormat: %ls%ls; SnapshotCacheMB: %lu%ls", time_format,
               cfg->snapshot_time_format_invalid ? L" (the configured one is unusable, default used)" : L"",
-              (unsigned long)cfg->snapshot_cache_mb);
+              (unsigned long)cfg->snapshot_cache_mb, capped ? L" (512 used: 32-bit Total Commander)" : L"");
     char sep          = csv_separator(cfg);
     WCHAR sep_text[8] = {(WCHAR)sep, L'\0'};
     log_write(L"  CsvSeparator: %ls%ls", sep == '\t' ? L"tab" : sep_text,

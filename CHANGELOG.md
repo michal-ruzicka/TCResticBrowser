@@ -87,6 +87,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `build\fingerprint-x64.txt` and `build\fingerprint-x86.txt`, which show
   where two builds differ; see *When the hashes differ* in CONTRIBUTING.md.
 
+### Fixed
+
+- **A damaged repository can no longer fill Total Commander's memory with
+  warnings.** restic's error output is now kept up to 1 MiB (far more than
+  any error message) and the rest is read and dropped; v2.0.0 kept all of it.
+- **The diagnostic log lists every setting** with the configuration,
+  including `PasswordTimeoutSeconds`, `PasswordTimeoutResetOnUse` and the
+  new settings, which v2.0.0 left out.
+
 ### Security
 
 - **`ResticPath=` can no longer name a batch file.** Windows runs `.bat`
