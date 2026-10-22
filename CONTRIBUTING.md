@@ -20,13 +20,23 @@ it up to date with every change.
 
 - [**Visual Studio 2026 Build Tools**](https://visualstudio.microsoft.com/)
   with the components listed in [`.vsconfig`](.vsconfig): the MSVC toolset,
-  the Windows SDK, CMake and AddressSanitizer. Installing with
+  the Windows SDK, CMake and AddressSanitizer. For a build that matches the
+  CI build byte for byte, use the pinned release, 18.11.1 (see
+  [Reproducible Builds](#reproducible-builds)). Installing with
   `vs_buildtools.exe --config .vsconfig` (as
   `setup-build-environment-example.cmd` and the CI workflow do) selects
   exactly those. The full Visual Studio IDE works too, but is not required.
-- *(Optional)* `tmp\restic.exe`: with it the live end-to-end tests run
-  against a real repository they create in `tmp\test_fixture\`; without it
-  they report `[SKIP]`.
+- *(Optional, but CI has it)* `tmp\restic.exe`: with it the live end-to-end
+  tests run against a real repository they create in `tmp\test_fixture\`;
+  without it they report `[SKIP]`, and a local `build.cmd` or
+  `build.cmd check` covers much less than CI does (a test bug that only the
+  Debug CRT of `build.cmd check` reports once hung CI while every local run
+  passed). Use the version CI pins: `RESTIC_VERSION` in
+  `.github/workflows/build.yml`, from
+  `restic_<version>_windows_amd64.zip` of the restic GitHub release, checked
+  against `RESTIC_ZIP_SHA256` there (`Get-FileHash -Algorithm SHA256`), the
+  `.exe` inside copied to `tmp\restic.exe` (the 64-bit `restic.exe` serves the
+  x86 tests too).
 
 Nothing else: no Bash, no Python, no .NET. The plugin is pure C11 / Win32,
 linked against the static MSVC runtime, and contains no third-party code.
@@ -40,12 +50,13 @@ linked against the static MSVC runtime, and contains no third-party code.
 | `dist\` | Released ZIP bundles (gitignored) |
 | `logo\` | SVG sources of the plugin icon `src\TCResticBrowser.ico` (see [Plugin Icon](#plugin-icon)) |
 | `src\` | C sources and headers, `CMakeLists.txt`, `.def`/`.rc`/`.ico`, `pluginst.inf`, the sample `TCResticBrowser.ini` |
-| `src\tests\` | Test programs and the JSON fuzz target |
+| `src\tests\` | Test programs and the libFuzzer targets |
 | `tmp\` | Optional live-test input `restic.exe` and the generated test repository (gitignored) |
 | `.gitattributes` | Line-ending normalization rules |
 | `.gitignore` | Excludes build output and `tmp\` from version control |
 | `.vsconfig` | Visual Studio component selection; pins the MSVC toolset and Windows SDK versions for the CI workflow and `setup-build-environment-example.cmd` |
 | `build.cmd` | Top-level build driver |
+| `build-fingerprint.ps1` | Describes one build for comparing two of them (see [When the hashes differ](#when-the-hashes-differ)); called by `build.cmd` |
 | `setup-build-environment-example.cmd` | Builds from scratch on a fresh Windows installation |
 | `AGENT.md` | Technical specification and coding-agent instructions; bundled in every release ZIP |
 | `CHANGELOG.md` | Release notes in Keep a Changelog format; bundled in every release ZIP |
@@ -65,7 +76,7 @@ build.cmd
 The script locates Visual Studio Build Tools via `vswhere` and activates the
 compiler environment itself — no Developer Command Prompt is needed. It drives
 CMake (NMake Makefiles generator) for both bitnesses (x86 and x64) using the
-sources under `src\`, **runs the four test programs for each bitness** (a
+sources under `src\`, **runs the five test programs for each bitness** (a
 failing test fails the build), and packages the artifacts into
 `dist\TCResticBrowser.v<version>.zip` — the same auto-install bundle
 described in *Installation*. The version is read from `src\pluginst.inf` as
@@ -112,9 +123,10 @@ are not shipped in the ZIP) and run from the repository root:
 | Program | Scope |
 |---|---|
 | `test_json` | The JSON reader on its own: malformed input, escapes, surrogates, exact 64-bit integers, the nesting limit, real Restic output, pinned JSONTestSuite edge cases |
+| `test_snapshot_tree` | RFC 3339 timestamps, the `restic mount` folder tree and the whole-snapshot index (portable C, also builds with gcc/clang and sanitizers): naming, `SnapshotTimeFormat`, `-1` suffixes, `latest`, `latest → <folder>` and `latest → <short ID>`, host and tag names made Windows-safe, `snapshots.csv` (quoting, sort order, formula defusing), the index's walk order, limits and lookups |
 | `test_config` | `TCResticBrowser.ini` lookup and parsing, `restic.exe` resolution (never from the current directory), root listing, the inert plugin without an INI |
-| `test_restic_cli` | Snapshot and `ls` parsers, argument quoting, child-process handling with `cmd.exe` and a fake `restic` stand-in, and live tests against `tmp\restic.exe` |
-| `test_plugin_dll` | Loads the built DLL like Total Commander does: exact export surface, icon and version resources, INI lookup, and live navigation and extraction through the WFX API |
+| `test_restic_cli` | `ls` parser, argument quoting, child-process handling with `cmd.exe` and a fake `restic` stand-in (`fake_restic.exe`), line streaming, and live tests against `tmp\restic.exe` (including every folder listed identically from the whole-snapshot index and from `restic ls`) |
+| `test_plugin_dll` | Loads the built DLL like Total Commander does: exact export surface, icon and version resources, INI lookup, and live navigation (the `restic mount` folders, background listings and refreshes) and extraction through the WFX API |
 
 [AGENT.md](AGENT.md#87-test-suites-srctests) lists every case. Run them
 manually after a build:
@@ -124,9 +136,11 @@ build\x64\test_plugin_dll.exe
 build\x86\test_plugin_dll.exe
 ```
 
-`src\tests\fuzz_json.c` is a libFuzzer target for the JSON reader. It is
-not part of `build.cmd` because it needs a fuzzing-capable compiler; its
-header shows how to build and run it with clang.
+`src\tests\fuzz_json.c` is a libFuzzer target for the JSON reader, and
+`src\tests\fuzz_snapshot.c` one for the parsers that turn restic's output
+into the snapshot tree and the whole-snapshot index. They are not part of
+`build.cmd` because they need a fuzzing-capable compiler; their headers show
+how to build and run them with clang.
 
 ### Reproducible Builds
 
@@ -146,14 +160,33 @@ Four independent sources of non-determinism are eliminated:
 | Absolute source paths in debug info | Compiler flag `/pathmap:<src-dir>=./` strips the machine-local prefix |
 | File modification times in ZIP entries | Normalized to `release-date=` read from `src\pluginst.inf` |
 
-Three additional parameters are pinned so that "same source" also means "same
+Four additional parameters are pinned so that "same source" also means "same
 compiler output":
 
 | Parameter | Pinned to | Files that must match |
 |---|---|---|
+| Visual Studio release | `18.11.1` | `build.cmd` (`EXPECTED_VS`), `.github\workflows\build.yml` (`VS_BUILDTOOLS_VERSION`, `_URL`, `_SHA256`), `setup-build-environment-example.cmd` (`VS_BUILDTOOLS_URL`, `_SHA256`) |
 | Exact `cl.exe` version | `19.51.36260` | `build.cmd` (`EXPECTED_CL`) |
 | MSVC toolset (major.minor) | `14.51` | `build.cmd` (`CMAKE_T`), `.vsconfig` (also used by the CI workflow) |
 | Windows SDK | `10.0.26100.0` | `build.cmd` (`CMAKE_SDK`), `.vsconfig` (also used by the CI workflow) |
+
+The Visual Studio release matters on its own: an update can service the
+toolset libraries (`libcmt.lib`, `libvcruntime.lib`) and the Windows SDK
+(`libucrt.lib`, headers) without changing the `cl.exe` version or the
+folder names. The CI workflow therefore installs Build Tools with the
+fixed-version bootstrapper of the pinned release (its SHA-256 is checked),
+not the latest one. Locally, keep Visual Studio at that release, or install
+the pinned Build Tools next to it with the same bootstrapper and point
+`build.cmd` at them:
+
+```
+set TCRB_VSINSTALL=C:\BuildTools
+build.cmd
+```
+
+Without `TCRB_VSINSTALL`, `build.cmd` uses the newest Visual Studio that
+`vswhere` reports. It warns when its version (`VSCMD_VER`, shown in the
+Developer Command Prompt banner) is not `EXPECTED_VS`.
 
 `build.cmd` checks `cl.exe` against `EXPECTED_CL` and prints a warning if
 they differ — the build continues regardless. The check exists so that when
@@ -198,12 +231,56 @@ If all three match, the released ZIP is identical to what the source builds.
 extraction — to confirm that an individual file was not corrupted during
 download or extraction — but it is not an independent trust anchor.
 
+#### When the hashes differ
+
+After each bitness, `build.cmd` runs `build-fingerprint.ps1`, which writes
+`build\fingerprint-x64.txt` and `build\fingerprint-x86.txt` and prints them
+into the log; the CI workflow also uploads them as the
+`TCResticBrowser-fingerprints` artifact. A fingerprint lists everything that
+decides the bytes of the plugin DLL, with machine-specific folders replaced by
+placeholders (`<VS>`, `<VCTools>`, `<WindowsSdkDir>`, `<src>`, `<build>`), so
+two builds of the same commit should have identical fingerprints apart from
+the lines marked *informational*. Compare a local one with the one from CI:
+
+```
+fc build\fingerprint-x64.txt %USERPROFILE%\Downloads\TCResticBrowser-fingerprints\fingerprint-x64.txt
+```
+
+Read the differences from the top; the first section that differs is usually
+the cause:
+
+| Section | What a difference means |
+|---|---|
+| `[toolchain]` | Another Visual Studio, MSVC toolset or Windows SDK build. The same version number with another hash of `cl.exe`, `c1.dll`, `c2.dll` or `link.exe` means a serviced toolset. Install the same Visual Studio version on both sides; a Visual Studio update can update the Windows SDK too. |
+| `[libraries]` | The static C runtime (`libcmt.lib` and `libvcruntime.lib` from the toolset, `libucrt.lib` from the Windows SDK) or an import library differs, and their code is linked into the DLL. `libucrt.lib` changes with the SDK revision (10.0.26100.*x*), which the SDK folder name `10.0.26100.0` does not show; the SDK is installed machine-wide, so another product (or a newer Visual Studio instance) can update it under a pinned Visual Studio. |
+| `[options]` | CMake generated other compiler, resource compiler or linker options: another CMake version, or a changed `CMakeLists.txt`. |
+| `[objects]` | The toolchain and options are the same but an object file is not: the headers differ (another SDK revision) or the sources do. |
+| `[dll]` | Only the linked result differs: the linker or a library. The section hashes narrow it down (`.text` code, `.rdata` constants and the import table, `.rsrc` the icon and version resource). The `rich:` lines (the Rich header) list, per tool build, how many linked-in objects it produced: a library built by another compiler shows up as another `build` number. |
+
 #### Upgrading the pinned toolchain
 
 When you adopt a new MSVC toolset or Windows SDK version, update **both
 locations** listed below to keep them in sync. A mismatch causes either a
 build failure (CMake cannot find the requested toolset) or silent divergence
 between local and CI builds.
+
+##### Visual Studio release
+
+Take the new release's *Build Tools* fixed-version bootstrapper from the
+[Visual Studio 2026 release history](https://learn.microsoft.com/visualstudio/releases/2026/release-history).
+The long hexadecimal folder in its URL is the SHA-256 of the file; check it
+after downloading (`certutil -hashfile vs_BuildTools.exe SHA256`), and check
+that the file's *Product version* (Properties, Details) is the release.
+Update, in one commit:
+
+1. **`build.cmd`** — `set EXPECTED_VS=18.XX.Y`
+2. **`.github\workflows\build.yml`** — `VS_BUILDTOOLS_VERSION`,
+   `VS_BUILDTOOLS_URL`, `VS_BUILDTOOLS_SHA256`
+3. **`setup-build-environment-example.cmd`** — `VS_BUILDTOOLS_URL`,
+   `VS_BUILDTOOLS_SHA256`
+
+Then update your local Visual Studio to the same release. A new release can
+bring a new `cl.exe`, so check the toolset below as well.
 
 ##### MSVC toolset
 
@@ -258,8 +335,10 @@ generator flag needs updating. What does change:
 
 1. **`.vsconfig`** — the toolset and SDK component IDs change with each major
    VS release; update those using the guidance above.
-2. **`.github/workflows/build.yml`** — update the VS installer URL if the
-   stable channel URL changes (currently `https://aka.ms/vs/18/stable/vs_buildtools.exe`).
+2. **The pinned release** — a new major version has its own release history
+   page; pin one of its releases as described in *Visual Studio release*
+   above. `build.cmd` finds the installation through `vswhere`, which does not
+   depend on the major version.
 
 CMake comes with the Build Tools (`VC.CMake.Project` in `.vsconfig`), so a
 new Visual Studio version also brings a matching CMake.
@@ -313,20 +392,38 @@ child process and parses its JSON output.
 ```
 Total Commander process
 └── TCResticBrowser.wfx[64]
-    ├── FsFindFirstW / FsFindNextW   \                     -> aliases from TCResticBrowser.ini
-    │                                \<alias>              -> restic snapshots --json
-    │                                \<alias>\<snapshot>\… -> restic ls --json (one level)
-    ├── FsGetFileW                   restic dump -> temporary file -> atomic
-    │                                replace of the target (F5, F3, Ctrl+Q)
-    └── RequestProcW (TC callback)   repository password, kept in memory
-                                     per alias, passed as RESTIC_PASSWORD
+    ├── FsFindFirstW / FsFindNextW   \                   -> aliases from TCResticBrowser.ini
+    │                                \<alias>\{ids,snapshots,hosts,tags}\…
+    │                                    -> restic mount's tree from `restic snapshots --json`,
+    │                                       cached, re-read in the background after 60 s
+    │                                \<alias>\snapshots.csv -> generated from that tree
+    │                                \<alias>\repository_id.txt -> fixed size, ID read on copy
+    │                                …\<snapshot>\…      -> restic ls --json (one level) until
+    │                                    the background `restic ls` of the whole snapshot is
+    │                                    read, then from memory
+    ├── FsGetFileW                   restic dump (or the generated snapshots.csv,
+    │                                or the ID from `restic cat config --json`)
+    │                                -> temporary file -> atomic replace of the
+    │                                target (F5, F3, Ctrl+Q)
+    ├── RequestProcW (TC callback)   repository password, kept in memory
+    │                                per alias, passed as RESTIC_PASSWORD
+    └── LogProcW (TC callback)       unless ConnectionLog=no: one CONNECT \ for all
+                                     repositories when one is first used, before
+                                     its password is asked for; passwords, restic
+                                     runs and background work as MSGTYPE_DETAILS,
+                                     copies as MSGTYPE_TRANSFERCOMPLETE;
+                                     FsDisconnectW forgets every password and cache
 ```
 
 | Source | Responsibility |
 |---|---|
 | `main.c` | `DllMain`, the exported WFX entry points, virtual path routing, password sessions |
 | `config.c` | `TCResticBrowser.ini` lookup and parsing, `restic.exe` resolution |
-| `restic_cli.c` | `CreateProcessW` with an explicit handle list and environment block, pipes, timeouts and cancellation, snapshot and `ls` parsing |
+| `restic_cli.c` | `CreateProcessW` with an explicit handle list and environment block, pipes (also streamed line by line), timeouts and cancellation, `ls` parsing |
+| `repo_cache.c` | Per-repository cache: snapshot trees and whole-snapshot listings, background workers, dropped with the password |
+| `snapshot_tree.c` | The `restic mount` folder tree from `restic snapshots --json` (portable C11, no Win32) |
+| `snapshot_index.c` | Compact listing of a whole snapshot from streamed `restic ls --json` (portable C11, no Win32) |
+| `timestamp.c` | RFC 3339 timestamps as restic writes them (portable C11, no Win32) |
 | `json.c` | Strict read-only JSON reader (portable C11, no Win32) |
 | `log.c` | Optional diagnostic log (`[Logging] LogPath`), credential masking |
 

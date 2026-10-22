@@ -5,6 +5,110 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.1.0] – 2026-10-22
+
+### Added
+
+- **Folders of a snapshot open instantly once it has been read.** Every
+  `restic` run spends about a second (more on big or remote repositories)
+  before it lists anything, so entering a snapshot now also starts one
+  `restic ls` of the whole snapshot in the background; when it is done,
+  every folder of that snapshot is listed from memory without running
+  restic. Until then folders are listed one by one as before. The new
+  `SnapshotCacheMB=` setting limits the memory (default 512 MiB, about
+  five million files, `0` turns it off); the lists are dropped with the
+  repository's password.
+- **Configurable snapshot folder names.** `SnapshotTimeFormat=` sets the
+  time format of the snapshot folders, with the placeholders `YYYY`, `YY`,
+  `MM`, `DD`, `hh`, `mm`, `ss` and the zone `zzzz`, documented in the sample
+  `TCResticBrowser.ini`; the default is restic's colon-free
+  `2006-01-02_15-04-05`.
+- **Connection log.** The plugin appears in Total Commander's FTP
+  connections toolbar once a repository is used: its log window shows what takes time and why - passwords
+  accepted, refused and forgotten, snapshot lists and folders read by
+  restic with their durations, files copied, and the background work
+  (reading a whole snapshot, with progress every few seconds, and
+  re-reading the snapshot list) - and its Disconnect button forgets all
+  passwords and cached listings. Only Disconnect closes the toolbar again
+  (`🗑 Forget N Passwords` cannot); the new `ConnectionLog=no` keeps it
+  away.
+- **`snapshots.csv` in every repository folder.** A spreadsheet of all
+  snapshots - short ID, host, paths, time, tags and full ID, sorted by host
+  and paths regardless of case, then time - made from the snapshot list
+  already read and dated when restic listed the snapshots, as UTF-8 with a
+  byte-order mark for Excel. Columns are separated by the list separator of
+  the Windows regional settings, which Excel expects, or by the new
+  `CsvSeparator=` (`,`, `;`, `|` or `tab`).
+- **`repository_id.txt` in every repository folder**, with the
+  repository's full ID (`restic cat config`) on one CRLF-terminated line,
+  dated when restic was asked for it; restic is asked only when the file
+  is viewed or copied.
+- **The password dialog names the repository in its title**
+  (`<alias> - Restic repository password`), so password managers that
+  choose an entry by window title, such as KeePassXC Auto-Type, can fill
+  in the right password.
+
+### Changed
+
+- **Snapshots are arranged as `restic mount` shows them.** A repository now
+  holds `ids`, `snapshots`, `hosts` and `tags`, with snapshots by short ID,
+  by time, by host and by tag, and `latest` in every folder of snapshots,
+  following the rules of `restic mount` exactly (names `-1`, `-2`... for
+  equal times, tags such as `a/b` as `a_b`), plus `latest → <folder>` and
+  `latest → <short ID>` next to every `latest`, the same snapshot named by
+  where `restic mount`'s `latest` link points and by its ID. The snapshot
+  list is read once per repository and then answered from memory; once it
+  is older than a minute (like `restic mount`, configurable with the new
+  `SnapshotListRefreshSeconds=`) it is re-read in the background while the
+  old list stays in use, so moving between these folders waits for restic
+  only for a snapshot the cached list does not know yet. The snapshot
+  folders of version 2.0 (`<time>_[<short id>]`) are gone, so history and
+  hotlist entries that point into them need to be recreated.
+- **A `ResticPath=` that does not work is now an error.** When the
+  configured `restic.exe` did not exist, the plugin silently fell back to
+  `restic.exe` in the plugin folder or in `PATH`, so a different restic
+  could run without the user knowing. Now the configured binary is used or
+  nothing is, and the message names the setting, the configuration file and
+  the path that was tried. The same applies to values relative to the
+  current drive or folder (`C:restic.exe`, `\tools\restic.exe`), which were
+  ignored before. A bare name without an extension is now also found in the
+  plugin folder (`ResticPath=restic-custom` -> `restic-custom.exe`), not
+  only in `PATH`.
+- **A `restic.exe` that cannot be started is named in the error.** Instead
+  of "Failed to execute restic.exe.", the message gives the path of the
+  binary and the reason Windows reported. A file that is not a Windows
+  program at all (a truncated download, an HTML page saved as
+  `restic.exe`) is refused before it is started, instead of Windows
+  stopping Total Commander with its "Unsupported 16-Bit Application"
+  dialog.
+- **Builds pin the Visual Studio release.** The v2.0.0 DLLs that CI built
+  differed from the released ones, which were built with Visual Studio
+  18.11.0 while CI installed the newest release, 18.11.1, whose installer
+  brings a newer servicing release of the Windows SDK. CI now installs
+  the pinned release (18.11.1) from its fixed-version installer, checked by
+  SHA-256, and `build.cmd` warns when the local Visual Studio is another
+  one. Reproducing the v2.0.0 ZIP itself takes Visual Studio 18.11.0 with
+  the Windows SDK it installed. Each build also writes
+  `build\fingerprint-x64.txt` and `build\fingerprint-x86.txt`, which show
+  where two builds differ; see *When the hashes differ* in CONTRIBUTING.md.
+
+### Fixed
+
+- **A damaged repository can no longer fill Total Commander's memory with
+  warnings.** restic's error output is now kept up to 1 MiB (far more than
+  any error message) and the rest is read and dropped; v2.0.0 kept all of it.
+- **The diagnostic log lists every setting** with the configuration,
+  including `PasswordTimeoutSeconds`, `PasswordTimeoutResetOnUse` and the
+  new settings, which v2.0.0 left out.
+
+### Security
+
+- **`ResticPath=` can no longer name a batch file.** Windows runs `.bat`
+  and `.cmd` files through `cmd.exe`, which does not honour the quoting the
+  plugin applies to file names taken from a snapshot, so a crafted file
+  name in a backup could have run commands. Only Windows programs are
+  started now.
+
 ## [v2.0.0] – 2026-10-21
 
 First release of the fork. Version 2.0.0 keeps its releases apart from the
@@ -155,7 +259,6 @@ upstream 1.x line.
   only if no file or link of that name exists; otherwise another name is
   used.
 
-
 ## [v1.0.0] – 2026-10-18
 
 Upstream release of [Restic WFX Plugin](https://github.com/goldfix/Restic_WFX_Plugin)
@@ -173,5 +276,6 @@ by Pietro Partescano, the base of this fork was commit [c8481b43c9ab2867eee82471
   block.
 
 
+[v2.1.0]: https://github.com/michal-ruzicka/TCResticBrowser/compare/v2.0.0...v2.1.0
 [v2.0.0]: https://github.com/michal-ruzicka/TCResticBrowser/compare/c8481b43c9ab2867eee824719e3a9c6785db6c61...v2.0.0
 [v1.0.0]: https://github.com/goldfix/Restic_WFX_Plugin/tree/1.0.0

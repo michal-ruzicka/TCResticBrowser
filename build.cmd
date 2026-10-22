@@ -19,6 +19,9 @@ REM
 REM   src\                              (all source files — committed)
 REM   tmp\restic.exe                    (optional, git-ignored: enables the
 REM                                      live tests against a real restic)
+REM   build\fingerprint-x64.txt         (toolchain, libraries, options and
+REM   build\fingerprint-x86.txt          hashes of one build, for comparing
+REM                                      two builds; see CONTRIBUTING.md)
 REM   build\stage\                      (transient staging for ZIP contents)
 REM     TCResticBrowser.wfx             (32-bit plugin DLL)
 REM     TCResticBrowser.wfx64           (64-bit plugin DLL)
@@ -38,13 +41,20 @@ REM   - PowerShell 5.1+ (ships with Windows; used for Compress-Archive)
 REM ===========================================================================
 
 REM ---------------------------------------------------------------------------
-REM Pinned toolchain versions — update all three when upgrading (see
+REM Pinned toolchain versions — update all four when upgrading (see
 REM CONTRIBUTING.md, section "Reproducible Builds / Upgrading the pinned
 REM toolchain"):
+REM   EXPECTED_VS  — Visual Studio version (VsDevCmd banner); the CI workflow
+REM                  installs exactly this one (VS_BUILDTOOLS_* in build.yml)
 REM   EXPECTED_CL  — exact cl.exe version reported by "cl.exe /Bv"
 REM   CMAKE_T      — -vcvars_ver= token passed to VsDevCmd.bat (toolset major.minor)
 REM   CMAKE_SDK    — -DCMAKE_SYSTEM_VERSION= value (Windows SDK)
+REM
+REM With several Visual Studio installations, set TCRB_VSINSTALL to the folder
+REM of the one to use (CI sets it to C:\BuildTools); otherwise vswhere picks
+REM the newest.
 REM ---------------------------------------------------------------------------
+set EXPECTED_VS=18.11.1
 set EXPECTED_CL=19.51.36260
 set CMAKE_T=14.51
 set CMAKE_SDK=10.0.26100.0
@@ -72,7 +82,8 @@ REM Locate Build Tools via vswhere and activate the x64 compiler environment.
 REM cmake's VS generator instance detection fails for Build Tools installed
 REM without VS IDE, so we use the NMake generator and configure the compiler
 REM environment explicitly via VsDevCmd.bat for each target architecture.
-for /f "usebackq tokens=*" %%i in (`"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -products * -latest -property installationPath`) do set VSINSTALL=%%i
+set VSINSTALL=%TCRB_VSINSTALL%
+if not defined VSINSTALL for /f "usebackq tokens=*" %%i in (`"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -products * -latest -property installationPath`) do set VSINSTALL=%%i
 if not defined VSINSTALL (
     echo ERROR: Visual Studio Build Tools not found. Run setup-build-environment-example.cmd first.
     goto :error
@@ -80,6 +91,22 @@ if not defined VSINSTALL (
 set VSDEVCMD=%VSINSTALL%\Common7\Tools\VsDevCmd.bat
 call "%VSDEVCMD%" -startdir=none -arch=x64 -host_arch=x64 -vcvars_ver=%CMAKE_T%
 if errorlevel 1 goto :error
+
+echo.
+echo === Verify Visual Studio version ===
+REM A Visual Studio update can service the toolset libraries and the Windows
+REM SDK without changing the cl.exe version, so the Visual Studio version is
+REM checked as well. Like the cl.exe check below, a mismatch only warns.
+set VS_MISMATCH=0
+if not "%VSCMD_VER%"=="%EXPECTED_VS%" (
+    echo WARNING: Visual Studio version mismatch
+    echo   expected : %EXPECTED_VS%
+    echo   actual   : %VSCMD_VER% in !VSINSTALL!
+    echo   Binaries from this build may differ from builds using Visual Studio %EXPECTED_VS%.
+    set VS_MISMATCH=1
+) else (
+    echo Visual Studio %VSCMD_VER% OK
+)
 
 echo.
 echo === Verify compiler version ===
@@ -123,6 +150,10 @@ call :run_tests "%BUILD%\x64"
 if errorlevel 1 goto :error
 
 echo.
+echo === Fingerprint (x64) ===
+call :fingerprint x64
+
+echo.
 echo === Configure + build (x86) ===
 call "%VSDEVCMD%" -startdir=none -arch=x86 -host_arch=x64 -vcvars_ver=%CMAKE_T%
 if errorlevel 1 goto :error
@@ -136,6 +167,10 @@ echo === Test (x86) ===
 REM The 32-bit tests run under WOW64 and load the 32-bit plugin DLL.
 call :run_tests "%BUILD%\x86"
 if errorlevel 1 goto :error
+
+echo.
+echo === Fingerprint (x86) ===
+call :fingerprint x86
 
 echo.
 echo === Stage ===
@@ -211,6 +246,10 @@ echo.
 echo SHA-256 (ZIP):
 powershell -NoLogo -NoProfile -Command ^
     "$h = [System.Security.Cryptography.SHA256]::Create(); [System.BitConverter]::ToString($h.ComputeHash([System.IO.File]::ReadAllBytes('%ZIP%'))).Replace('-','').ToLower() + '  ' + (Split-Path '%ZIP%' -Leaf)"
+if %VS_MISMATCH%==1 (
+    echo.
+    echo WARNING: Visual Studio version mismatch ^(expected %EXPECTED_VS%, used %VSCMD_VER%^); binaries from this build can differ from what was expected. Reproducible build not achieved.
+)
 if %CL_MISMATCH%==1 (
     echo.
     if not defined ACTUAL_CL (
@@ -269,11 +308,22 @@ echo.
 echo === All checks passed ===
 goto :eof
 
+:fingerprint
+REM Writes build\fingerprint-%1.txt and prints it: everything that decides the
+REM bytes of the plugin DLL, with machine-specific folders hidden, so that the
+REM fingerprints of two builds can be compared line by line (fc). A failure
+REM only warns: the fingerprint is a diagnostic, not part of the release.
+REM -ExecutionPolicy Bypass applies to this one process, which runs a script
+REM from this repository; the default policy on Windows clients refuses .ps1.
+powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\build-fingerprint.ps1" -BuildDir "%BUILD%\%~1" -SourceDir "%SRC%" -OutFile "%BUILD%\fingerprint-%~1.txt"
+if errorlevel 1 echo WARNING: could not write build\fingerprint-%~1.txt
+exit /b 0
+
 :run_tests
 REM Runs every test program in %1 from the repository root, where the live
 REM tests look for tmp\restic.exe (they report [SKIP] when it is absent).
 pushd "%ROOT%"
-for %%t in (test_json test_config test_restic_cli test_plugin_dll) do (
+for %%t in (test_json test_snapshot_tree test_config test_restic_cli test_plugin_dll) do (
     echo --- %%t
     "%~1\%%t.exe"
     if errorlevel 1 (

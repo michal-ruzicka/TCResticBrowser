@@ -1,6 +1,8 @@
 #pragma once
 #include <windows.h>
 #include <stddef.h>
+#include "snapshot_index.h"
+#include "snapshot_tree.h"
 
 /**
  * Status codes returned by Restic CLI execution and JSON parsing functions.
@@ -36,12 +38,21 @@ typedef BOOL (*ResticCancelProc)(void* user_data);
 typedef BOOL (*ResticDumpProgressProc)(ULONGLONG bytes_written, void* user_data);
 
 /**
+ * Optional consumer of the child's stdout, called with each complete line (without its line
+ * break, not NUL-terminated) as soon as it arrives, and with the last line once the child has
+ * exited. Anything but RESTIC_OK stops the child and becomes the command's result.
+ */
+typedef ResticResult (*ResticLineProc)(const char* line, size_t len, void* user_data);
+
+/**
  * Optional execution controls. Pass NULL to use defaults (no timeout, not cancellable).
  */
 typedef struct {
     DWORD timeout_ms;            /* Maximum run time in milliseconds (0 = unlimited) */
     ResticCancelProc cancel_proc;/* Optional cancellation poll callback */
     void* cancel_ctx;            /* Opaque pointer forwarded to cancel_proc */
+    ResticLineProc line_proc;    /* Optional: stdout goes here line by line and is not kept */
+    void* line_ctx;              /* Opaque pointer forwarded to line_proc */
 } ResticExecOptions;
 
 /**
@@ -60,31 +71,10 @@ typedef struct {
 
 /**
  * Parses an ISO-8601 / RFC3339 timestamp (e.g. "2026-10-18T16:28:15.182004+02:00")
- * into a UTC WIN32 FILETIME. Rejects malformed values and invalid calendar dates.
+ * into a UTC WIN32 FILETIME. Rejects malformed values and invalid calendar dates
+ * (timestamp_parse() in timestamp.h has the exact rules).
  */
 BOOL restic_parse_iso8601_time(const char* iso_str, FILETIME* out_ft);
-
-/**
- * Formats a snapshot virtual directory name ("YYYY-MM-DD_HH-MM-SS_[short_id]") from a valid
- * ISO-8601 timestamp and a hexadecimal snapshot ID (only the first 8 characters are used).
- * Returns FALSE if the timestamp is invalid or the ID is not hexadecimal.
- */
-BOOL restic_format_snapshot_dirname(
-    const char* iso_time,
-    const char* snapshot_id,
-    WCHAR* out_dirname,
-    size_t out_capacity
-);
-
-/**
- * Extracts the hexadecimal snapshot short_id from a formatted snapshot directory name
- * ("YYYY-MM-DD_HH-MM-SS_[short_id]" -> "short_id").
- */
-BOOL restic_extract_snapshot_id(
-    const WCHAR* snapshot_dirname,
-    char* out_id,
-    size_t out_capacity
-);
 
 /**
  * Normalizes a WFX wide subpath (e.g. L"", L"\\", L"\\C\\Users\\Docs\\") into the canonical
@@ -113,18 +103,6 @@ WCHAR* restic_quote_arg(const WCHAR* arg);
 BOOL restic_describe_password(const WCHAR* password, WCHAR* out, size_t cap);
 
 /**
- * Parses the JSON array printed by `restic snapshots --json` (a literal `null` is treated as an
- * empty list) into directory entries named `YYYY-MM-DD_HH-MM-SS_[short_id]`. When two snapshots
- * share a short_id, both names carry the shortest longer prefix of their IDs that is unique.
- * Caller must free `*out_items` with `free()`.
- */
-ResticResult restic_parse_snapshots_json(
-    const char* json_text,
-    WIN32_FIND_DATAW** out_items,
-    size_t* out_count
-);
-
-/**
  * Parses the NDJSON stream printed by `restic ls --json <snapshot> <filter_path>` into the
  * direct children of `filter_path` (a normalized forward-slash path such as "/" or "/C/Users").
  * Returns RESTIC_ERR_PATH_NOT_FOUND when `filter_path` (other than "/") is absent from the stream
@@ -133,6 +111,18 @@ ResticResult restic_parse_snapshots_json(
 ResticResult restic_parse_ls_ndjson(
     const char* ndjson_text,
     const char* filter_path,
+    WIN32_FIND_DATAW** out_items,
+    size_t* out_count
+);
+
+/**
+ * Lists folder `subpath_w` (a WFX subpath as for restic_list_directory) of a whole-snapshot index
+ * (snapshot_index.h) into directory entries exactly as restic_list_directory() would report them.
+ * RESTIC_ERR_PATH_NOT_FOUND when it is not a folder of the snapshot. Caller must free `*out_items`.
+ */
+ResticResult restic_list_index_directory(
+    const SnapshotIndex* index,
+    const WCHAR* subpath_w,
     WIN32_FIND_DATAW** out_items,
     size_t* out_count
 );
@@ -157,17 +147,37 @@ ResticResult restic_exec_command(
  */
 void restic_free_command_output(ResticCommandOutput* result);
 
+/* A repository ID as `restic cat config` prints it: 64 lowercase hexadecimal characters */
+#define RESTIC_REPOSITORY_ID_CHARS 64
+
 /**
- * Runs `restic snapshots --json --no-lock` and returns Level 1 directory entries.
- * On failure `out_error_msg` (optional) receives the reason reported by Restic.
+ * Runs `restic cat config --json --no-lock` and copies the repository's ID into `out_id`
+ * (RESTIC_REPOSITORY_ID_CHARS + 1 bytes). An ID that is not 64 lowercase hexadecimal characters is
+ * RESTIC_ERR_JSON_PARSE. On failure `out_error_msg` (optional) receives the reason reported by Restic.
+ */
+ResticResult restic_read_repository_id(
+    const WCHAR* restic_exe,
+    const WCHAR* repo_target,
+    const WCHAR* password,
+    const ResticExecOptions* options,
+    char* out_id,
+    WCHAR* out_error_msg,
+    size_t err_capacity
+);
+
+/**
+ * Runs `restic snapshots --json --no-lock` and builds the restic mount folder tree from it
+ * (snapshot_tree.h), naming snapshot folders by `time_format` (UTF-8, NULL: the default); release
+ * it with snapshot_tree_free(), its snapshot_tree_listed_at() the time restic was started. On
+ * failure `out_error_msg` (optional) receives the reason reported by Restic.
  */
 ResticResult restic_list_snapshots(
     const WCHAR* restic_exe,
     const WCHAR* repo_target,
     const WCHAR* password,
+    const char* time_format,
     const ResticExecOptions* options,
-    WIN32_FIND_DATAW** out_items,
-    size_t* out_count,
+    SnapshotTree** out_tree,
     WCHAR* out_error_msg,
     size_t err_capacity
 );
@@ -188,6 +198,39 @@ ResticResult restic_list_directory(
     size_t* out_count,
     WCHAR* out_error_msg,
     size_t err_capacity
+);
+
+/**
+ * Lists a whole snapshot (`restic ls --json --no-lock <snapshot_id>`) into `index`, line by line as
+ * restic prints it, and finishes the index. `snapshot_id` must be hexadecimal. Fails with
+ * RESTIC_ERR_JSON_PARSE on unexpected output and RESTIC_ERR_OUT_OF_MEMORY when the index runs out
+ * of memory or over its limit (`*out_index_status` tells which). On failure `out_error_msg`
+ * (optional) receives the reason reported by Restic.
+ */
+ResticResult restic_list_snapshot_index(
+    const WCHAR* restic_exe,
+    const WCHAR* repo_target,
+    const WCHAR* password,
+    const char* snapshot_id,
+    const ResticExecOptions* options,
+    SnapshotIndex* index,
+    SnapshotIndexStatus* out_index_status,
+    WCHAR* out_error_msg,
+    size_t err_capacity
+);
+
+/**
+ * Writes `len` bytes of `data` to `local_dest_path` the way restic_dump_file() writes a file: into
+ * a temporary file in the target folder that replaces the target only once it is complete, a
+ * pre-existing target left untouched on any failure; with `overwrite` FALSE an existing target is
+ * refused. `mtime` (optional) is applied to the new file. RESTIC_ERR_LOCAL_WRITE on failure.
+ */
+ResticResult restic_write_local_file(
+    const WCHAR* local_dest_path,
+    const void* data,
+    size_t len,
+    BOOL overwrite,
+    const FILETIME* mtime
 );
 
 /**

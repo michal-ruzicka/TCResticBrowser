@@ -88,3 +88,5 @@ int    __stdcall FsGetFile(char* RemoteName, char* LocalName, int CopyFlags, Rem
 int    __stdcall FsGetFileW(WCHAR* RemoteName, WCHAR* LocalName, int CopyFlags, RemoteInfoStruct* ri);
 int    __stdcall FsExecuteFile(HWND MainWin, char* RemoteName, char* Verb);
 int    __stdcall FsExecuteFileW(HWND MainWin, WCHAR* RemoteName, WCHAR* Verb);
+BOOL   __stdcall FsDisconnect(char* DisconnectRoot);
+BOOL   __stdcall FsDisconnectW(WCHAR* DisconnectRoot);

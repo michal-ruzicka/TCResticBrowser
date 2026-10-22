@@ -13,6 +13,8 @@
 #else
 #include <stdlib.h>
 #endif
+#include <stdarg.h>
+#include <stdio.h>
 #include <wchar.h>
 #include <string.h>
 
@@ -406,77 +408,118 @@ static BOOL find_in_path_env(const WCHAR* name, WCHAR* out_path, size_t out_capa
     return found;
 }
 
-BOOL config_resolve_restic_path(const WCHAR* ini_path, WCHAR* out_path, size_t out_capacity) {
+/* Fills `error` (if given) with a printf-style message; always NUL-terminated */
+static void set_error(WCHAR* error, size_t error_capacity, const WCHAR* fmt, ...) {
+    if (!error || error_capacity == 0) return;
+    va_list args;
+    va_start(args, fmt);
+    _vsnwprintf_s(error, error_capacity, _TRUNCATE, fmt, args);
+    va_end(args);
+}
+
+/* Looks for `name` (".exe" appended when it has no extension) in the plugin folder, then in PATH */
+static BOOL find_in_plugin_dir_or_path(const WCHAR* name, WCHAR* out_path, size_t out_capacity) {
+    WCHAR file_name[MAX_PATH];
+    BOOL add_ext = wcschr(name, L'.') == NULL;
+    if (wcslen(name) + (add_ext ? 4 : 0) >= _countof(file_name)) return FALSE;
+    wcscpy_s(file_name, _countof(file_name), name);
+    if (add_ext) wcscat_s(file_name, _countof(file_name), L".exe");
+
+    WCHAR candidate[CONFIG_MAX_PATH];
+    if (g_plugin_dir[0] != L'\0' && join_path(g_plugin_dir, file_name, candidate, CONFIG_MAX_PATH) &&
+        file_exists(candidate)) {
+        wcsncpy_s(out_path, out_capacity, candidate, _TRUNCATE);
+        return TRUE;
+    }
+    return find_in_path_env(file_name, out_path, out_capacity);
+}
+
+BOOL config_resolve_restic_path(
+    const WCHAR* ini_path,
+    WCHAR* out_path,
+    size_t out_capacity,
+    WCHAR* error,
+    size_t error_capacity
+) {
+    if (error && error_capacity > 0) error[0] = L'\0';
     if (!out_path || out_capacity == 0) return FALSE;
     out_path[0] = L'\0';
 
-    WCHAR configured_val[CONFIG_MAX_PATH] = {0};
-
     /* Read [Settings] ResticPath (first occurrence) if an existing INI file is provided */
+    WCHAR configured_val[CONFIG_MAX_PATH] = {0};
+    BOOL configured = FALSE, too_long = FALSE;
     WCHAR* ini_text = (ini_path && file_exists(ini_path)) ? read_ini_text(ini_path) : NULL;
     if (ini_text) {
         IniReader reader = {ini_text, NULL};
         WCHAR *key = NULL, *value = NULL;
         while (ini_next_entry(&reader, &key, &value)) {
             if (ini_in_section(&reader, L"Settings") && _wcsicmp(key, L"ResticPath") == 0) {
-                /* An over-long value is ignored rather than truncated into a different path */
-                if (wcslen(value) < CONFIG_MAX_PATH) {
-                    wcsncpy_s(configured_val, CONFIG_MAX_PATH, value, _TRUNCATE);
-                }
+                /* An over-long value is refused rather than truncated into a different path */
+                configured = value[0] != L'\0';
+                too_long   = wcslen(value) >= CONFIG_MAX_PATH;
+                if (!too_long) wcsncpy_s(configured_val, CONFIG_MAX_PATH, value, _TRUNCATE);
                 break;
             }
         }
         free(ini_text);
     }
 
-    /* 1. Explicit [Settings] ResticPath priority */
-    if (configured_val[0] != L'\0' && _wcsicmp(configured_val, CONFIG_DEFAULT_RESTIC_EXE) != 0) {
-        if (has_path_component(configured_val)) {
-            /* "C:restic.exe" and "\\tools\\restic.exe" depend on the current drive or directory:
-               neither absolute nor relative to the plugin folder, they are ignored */
-            WCHAR candidate[CONFIG_MAX_PATH] = {0};
-            if (config_is_absolute_path(configured_val)) {
-                wcsncpy_s(candidate, CONFIG_MAX_PATH, configured_val, _TRUNCATE);
-            } else if (is_relative_path(configured_val) && g_plugin_dir[0] != L'\0') {
-                join_path(g_plugin_dir, configured_val, candidate, CONFIG_MAX_PATH);
-            }
-            if (candidate[0] != L'\0' && file_exists(candidate)) {
+    /* Not found: the bare name stays in out_path (restic_exec_command refuses it, never searching
+       the cwd) and `error` says why */
+    wcsncpy_s(out_path, out_capacity, CONFIG_DEFAULT_RESTIC_EXE, _TRUNCATE);
+
+    /* 1. An explicit [Settings] ResticPath is used as written or not at all: falling back to
+          another restic.exe would hide that the configured one is missing */
+    if (configured) {
+        WCHAR candidate[CONFIG_MAX_PATH] = {0};
+        if (too_long) {
+            set_error(error, error_capacity, L"ResticPath in %ls is too long.", ini_path);
+            return FALSE;
+        }
+        if (!has_path_component(configured_val)) {
+            /* Bare name such as "restic-custom.exe" or "restic-custom": plugin folder, then PATH */
+            if (find_in_plugin_dir_or_path(configured_val, candidate, CONFIG_MAX_PATH)) {
                 wcsncpy_s(out_path, out_capacity, candidate, _TRUNCATE);
                 return TRUE;
             }
-        } else {
-            /* Bare custom executable name (e.g. "restic_custom.exe") */
-            if (g_plugin_dir[0] != L'\0') {
-                WCHAR local_custom[CONFIG_MAX_PATH] = {0};
-                join_path(g_plugin_dir, configured_val, local_custom, CONFIG_MAX_PATH);
-                if (file_exists(local_custom)) {
-                    wcsncpy_s(out_path, out_capacity, local_custom, _TRUNCATE);
-                    return TRUE;
-                }
-            }
-            if (find_in_path_env(configured_val, out_path, out_capacity)) {
-                return TRUE;
-            }
+            set_error(error, error_capacity,
+                      L"ResticPath=%ls (set in %ls) was found neither in the plugin folder nor in PATH.",
+                      configured_val, ini_path);
+            return FALSE;
         }
-    }
-
-    /* 2. Check <plugin_dir>\restic.exe */
-    if (g_plugin_dir[0] != L'\0') {
-        WCHAR plugin_restic[CONFIG_MAX_PATH] = {0};
-        join_path(g_plugin_dir, CONFIG_DEFAULT_RESTIC_EXE, plugin_restic, CONFIG_MAX_PATH);
-        if (file_exists(plugin_restic)) {
-            wcsncpy_s(out_path, out_capacity, plugin_restic, _TRUNCATE);
-            return TRUE;
+        if (config_is_absolute_path(configured_val)) {
+            wcsncpy_s(candidate, CONFIG_MAX_PATH, configured_val, _TRUNCATE);
+        } else if (!is_relative_path(configured_val)) {
+            /* "C:restic.exe" and "\\tools\\restic.exe" depend on the current drive or directory */
+            set_error(error, error_capacity,
+                      L"ResticPath=%ls (set in %ls) depends on the current drive or folder. Use a full path "
+                      L"such as C:\\Tools\\restic.exe or a path relative to the plugin folder.",
+                      configured_val, ini_path);
+            return FALSE;
+        } else if (g_plugin_dir[0] == L'\0' || !join_path(g_plugin_dir, configured_val, candidate, CONFIG_MAX_PATH)) {
+            set_error(error, error_capacity,
+                      L"ResticPath=%ls (set in %ls) cannot be resolved against the plugin folder.",
+                      configured_val, ini_path);
+            return FALSE;
         }
-    }
-
-    /* 3. Fallback to the directories listed in the PATH environment variable */
-    if (find_in_path_env(CONFIG_DEFAULT_RESTIC_EXE, out_path, out_capacity)) {
+        if (!file_exists(candidate)) {
+            set_error(error, error_capacity, L"ResticPath=%ls (set in %ls) does not exist or is not a file: %ls",
+                      configured_val, ini_path, candidate);
+            return FALSE;
+        }
+        wcsncpy_s(out_path, out_capacity, candidate, _TRUNCATE);
         return TRUE;
     }
 
-    /* Not found: return the bare name (restic_exec_command refuses it, never searching the cwd) */
-    wcsncpy_s(out_path, out_capacity, CONFIG_DEFAULT_RESTIC_EXE, _TRUNCATE);
+    /* 2. <plugin_dir>\restic.exe, 3. the directories listed in PATH */
+    WCHAR found[CONFIG_MAX_PATH] = {0};
+    if (find_in_plugin_dir_or_path(CONFIG_DEFAULT_RESTIC_EXE, found, CONFIG_MAX_PATH)) {
+        wcsncpy_s(out_path, out_capacity, found, _TRUNCATE);
+        return TRUE;
+    }
+    set_error(error, error_capacity,
+              L"restic.exe not found. Set ResticPath in TCResticBrowser.ini or place restic.exe in the "
+              L"plugin folder or in a folder listed in PATH.");
     return FALSE;
 }
 
@@ -514,8 +557,8 @@ static BOOL upsert_repo_entry(
     return TRUE;
 }
 
-/* Parses a plain decimal number of seconds (digits only, at most 4294967295) */
-static BOOL parse_seconds(const WCHAR* text, DWORD* out) {
+/* Parses a plain decimal number (digits only, at most 4294967295) */
+static BOOL parse_decimal(const WCHAR* text, DWORD* out) {
     if (!text || text[0] == L'\0') return FALSE;
     unsigned long long value = 0;
     for (const WCHAR* p = text; *p; ++p) {
@@ -533,14 +576,26 @@ static BOOL parse_yes(const WCHAR* text) {
                     wcscmp(text, L"1") == 0);
 }
 
+/* TRUE for no/false/off/0 (case-insensitive) */
+static BOOL parse_no(const WCHAR* text) {
+    return text && (_wcsicmp(text, L"no") == 0 || _wcsicmp(text, L"false") == 0 || _wcsicmp(text, L"off") == 0 ||
+                    wcscmp(text, L"0") == 0);
+}
+
 BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
     if (!out_config) return FALSE;
     memset(out_config, 0, sizeof(ResticConfig));
     wcsncpy_s(out_config->root_name, MAX_PATH, CONFIG_DEFAULT_ROOT_NAME, _TRUNCATE);
     out_config->password_timeout_s = CONFIG_DEFAULT_PASSWORD_TIMEOUT_S;
+    out_config->snapshot_cache_mb  = CONFIG_DEFAULT_SNAPSHOT_CACHE_MB;
+    out_config->snapshot_list_refresh_s = CONFIG_DEFAULT_SNAPSHOT_LIST_REFRESH_S;
+    out_config->connection_log     = TRUE;
+    strcpy_s(out_config->snapshot_time_format, sizeof(out_config->snapshot_time_format),
+             SNAPSHOT_TREE_DEFAULT_TIME_FORMAT);
 
     if (!ini_path || ini_path[0] == L'\0') {
-        config_resolve_restic_path(NULL, out_config->restic_path, CONFIG_MAX_PATH);
+        config_resolve_restic_path(NULL, out_config->restic_path, CONFIG_MAX_PATH, out_config->restic_path_error,
+                                   CONFIG_ERROR_CHARS);
         return FALSE;
     }
 
@@ -549,7 +604,8 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
         wcsncpy_s(out_config->ini_path, CONFIG_MAX_PATH, ini_path, _TRUNCATE);
     }
 
-    config_resolve_restic_path(out_config->ini_path, out_config->restic_path, CONFIG_MAX_PATH);
+    config_resolve_restic_path(out_config->ini_path, out_config->restic_path, CONFIG_MAX_PATH,
+                               out_config->restic_path_error, CONFIG_ERROR_CHARS);
 
     if (!file_exists(out_config->ini_path)) {
         return FALSE;
@@ -565,6 +621,11 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
     BOOL log_path_seen = FALSE;
     BOOL timeout_seen = FALSE;
     BOOL reset_seen = FALSE;
+    BOOL cache_seen = FALSE;
+    BOOL format_seen = FALSE;
+    BOOL refresh_seen = FALSE;
+    BOOL connection_log_seen = FALSE;
+    BOOL csv_separator_seen = FALSE;
     IniReader reader = {ini_text, NULL};
     WCHAR *alias = NULL, *target = NULL;
     while (ini_next_entry(&reader, &alias, &target)) {
@@ -579,10 +640,56 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
         if (ini_in_section(&reader, L"Settings") && _wcsicmp(alias, L"PasswordTimeoutSeconds") == 0) {
             /* First occurrence wins; anything but a plain decimal number keeps the default */
             DWORD seconds = 0;
-            if (!timeout_seen && parse_seconds(target, &seconds)) {
+            if (!timeout_seen && parse_decimal(target, &seconds)) {
                 out_config->password_timeout_s = seconds;
             }
             timeout_seen = TRUE;
+            continue;
+        }
+        if (ini_in_section(&reader, L"Settings") && _wcsicmp(alias, L"SnapshotTimeFormat") == 0) {
+            /* First occurrence wins; an unusable format keeps the default and is reported */
+            char format[SNAPSHOT_TREE_TIME_FORMAT_MAX * 4 + 1];
+            if (!format_seen) {
+                int n = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, target, -1, format, (int)sizeof(format), NULL, NULL);
+                if (n > 0 && snapshot_tree_time_format_valid(format)) {
+                    strcpy_s(out_config->snapshot_time_format, sizeof(out_config->snapshot_time_format), format);
+                } else {
+                    out_config->snapshot_time_format_invalid = TRUE;
+                }
+            }
+            format_seen = TRUE;
+            continue;
+        }
+        if (ini_in_section(&reader, L"Settings") && _wcsicmp(alias, L"CsvSeparator") == 0) {
+            /* First occurrence wins; anything else keeps the default (the Windows list separator) */
+            if (!csv_separator_seen) {
+                if (wcscmp(target, L",") == 0 || wcscmp(target, L";") == 0 || wcscmp(target, L"|") == 0) {
+                    out_config->csv_separator = (char)target[0];
+                } else if (_wcsicmp(target, L"tab") == 0) {
+                    out_config->csv_separator = '\t';
+                }
+            }
+            csv_separator_seen = TRUE;
+            continue;
+        }
+        if (ini_in_section(&reader, L"Settings") && _wcsicmp(alias, L"ConnectionLog") == 0) {
+            /* First occurrence wins; anything but a recognised "no" keeps the default (yes) */
+            if (!connection_log_seen) out_config->connection_log = !parse_no(target);
+            connection_log_seen = TRUE;
+            continue;
+        }
+        if (ini_in_section(&reader, L"Settings") && _wcsicmp(alias, L"SnapshotListRefreshSeconds") == 0) {
+            /* First occurrence wins; anything but a plain decimal number keeps the default */
+            DWORD seconds = 0;
+            if (!refresh_seen && parse_decimal(target, &seconds)) out_config->snapshot_list_refresh_s = seconds;
+            refresh_seen = TRUE;
+            continue;
+        }
+        if (ini_in_section(&reader, L"Settings") && _wcsicmp(alias, L"SnapshotCacheMB") == 0) {
+            /* First occurrence wins; anything but a plain decimal number keeps the default */
+            DWORD mb = 0;
+            if (!cache_seen && parse_decimal(target, &mb)) out_config->snapshot_cache_mb = mb;
+            cache_seen = TRUE;
             continue;
         }
         if (ini_in_section(&reader, L"Settings") && _wcsicmp(alias, L"PasswordTimeoutResetOnUse") == 0) {

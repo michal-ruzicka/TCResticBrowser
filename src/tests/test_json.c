@@ -295,8 +295,9 @@ static void test_large_document(void) {
     size_t n = 0;
     buf[n++] = '[';
     for (int i = 0; i < COUNT; ++i) {
-        n += (size_t)snprintf(buf + n, sizeof(buf) - n, "%s{\"n\":%d,\"s\":\"x%d\"}",
-                              i ? "," : "", i, i);
+        int wrote = snprintf(buf + n, sizeof(buf) - n, "%s{\"n\":%d,\"s\":\"x%d\"}", i ? "," : "", i, i);
+        if (wrote < 0 || (size_t)wrote >= sizeof(buf) - n) break; /* Cut short: the element count below fails */
+        n += (size_t)wrote;
     }
     buf[n++] = ']';
     JsonDoc* d = json_parse(buf, n);
@@ -350,6 +351,8 @@ int main(void) {
     _CrtSetReportFile(_CRT_WARN, _CRTDBG_FILE_STDERR);
     _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
     _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
+    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE); /* Invalid parameters, e.g. an overflowing wcscat_s */
+    _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
 #endif
     printf("Running minimal JSON reader unit tests...\n");
 

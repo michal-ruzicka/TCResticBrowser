@@ -18,6 +18,7 @@
 #include <wchar.h>
 #include "fsplugin.h"
 #include "restic_cli.h"
+#include "repo_cache.h"
 
 static int g_tests_run    = 0;
 static int g_tests_failed = 0;
@@ -125,34 +126,6 @@ static void test_iso8601_parsing(void) {
     EXPECT_TRUE(!restic_parse_iso8601_time("2026-10-18T10:00:00.Z", &ft), "Fraction without digits");
 }
 
-/* Snapshot directory naming and ID extraction */
-static void test_snapshot_naming(void) {
-    WCHAR dirname[MAX_PATH] = {0};
-    const char* full_id = "29095f00dedf06d1ed449d29e286bd48c3291aed7d35e5faa51954a61a4ae7a5";
-
-    EXPECT_TRUE(restic_format_snapshot_dirname("2026-10-18T16:28:15.182004+02:00", full_id, dirname, MAX_PATH),
-                "Format snapshot directory name");
-    EXPECT_WSTR_EQ(dirname, L"2026-10-18_16-28-15_[29095f00]", "Directory name format");
-
-    EXPECT_TRUE(!restic_format_snapshot_dirname("2026-10-18T16:28:15Z", "xyz123", dirname, MAX_PATH),
-                "Reject non-hex snapshot ID");
-    EXPECT_TRUE(!restic_format_snapshot_dirname("2026-10-18T16:28:15Z", "", dirname, MAX_PATH), "Reject empty ID");
-    EXPECT_TRUE(!restic_format_snapshot_dirname("..\\..\\evil\\path\\xx", "abcd1234", dirname, MAX_PATH),
-                "Reject malformed time (no path separators may leak into the name)");
-    EXPECT_TRUE(!restic_format_snapshot_dirname("2026-10-18T16:28:15Z", "abcd1234", dirname, 5),
-                "Reject undersized output buffer");
-
-    char id[32] = {0};
-    EXPECT_TRUE(restic_format_snapshot_dirname("2026-10-18T16:28:15Z", full_id, dirname, MAX_PATH), "Format again");
-    EXPECT_TRUE(restic_extract_snapshot_id(dirname, id, sizeof(id)), "Extract short_id");
-    EXPECT_STR_EQ(id, "29095f00", "Extracted short_id");
-    EXPECT_TRUE(!restic_extract_snapshot_id(L"no_brackets", id, sizeof(id)), "Reject missing brackets");
-    EXPECT_TRUE(!restic_extract_snapshot_id(L"bad_[not_hex!]", id, sizeof(id)), "Reject non-hex ID");
-    EXPECT_TRUE(!restic_extract_snapshot_id(L"empty_[]", id, sizeof(id)), "Reject empty brackets");
-    EXPECT_TRUE(!restic_extract_snapshot_id(L"reversed_]abcd[", id, sizeof(id)), "Reject reversed brackets");
-    EXPECT_TRUE(!restic_extract_snapshot_id(L"long_[0123456789abcdef]", id, 8), "Reject ID larger than buffer");
-}
-
 /* WFX path -> Restic filter path, and command-line quoting */
 static void test_path_and_quote_helpers(void) {
     char norm[256] = {0};
@@ -250,62 +223,6 @@ static void test_describe_password(void) {
     WCHAR tiny[8];
     EXPECT_TRUE(restic_describe_password(L" x ", tiny, _countof(tiny)) && wcslen(tiny) < _countof(tiny),
                 "Truncated to a small buffer");
-}
-
-static void test_parse_snapshots_json(void) {
-    const char* sample_json =
-        "[\n"
-        "  {\"time\": \"2026-10-18T16:28:15.182004+02:00\", \"id\": \"29095f00dedf06d1ed449d29e286bd48c3291aed7d35e5faa51954a61a4ae7a5\", \"short_id\": \"29095f00\"},\n"
-        "  {\"time\": \"2026-10-19T08:05:00Z\", \"id\": \"abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890\"},\n"
-        "  {\"time\": \"not-a-time\", \"id\": \"aaaaaaaa\"},\n"
-        "  {\"time\": \"2026-10-20T08:05:00Z\", \"id\": \"not-hex-id\"},\n"
-        "  {\"id\": \"bbbbbbbb\"},\n"
-        "  42\n"
-        "]";
-
-    WIN32_FIND_DATAW* items = NULL;
-    size_t count = 0;
-    ResticResult res = restic_parse_snapshots_json(sample_json, &items, &count);
-    EXPECT_TRUE(res == RESTIC_OK, "Parse snapshots array");
-    EXPECT_TRUE(count == 2, "Malformed entries are skipped, valid ones kept");
-    EXPECT_WSTR_EQ(items[0].cFileName, L"2026-10-18_16-28-15_[29095f00]", "Snapshot 0 name");
-    EXPECT_WSTR_EQ(items[1].cFileName, L"2026-10-19_08-05-00_[abcdef12]", "Snapshot 1 name (falls back to id prefix)");
-    EXPECT_TRUE(is_dir_entry(&items[0]), "Snapshot is a directory");
-    EXPECT_TRUE(ft_u64(items[0].ftLastWriteTime) != 0, "Snapshot has a modification time");
-    free(items);
-
-    /* Two snapshots sharing a short_id get the shortest unique ID prefix; the others keep 8 characters */
-    const char* colliding_json =
-        "[{\"time\":\"2026-10-18T10:00:00Z\",\"short_id\":\"12345678\","
-        "\"id\":\"1234567890aa000000000000000000000000000000000000000000000000000a\"},"
-        " {\"time\":\"2026-10-18T11:00:00Z\",\"short_id\":\"fedcba98\","
-        "\"id\":\"fedcba9800000000000000000000000000000000000000000000000000000000\"},"
-        " {\"time\":\"2026-10-18T12:00:00Z\",\"short_id\":\"12345678\","
-        "\"id\":\"1234567890ab000000000000000000000000000000000000000000000000000b\"}]";
-    res = restic_parse_snapshots_json(colliding_json, &items, &count);
-    EXPECT_TRUE(res == RESTIC_OK && count == 3, "Parse snapshots with a shared short_id");
-    if (res == RESTIC_OK && count == 3) {
-        EXPECT_WSTR_EQ(items[0].cFileName, L"2026-10-18_10-00-00_[1234567890aa]", "First colliding ID lengthened");
-        EXPECT_WSTR_EQ(items[1].cFileName, L"2026-10-18_11-00-00_[fedcba98]", "Unique short_id kept");
-        EXPECT_WSTR_EQ(items[2].cFileName, L"2026-10-18_12-00-00_[1234567890ab]", "Second colliding ID lengthened");
-        char id[65];
-        EXPECT_TRUE(restic_extract_snapshot_id(items[2].cFileName, id, sizeof(id)) && strcmp(id, "1234567890ab") == 0,
-                    "The longer prefix is what restic gets");
-    }
-    free(items);
-
-    res = restic_parse_snapshots_json("[]", &items, &count);
-    EXPECT_TRUE(res == RESTIC_OK && count == 0 && items == NULL, "Empty array");
-    res = restic_parse_snapshots_json("null", &items, &count);
-    EXPECT_TRUE(res == RESTIC_OK && count == 0 && items == NULL, "Literal null is an empty list");
-    res = restic_parse_snapshots_json("{not_an_array}", &items, &count);
-    EXPECT_TRUE(res == RESTIC_ERR_JSON_PARSE, "Malformed JSON");
-    res = restic_parse_snapshots_json("{\"a\":1}", &items, &count);
-    EXPECT_TRUE(res == RESTIC_ERR_JSON_PARSE, "Object instead of array");
-    res = restic_parse_snapshots_json("", &items, &count);
-    EXPECT_TRUE(res == RESTIC_ERR_JSON_PARSE, "Empty text");
-    res = restic_parse_snapshots_json(NULL, &items, &count);
-    EXPECT_TRUE(res == RESTIC_ERR_INVALID_ARG, "NULL text");
 }
 
 #define HEADER_LINE "{\"time\":\"2026-10-18T16:28:15+02:00\",\"id\":\"29095f00\",\"message_type\":\"snapshot\"}\r\n"
@@ -561,6 +478,54 @@ static void test_exec_limits_and_failures(void) {
     res = restic_exec_command(L"C:\\no\\such\\dir\\restic.exe", L"r", L"p", L"version", NULL, &out);
     EXPECT_TRUE(res == RESTIC_ERR_SPAWN_FAILED, "Missing executable");
     EXPECT_TRUE(out.output == NULL, "No buffers allocated on spawn failure");
+    EXPECT_TRUE(wcsstr(out.error_message, L"Cannot start C:\\no\\such\\dir\\restic.exe") != NULL &&
+                wcsstr(out.error_message, L"(Windows error ") != NULL,
+                "A spawn failure names the binary and the Windows error");
+
+    /*
+     * Files that exist but are no Windows program (text, a DOS "MZ" stub without "PE\0\0") are
+     * refused before CreateProcessW: on 64-bit Windows it would show the modal "Unsupported 16-Bit
+     * Application" dialog and stop the test run until someone clicks it
+     */
+    static const struct {
+        const char* bytes;
+        DWORD size;
+    } not_programs[] = {
+        {"not a program", 13},
+        {"MZ" "\x90\0\x03\0\0\0\x04\0\0\0\xff\xff\0\0\xb8\0\0\0\0\0\0\0\x40\0\0\0\0\0\0\0"
+         "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x40\0\0\0" "NE\0\0", 68},
+    };
+    WCHAR not_exe[MAX_PATH], dest[MAX_PATH], err_text[512];
+    GetTempPathW(MAX_PATH, not_exe);
+    wcscat_s(not_exe, MAX_PATH, L"restic_test_not_a_program.exe");
+    swprintf_s(dest, MAX_PATH, L"%ls.out", not_exe);
+    for (size_t i = 0; i < _countof(not_programs); ++i) {
+        HANDLE h = CreateFileW(not_exe, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        DWORD written = 0;
+        EXPECT_TRUE(h != INVALID_HANDLE_VALUE &&
+                    WriteFile(h, not_programs[i].bytes, not_programs[i].size, &written, NULL),
+                    "Create a fake restic.exe");
+        CloseHandle(h);
+        res = restic_exec_command(not_exe, L"r", L"p", L"version", NULL, &out);
+        EXPECT_TRUE(res == RESTIC_ERR_SPAWN_FAILED && wcsstr(out.error_message, not_exe) != NULL &&
+                    wcsstr(out.error_message, L"not a Windows program") != NULL,
+                    "A file that is no Windows program is refused with its path");
+        DeleteFileW(dest);
+        res = restic_dump_file(not_exe, L"r", L"p", "deadbeef", L"/f.txt", dest, FALSE, NULL, 0, NULL, NULL,
+                               err_text, _countof(err_text));
+        EXPECT_TRUE(res == RESTIC_ERR_SPAWN_FAILED && wcsstr(err_text, L"not a Windows program") != NULL &&
+                    GetFileAttributesW(dest) == INVALID_FILE_ATTRIBUTES,
+                    "restic_dump_file refuses it too and writes nothing");
+    }
+    DeleteFileW(not_exe);
+
+    /* A folder named like the binary passes the check and fails in CreateProcessW, with the reason */
+    CreateDirectoryW(not_exe, NULL);
+    res = restic_exec_command(not_exe, L"r", L"p", L"version", NULL, &out);
+    EXPECT_TRUE(res == RESTIC_ERR_SPAWN_FAILED && wcsstr(out.error_message, not_exe) != NULL &&
+                wcsstr(out.error_message, L"(Windows error ") != NULL && wcsstr(out.error_message, L"%1") == NULL,
+                "A spawn failure names the binary and the Windows reason, with inserts filled in");
+    RemoveDirectoryW(not_exe);
     res = restic_exec_command(L"restic.exe", L"r", L"p", L"version", NULL, &out);
     EXPECT_TRUE(res == RESTIC_ERR_SPAWN_FAILED, "Bare executable names are refused (no cwd search)");
     res = restic_exec_command(L"", L"r", L"p", L"version", NULL, &out);
@@ -606,9 +571,141 @@ static void test_exec_large_output_and_long_args(void) {
     restic_free_command_output(&out);
 }
 
+/* The cache keeps what was read for one repository when another one is forgotten meanwhile */
+static void test_repo_cache_generations(void) {
+    const char* fmt = SNAPSHOT_TREE_DEFAULT_TIME_FORMAT;
+    SnapshotTree *t1 = NULL, *t2 = NULL, *t3 = NULL, *t4 = NULL;
+    EXPECT_TRUE(snapshot_tree_build("null", 4, NULL, &t1) == SNAPSHOT_TREE_OK && snapshot_tree_build("null", 4, NULL, &t2) == SNAPSHOT_TREE_OK &&
+                snapshot_tree_build("null", 4, NULL, &t3) == SNAPSHOT_TREE_OK && snapshot_tree_build("null", 4, NULL, &t4) == SNAPSHOT_TREE_OK,
+                "Trees to cache");
+    repo_cache_clear();
+    ULONGLONG age = 0, g = repo_cache_generation();
+    repo_cache_forget(L"Other");                         /* E.g. its password timed out meanwhile */
+    repo_cache_put_tree(L"RepoB", L"C:\\b", fmt, t1, g); /* Read for RepoB before that */
+    repo_cache_put_tree(L"other", L"C:\\o", fmt, t2, g); /* Read for the forgotten one before that */
+    const SnapshotTree* b = repo_cache_lock_tree(L"RepoB", L"C:\\b", fmt, &age);
+    if (b) repo_cache_unlock();
+    const SnapshotTree* o = repo_cache_lock_tree(L"Other", L"C:\\o", fmt, &age);
+    if (o) repo_cache_unlock();
+    EXPECT_TRUE(b == t1, "Forgetting one repository keeps what is read for another");
+    EXPECT_TRUE(o == NULL, "...but discards what was read for the forgotten one (alias case ignored)");
+    repo_cache_put_tree(L"Other", L"C:\\o", fmt, t3, repo_cache_generation());
+    o = repo_cache_lock_tree(L"Other", L"C:\\o", fmt, &age);
+    if (o) repo_cache_unlock();
+    EXPECT_TRUE(o == t3, "Data read after the forget is kept");
+    g = repo_cache_generation();
+    repo_cache_clear();
+    repo_cache_put_tree(L"RepoB", L"C:\\b", fmt, t4, g);
+    b = repo_cache_lock_tree(L"RepoB", L"C:\\b", fmt, &age);
+    if (b) repo_cache_unlock();
+    EXPECT_TRUE(b == NULL, "Clearing discards what any repository read before it");
+    repo_cache_clear();
+}
+
+/* RepoPasswordSource for the background loads of the live test */
+static BOOL fixture_password(const WCHAR* alias, WCHAR* out, size_t cap) {
+    (void)alias;
+    return wcscpy_s(out, cap, L"p@ss \"w0rd\" \u00fc %PATH% \u65e5\u672c") == 0;
+}
+
+/* Counts the lines a line consumer receives, checking that they arrive whole and in order */
+typedef struct {
+    int lines;
+    int in_order;
+    int stop_after;   /* Stop the child after this many lines (0: never) */
+} LineCount;
+
+static ResticResult count_line(const char* line, size_t len, void* ctx) {
+    LineCount* c = (LineCount*)ctx;
+    char expected[64];
+    int n = snprintf(expected, sizeof(expected), "line_%d_0123456789_0123456789 ", c->lines + 1);
+    if (len < (size_t)n - 1 || memcmp(line, expected, (size_t)n - 1) != 0 || memchr(line, '\n', len) != NULL) {
+        c->in_order = 0;
+    }
+    c->lines++;
+    return c->stop_after && c->lines >= c->stop_after ? RESTIC_ERR_JSON_PARSE : RESTIC_OK;
+}
+
+/* ResticExecOptions.line_proc: stdout arrives line by line and is not kept */
+static void test_exec_line_streaming(void) {
+    ResticCommandOutput out;
+    LineCount count = {0, 1, 0};
+    ResticExecOptions opts = {0, NULL, NULL, count_line, &count};
+    /*
+     * 40 000 lines (~1.3 MB, more than one 1 MiB read slice), the last one without a line break.
+     * `set /p` without input leaves ERRORLEVEL 1 in cmd.exe (not under Wine), hence `exit 0`.
+     */
+    ResticResult res = run_cmd(L"/c \"(for /L %i in (1,1,39999) do @echo line_%i_0123456789_0123456789 ) & "
+                               L"(<nul set /p=line_40000_0123456789_0123456789 ) & exit 0\"", &opts, &out);
+    size_t kept = out.length;
+    restic_free_command_output(&out); /* Before the checks, which return early on failure */
+    EXPECT_TRUE(res == RESTIC_OK, "Streamed command succeeds");
+    EXPECT_TRUE(count.lines == 40000 && count.in_order, "Every line whole and in order, the last one too");
+    EXPECT_TRUE(kept < 4096, "stdout was not accumulated");
+
+    /* stderr beyond 1 MiB is read but not kept: a flood of warnings cannot fill memory */
+    ResticResult flood = run_cmd(L"/c \"(for /L %i in (1,1,30000) do @echo warning_%i_0123456789_0123456789_0123456789 1>&2) & exit 0\"",
+                                 NULL, &out);
+    size_t err_kept = out.error_length;
+    restic_free_command_output(&out);
+    EXPECT_TRUE(flood == RESTIC_OK && err_kept >= 1024u * 1024u && err_kept < 1024u * 1024u + 128u * 1024u,
+                "stderr is kept up to 1 MiB, the rest read and dropped");
+
+    LineCount stop = {0, 1, 100};
+    opts.line_ctx = &stop;
+    res = run_cmd(L"/c \"for /L %i in (1,1,200000) do @echo line_%i_0123456789_0123456789 \"", &opts, &out);
+    restic_free_command_output(&out);
+    EXPECT_TRUE(res == RESTIC_ERR_JSON_PARSE && stop.lines == 100, "A consumer error stops the child at once");
+
+    /* A streamed line without end (17 MiB without a line break) fails instead of filling memory */
+    WCHAR fake[MAX_PATH];
+    DWORD len = GetModuleFileNameW(NULL, fake, MAX_PATH);
+    WCHAR* slash = (len > 0 && len < MAX_PATH) ? wcsrchr(fake, L'\\') : NULL;
+    EXPECT_TRUE(slash != NULL, "Locate the test's own folder");
+    wcscpy_s(slash + 1, MAX_PATH - (size_t)(slash + 1 - fake), L"fake_restic.exe");
+    LineCount endless = {0, 1, 0};
+    opts.line_ctx = &endless;
+    res = restic_exec_command(fake, L"repo", L"pw", L"/longline", &opts, &out);
+    restic_free_command_output(&out);
+    EXPECT_TRUE(res == RESTIC_ERR_JSON_PARSE && endless.lines == 0, "A streamed line over 16 MiB fails the command");
+}
+
 /* ============================================================================================ */
 /* Live integration test against a real restic.exe and a self-built repository                  */
 /* ============================================================================================ */
+
+/*
+ * Lists `subpath` both with restic and from the whole-snapshot index and requires identical
+ * entries, then does the same for every subfolder. Returns the number of folders compared, or -1
+ * on the first difference.
+ */
+static int compare_index_with_restic(const WCHAR* restic_bin, const WCHAR* repo, const WCHAR* password,
+                                     const char* snap, const SnapshotIndex* index, const WCHAR* subpath) {
+    WIN32_FIND_DATAW *a = NULL, *b = NULL;
+    size_t na = 0, nb = 0;
+    WCHAR err[512];
+    ResticResult ra = restic_list_directory(restic_bin, repo, password, snap, subpath, NULL, &a, &na, err, _countof(err));
+    ResticResult rb = restic_list_index_directory(index, subpath, &b, &nb);
+    int folders = 1;
+    if (ra != RESTIC_OK || rb != RESTIC_OK || na != nb || (na && memcmp(a, b, na * sizeof(*a)) != 0)) {
+        printf("       differs: %ls (%d/%d, %u/%u entries)\n", subpath, (int)ra, (int)rb, (unsigned)na, (unsigned)nb);
+        folders = -1;
+    }
+    for (size_t i = 0; folders > 0 && i < na; ++i) {
+        if (!is_dir_entry(&a[i])) continue;
+        static WCHAR child[64][1024]; /* One per depth level: static, /analyze caps a frame at 16 KB */
+        static int depth = 0;
+        if (depth >= 64) break;
+        swprintf_s(child[depth], 1024, L"%ls\\%ls", subpath, a[i].cFileName);
+        depth++;
+        int sub = compare_index_with_restic(restic_bin, repo, password, snap, index, child[depth - 1]);
+        depth--;
+        folders = sub < 0 ? -1 : folders + sub;
+    }
+    free(a);
+    free(b);
+    return folders;
+}
 
 static void remove_tree(const WCHAR* dir) {
     WCHAR pattern[MAX_PATH];
@@ -784,22 +881,39 @@ static void test_live_restic_cli(void) {
     ResticCommandOutput out;
 
     /* Error mapping before the repository exists */
-    res = restic_list_snapshots(restic_bin, repo, password, NULL, &items, &count, err, _countof(err));
-    EXPECT_TRUE(res == RESTIC_ERR_REPO_NOT_FOUND, "Missing repository -> RESTIC_ERR_REPO_NOT_FOUND");
+    SnapshotTree* tree = NULL;
+    res = restic_list_snapshots(restic_bin, repo, password, NULL, NULL, &tree, err, _countof(err));
+    EXPECT_TRUE(res == RESTIC_ERR_REPO_NOT_FOUND && tree == NULL, "Missing repository -> RESTIC_ERR_REPO_NOT_FOUND");
     EXPECT_TRUE(err[0] != L'\0', "Missing repository reports a reason");
 
     WCHAR* q_data = restic_quote_arg(data);
     WCHAR args[2048];
+    char repo_id[RESTIC_REPOSITORY_ID_CHARS + 1];
+    res = restic_read_repository_id(restic_bin, repo, password, NULL, repo_id, err, _countof(err));
+    EXPECT_TRUE(res == RESTIC_ERR_REPO_NOT_FOUND && repo_id[0] == '\0', "Repository ID of a missing repository");
+
     res = restic_exec_command(restic_bin, repo, password, L"init --json --repository-version 2", NULL, &out);
     EXPECT_TRUE(res == RESTIC_OK, "restic init with a password containing quotes, %PATH% and CJK text");
+    /* {"message_type":"initialized","id":"<64 hex>",...} */
+    char init_id[RESTIC_REPOSITORY_ID_CHARS + 1] = {0};
+    const char* id_at = out.output ? strstr(out.output, "\"id\":\"") : NULL;
+    if (id_at) memcpy(init_id, id_at + 6, RESTIC_REPOSITORY_ID_CHARS);
     restic_free_command_output(&out);
 
-    res = restic_list_snapshots(restic_bin, repo, L"wrong password", NULL, &items, &count, err, _countof(err));
+    res = restic_read_repository_id(restic_bin, repo, password, NULL, repo_id, err, _countof(err));
+    EXPECT_TRUE(res == RESTIC_OK && strlen(repo_id) == RESTIC_REPOSITORY_ID_CHARS && strcmp(repo_id, init_id) == 0,
+                "restic cat config gives the ID restic init reported");
+    res = restic_read_repository_id(restic_bin, repo, L"wrong password", NULL, repo_id, err, _countof(err));
+    EXPECT_TRUE(res == RESTIC_ERR_WRONG_PASSWORD && repo_id[0] == '\0', "Repository ID with a wrong password");
+
+    res = restic_list_snapshots(restic_bin, repo, L"wrong password", NULL, NULL, &tree, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_WRONG_PASSWORD, "Wrong password -> RESTIC_ERR_WRONG_PASSWORD");
     EXPECT_TRUE(wcsstr(err, L"password") != NULL, "Wrong password reason mentions the password");
 
-    res = restic_list_snapshots(restic_bin, repo, password, NULL, &items, &count, err, _countof(err));
-    EXPECT_TRUE(res == RESTIC_OK && count == 0 && items == NULL, "Empty repository -> no snapshots");
+    res = restic_list_snapshots(restic_bin, repo, password, NULL, NULL, &tree, err, _countof(err));
+    EXPECT_TRUE(res == RESTIC_OK && snapshot_tree_snapshot_count(tree) == 0, "Empty repository -> no snapshots");
+    EXPECT_TRUE(snapshot_tree_root(tree)->child_count == 4, "...but the four restic mount folders");
+    snapshot_tree_free(tree);
 
     /* Two snapshots, the second after changing one file */
     swprintf_s(args, _countof(args), L"backup %ls --json --quiet", q_data);
@@ -812,15 +926,20 @@ static void test_live_restic_cli(void) {
     restic_free_command_output(&out);
     free(q_data);
 
-    res = restic_list_snapshots(restic_bin, repo, password, NULL, &items, &count, err, _countof(err));
-    EXPECT_TRUE(res == RESTIC_OK && count == 2, "Two snapshots listed");
-    EXPECT_TRUE(wcscmp(items[0].cFileName, items[1].cFileName) != 0, "Snapshot directory names are unique");
-    EXPECT_TRUE(ft_u64(items[0].ftLastWriteTime) <= ft_u64(items[1].ftLastWriteTime), "Oldest snapshot first");
-    char snap1[32] = {0}, snap2[32] = {0};
-    EXPECT_TRUE(restic_extract_snapshot_id(items[0].cFileName, snap1, sizeof(snap1)) &&
-                restic_extract_snapshot_id(items[1].cFileName, snap2, sizeof(snap2)),
-                "Snapshot IDs recoverable from directory names");
-    free(items);
+    res = restic_list_snapshots(restic_bin, repo, password, NULL, NULL, &tree, err, _countof(err));
+    EXPECT_TRUE(res == RESTIC_OK && snapshot_tree_snapshot_count(tree) == 2, "Two snapshots listed");
+    const SnapshotNode* by_time = snapshot_tree_child(snapshot_tree_root(tree), "snapshots");
+    EXPECT_TRUE(by_time && by_time->child_count == 5 && strcmp(by_time->children[2]->name, "latest") == 0,
+                "snapshots/ holds both snapshots and latest");
+    const SnapshotNode* latest = by_time->children[2];
+    EXPECT_TRUE(latest->snapshot_id && strlen(latest->snapshot_id) == 64, "Full snapshot IDs");
+    char snap1[65] = {0}, snap2[65] = {0};
+    /* The second snapshot is latest; the first is whichever folder is not */
+    strcpy_s(snap2, sizeof(snap2), latest->snapshot_id);
+    strcpy_s(snap1, sizeof(snap1), strcmp(by_time->children[0]->snapshot_id, snap2) != 0 ? by_time->children[0]->snapshot_id
+                                                                                       : by_time->children[1]->snapshot_id);
+    EXPECT_TRUE(strcmp(snap1, snap2) != 0, "Two different snapshots");
+    snapshot_tree_free(tree);
 
     /* Level 2: root of the snapshot holds only the drive letter */
     res = restic_list_directory(restic_bin, repo, password, snap2, L"\\", NULL, &items, &count, err, _countof(err));
@@ -860,6 +979,71 @@ static void test_live_restic_cli(void) {
     e = find_entry(items, count, L"with space.txt");
     EXPECT_TRUE(e && file_size_of(e) == 5, "Snapshot 1 keeps the original size");
     free(items);
+
+    /* The whole snapshot read at once (restic ls without a path) lists every folder as restic does */
+    SnapshotIndex* index = snapshot_index_new(0);
+    SnapshotIndexStatus index_status = SNAPSHOT_INDEX_BAD_JSON;
+    res = restic_list_snapshot_index(restic_bin, repo, password, snap2, NULL, index, &index_status, err, _countof(err));
+    EXPECT_TRUE(res == RESTIC_OK && index_status == SNAPSHOT_INDEX_OK && snapshot_index_entry_count(index) > 300,
+                "Whole snapshot read into an index");
+    int compared = compare_index_with_restic(restic_bin, repo, password, snap2, index, L"\\");
+    EXPECT_TRUE(compared > 8, "Every folder of the snapshot lists identically from the index and from restic");
+    WIN32_FIND_DATAW* none = NULL;
+    size_t none_count = 0;
+    to_wfx_path(data, L"readme.txt", wfx, _countof(wfx));
+    EXPECT_TRUE(restic_list_index_directory(index, wfx, &none, &none_count) == RESTIC_ERR_PATH_NOT_FOUND &&
+                restic_list_index_directory(index, L"\\no\\such", &none, &none_count) == RESTIC_ERR_PATH_NOT_FOUND &&
+                none == NULL, "A file or a missing path is not a folder of the index either");
+    snapshot_index_free(index);
+
+    index = snapshot_index_new(4096);
+    res = restic_list_snapshot_index(restic_bin, repo, password, snap2, NULL, index, &index_status, err, _countof(err));
+    EXPECT_TRUE(res == RESTIC_ERR_OUT_OF_MEMORY && index_status == SNAPSHOT_INDEX_TOO_LARGE,
+                "An index over its memory limit stops restic and says so");
+    snapshot_index_free(index);
+    index = snapshot_index_new(0);
+    res = restic_list_snapshot_index(restic_bin, repo, L"wrong password", snap2, NULL, index, &index_status, err,
+                                     _countof(err));
+    EXPECT_TRUE(res == RESTIC_ERR_WRONG_PASSWORD, "Wrong password reported as for any other command");
+    EXPECT_TRUE(restic_list_snapshot_index(restic_bin, repo, password, "--help", NULL, index, &index_status, err,
+                                           _countof(err)) == RESTIC_ERR_INVALID_ARG, "Non-hex snapshot ID refused");
+    snapshot_index_free(index);
+
+    /* Background loads: one at a time, and the snapshot being read makes room within SnapshotCacheMB */
+    WCHAR live_repo[MAX_PATH];
+    wcscpy_s(live_repo, MAX_PATH, repo);
+    repo_cache_clear();
+    repo_cache_set_index_limit(64u * 1024u * 1024u);
+    repo_cache_load_index(L"Live", live_repo, restic_bin, snap1, fixture_password);
+    repo_cache_load_index(L"Live", live_repo, restic_bin, snap2, fixture_password); /* Not while snap1 loads */
+    EXPECT_TRUE(repo_cache_wait_idle(120000), "First background load finishes");
+    const SnapshotIndex* one = repo_cache_lock_index(L"Live", live_repo, snap1);
+    size_t one_bytes = one ? snapshot_index_memory(one) : 0;
+    if (one) repo_cache_unlock();
+    const SnapshotIndex* two = repo_cache_lock_index(L"Live", live_repo, snap2);
+    if (two) repo_cache_unlock();
+    EXPECT_TRUE(one_bytes > 0 && two == NULL, "Snapshot 1 read; snapshot 2 was not started while it loaded");
+    repo_cache_set_index_limit(one_bytes + one_bytes / 2); /* Room for one listing, not for two */
+    repo_cache_load_index(L"Live", live_repo, restic_bin, snap2, fixture_password);
+    EXPECT_TRUE(repo_cache_wait_idle(120000), "Second background load finishes");
+    one = repo_cache_lock_index(L"Live", live_repo, snap1);
+    if (one) repo_cache_unlock();
+    two = repo_cache_lock_index(L"Live", live_repo, snap2);
+    if (two) repo_cache_unlock();
+    EXPECT_TRUE(one == NULL && two != NULL, "Reading snapshot 2 dropped snapshot 1 to stay within the limit");
+    repo_cache_clear();
+    /* Two repositories (here two aliases of the same one) are read side by side */
+    repo_cache_set_index_limit(64u * 1024u * 1024u);
+    repo_cache_load_index(L"Live", live_repo, restic_bin, snap1, fixture_password);
+    repo_cache_load_index(L"Live2", live_repo, restic_bin, snap2, fixture_password);
+    EXPECT_TRUE(repo_cache_wait_idle(120000), "Both background loads finish");
+    one = repo_cache_lock_index(L"Live", live_repo, snap1);
+    if (one) repo_cache_unlock();
+    two = repo_cache_lock_index(L"Live2", live_repo, snap2);
+    if (two) repo_cache_unlock();
+    EXPECT_TRUE(one != NULL && two != NULL, "Different repositories are read side by side");
+    repo_cache_clear();
+    repo_cache_set_index_limit(512u * 1024u * 1024u);
 
     /* Output larger than the initial 4 KB / typical buffers: 300 NDJSON lines */
     to_wfx_path(data, L"many", wfx, _countof(wfx));
@@ -1019,45 +1203,28 @@ static void test_live_restic_cli(void) {
 }
 
 /*
- * restic_dump_file against a fake "restic" batch file: deterministic coverage of exit codes, stderr
- * classification, partial output followed by failure, environment injection and the INACTIVITY
- * timeout, none of which can be provoked reliably with the real binary.
- * The scenario is selected by the 4th command-line argument (the snapshot path).
+ * restic_dump_file against fake_restic.exe (src/tests/fake_restic.c, built next to this test):
+ * deterministic coverage of exit codes, stderr classification, partial output followed by failure,
+ * environment injection and the INACTIVITY timeout, none of which can be provoked reliably with the
+ * real binary. The scenario is selected by the last command-line argument (the snapshot path).
  */
 static void test_dump_with_fake_restic(void) {
-    WCHAR dir[MAX_PATH], bat[MAX_PATH], dest[MAX_PATH];
+    WCHAR dir[MAX_PATH], fake[MAX_PATH], dest[MAX_PATH];
+    DWORD len = GetModuleFileNameW(NULL, fake, MAX_PATH);
+    WCHAR* slash = (len > 0 && len < MAX_PATH) ? wcsrchr(fake, L'\\') : NULL;
+    EXPECT_TRUE(slash != NULL, "Locate the test's own folder");
+    wcscpy_s(slash + 1, MAX_PATH - (size_t)(slash + 1 - fake), L"fake_restic.exe");
+    EXPECT_TRUE(GetFileAttributesW(fake) != INVALID_FILE_ATTRIBUTES, "fake_restic.exe is built next to the test");
     GetTempPathW(MAX_PATH, dir);
     swprintf_s(dir + wcslen(dir), MAX_PATH - wcslen(dir), L"restic_fake_%lu", GetCurrentProcessId());
     CreateDirectoryW(dir, NULL);
-    swprintf_s(bat, MAX_PATH, L"%ls\\fake_restic.bat", dir);
     swprintf_s(dest, MAX_PATH, L"%ls\\out.bin", dir);
-
-    const char* script =
-        "@echo off\r\n"
-        "if \"%~4\"==\"/ok\"      (<nul set /p \"=hello\" & exit /b 0)\r\n"
-        "if \"%~4\"==\"/env\"     (<nul set /p \"=%RESTIC_REPOSITORY%|%RESTIC_PASSWORD%\" & exit /b 0)\r\n"
-        "if \"%~4\"==\"/empty\"   exit /b 0\r\n"
-        "if \"%~4\"==\"/partial\" (<nul set /p \"=partial-data\" & echo Fatal: boom 1>&2 & exit /b 1)\r\n"
-        "if \"%~4\"==\"/missing\" (echo Fatal: cannot dump file: path not found in snapshot 1>&2 & exit /b 1)\r\n"
-        "if \"%~4\"==\"/silent\"  exit /b 1\r\n"
-        "if \"%~4\"==\"/norepo\"  (echo Fatal: repository does not exist 1>&2 & exit /b 10)\r\n"
-        "if \"%~4\"==\"/locked\"  exit /b 11\r\n"
-        "if \"%~4\"==\"/badpw\"   exit /b 12\r\n"
-        "if \"%~4\"==\"/hang\"    (ping -n 8 127.0.0.1 >nul & exit /b 0)\r\n"
-        "if \"%~4\"==\"/slow\"    (<nul set /p \"=a\" & ping -n 2 127.0.0.1 >nul & <nul set /p \"=b\" & ping -n 2 127.0.0.1 >nul & <nul set /p \"=c\" & ping -n 2 127.0.0.1 >nul & exit /b 0)\r\n"
-        "exit /b 99\r\n";
-    HANDLE hb = CreateFileW(bat, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    EXPECT_TRUE(hb != INVALID_HANDLE_VALUE, "Create fake restic batch file");
-    DWORD w = 0;
-    BOOL wrote = WriteFile(hb, script, (DWORD)strlen(script), &w, NULL);
-    CloseHandle(hb);
-    EXPECT_TRUE(wrote, "Write fake restic batch file");
 
     WCHAR err[512];
     ResticResult res;
     DeleteFileW(dest);
 #define FAKE_DUMP(path, overwrite, timeout) \
-    restic_dump_file(bat, L"repo-url", L"s3cret", "abcd1234", path, dest, overwrite, NULL, timeout, NULL, NULL, err, _countof(err))
+    restic_dump_file(fake, L"repo-url", L"s3cret", "abcd1234", path, dest, overwrite, NULL, timeout, NULL, NULL, err, _countof(err))
 
     res = FAKE_DUMP(L"\\ok", FALSE, 0);
     EXPECT_TRUE(res == RESTIC_OK && file_equals(dest, "hello"), "Fake restic: stdout bytes are stored verbatim");
@@ -1111,30 +1278,33 @@ static void test_dump_with_fake_restic(void) {
 #undef FAKE_DUMP
 
     DeleteFileW(dest);
-    DeleteFileW(bat);
     RemoveDirectoryW(dir);
 }
 
 int main(void) {
+    /* No modal system dialog (crash, missing disk, failed start) may stop an unattended CI run */
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
 #if defined(_DEBUG) && !defined(__SANITIZE_ADDRESS__)
     _CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
     _CrtSetReportMode(_CRT_WARN, _CRTDBG_MODE_FILE);
     _CrtSetReportFile(_CRT_WARN, _CRTDBG_FILE_STDERR);
     _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
     _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
+    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE); /* Invalid parameters, e.g. an overflowing wcscat_s */
+    _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
 #endif
     printf("Running Restic CLI & JSON Parser Unit/Integration Tests...\n");
 
     test_iso8601_parsing();
-    test_snapshot_naming();
     test_path_and_quote_helpers();
     test_describe_password();
-    test_parse_snapshots_json();
     test_parse_ls_ndjson();
     test_exec_streams_and_exit_codes();
     test_exec_environment();
     test_exec_limits_and_failures();
     test_exec_large_output_and_long_args();
+    test_exec_line_streaming();
+    test_repo_cache_generations();
     test_dump_with_fake_restic();
     test_live_restic_cli();
 

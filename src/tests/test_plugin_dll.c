@@ -15,6 +15,9 @@
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
+#if defined(_DEBUG) && !defined(__SANITIZE_ADDRESS__)
+#include <crtdbg.h>
+#endif
 #include <string.h>
 #include <wchar.h>
 #include "version.h"
@@ -26,13 +29,27 @@ static WCHAR g_pluginst_inf[MAX_PATH];
 static int g_tests_run    = 0;
 static int g_tests_failed = 0;
 
+/* The last check that finished, for the watchdog (see watchdog_thread) */
+static volatile LONG g_checks_done = 0;
+static const char* volatile g_last_check_function = "main";
+static volatile LONG g_last_check_line = 0;
+static const char* volatile g_last_check = "(none yet)";
+#define CHECK_DONE(msg) do { \
+    g_last_check_function = __FUNCTION__; \
+    g_last_check_line     = __LINE__; \
+    g_last_check          = (msg); \
+    InterlockedIncrement(&g_checks_done); \
+} while (0)
+
 #define EXPECT_TRUE(cond, msg) do { \
     g_tests_run++; \
     if (!(cond)) { \
         printf("[FAIL] %s:%d: %s\n", __FUNCTION__, __LINE__, (msg)); \
         g_tests_failed++; \
+        CHECK_DONE(msg); \
         return; \
     } \
+    CHECK_DONE(msg); \
 } while (0)
 
 #define EXPECT_WSTR_EQ(actual, expected, msg) do { \
@@ -41,8 +58,10 @@ static int g_tests_failed = 0;
         printf("[FAIL] %s:%d: %s (expected '%ls', got '%ls')\n", \
                __FUNCTION__, __LINE__, (msg), (expected), (actual)); \
         g_tests_failed++; \
+        CHECK_DONE(msg); \
         return; \
     } \
+    CHECK_DONE(msg); \
 } while (0)
 
 /* Local copies of the WFX constants and prototypes (the plugin is only reachable through GetProcAddress) */
@@ -90,6 +109,7 @@ typedef int    (__stdcall *PFN_FindClose)(HANDLE);
 typedef int    (__stdcall *PFN_GetFile)(char*, char*, int, RemoteInfo*);
 typedef int    (__stdcall *PFN_GetFileW)(WCHAR*, WCHAR*, int, RemoteInfo*);
 typedef int    (__stdcall *PFN_ExecuteFileW)(HWND, WCHAR*, WCHAR*);
+typedef BOOL   (__stdcall *PFN_DisconnectW)(WCHAR*);
 
 typedef struct {
     HMODULE module;
@@ -103,6 +123,7 @@ typedef struct {
     PFN_GetFile get_file;
     PFN_GetFileW get_file_w;
     PFN_ExecuteFileW execute_w;
+    PFN_DisconnectW disconnect_w;
 } Plugin;
 
 static BOOL make_unique_dir(const WCHAR* tag, WCHAR* out, size_t cap) {
@@ -154,6 +175,7 @@ static BOOL load_plugin_copy(const WCHAR* dir, Plugin* p) {
     p->get_file          = (PFN_GetFile)(void*)GetProcAddress(p->module, "FsGetFile");
     p->get_file_w        = (PFN_GetFileW)(void*)GetProcAddress(p->module, "FsGetFileW");
     p->execute_w         = (PFN_ExecuteFileW)(void*)GetProcAddress(p->module, "FsExecuteFileW");
+    p->disconnect_w      = (PFN_DisconnectW)(void*)GetProcAddress(p->module, "FsDisconnectW");
     return TRUE;
 }
 
@@ -172,7 +194,8 @@ static void test_export_surface(void) {
 
     const char* required[] = {"FsInit", "FsInitW", "FsFindFirst", "FsFindFirstW", "FsFindNext",
                               "FsFindNextW", "FsFindClose", "FsGetDefRootName", "FsSetDefaultParams",
-                              "FsGetFile", "FsGetFileW", "FsExecuteFile", "FsExecuteFileW"};
+                              "FsGetFile", "FsGetFileW", "FsExecuteFile", "FsExecuteFileW",
+                              "FsDisconnect", "FsDisconnectW"};
     for (size_t i = 0; i < _countof(required); ++i) {
         FARPROC fn = GetProcAddress(m, required[i]);
         g_tests_run++;
@@ -382,6 +405,7 @@ static int   g_e2e_pwd_mode         = 0; /* 0 = wrong once then correct, 1 = alw
                                            3 = user submits an empty password, 4 = user cancels the dialog,
                                            5 = correct password with a trailing space once, then correct */
 static WCHAR g_e2e_last_prompt[256] = {0};
+static WCHAR g_e2e_last_title[512] = {0};
 static WCHAR g_e2e_last_msg[256]    = {0};
 static WCHAR g_e2e_progress_target[512] = {0};
 static int   g_e2e_progress_percent = -1;
@@ -399,11 +423,35 @@ static int __stdcall e2e_progress_proc(int PluginNr, WCHAR* SourceName, WCHAR* T
     return g_e2e_force_abort ? 1 : 0;
 }
 
+/*
+ * Everything the plugin logged through LogProc other than important errors, one "<MsgType>:<text>"
+ * line each. LogProc is also called from the plugin's background threads, hence the lock.
+ */
+static WCHAR   g_e2e_conn_log[1 << 16];
+static SRWLOCK g_e2e_conn_log_lock = SRWLOCK_INIT;
+
 static void __stdcall e2e_log_proc(int PluginNr, int MsgType, WCHAR* LogString) {
     (void)PluginNr;
     if (MsgType == MSGTYPE_IMPORTANTERROR && LogString) {
         g_e2e_error_logs++;
+    } else if (LogString) {
+        WCHAR line[1100];
+        _snwprintf_s(line, _countof(line), _TRUNCATE, L"%d:%ls\n", MsgType, LogString);
+        AcquireSRWLockExclusive(&g_e2e_conn_log_lock);
+        if (wcslen(g_e2e_conn_log) + wcslen(line) < _countof(g_e2e_conn_log)) {
+            wcscat_s(g_e2e_conn_log, _countof(g_e2e_conn_log), line);
+        }
+        ReleaseSRWLockExclusive(&g_e2e_conn_log_lock);
     }
+}
+
+/* Number of times `text` occurs in what LogProc received */
+static int conn_log_count(const WCHAR* text) {
+    int n = 0;
+    AcquireSRWLockShared(&g_e2e_conn_log_lock);
+    for (const WCHAR* p = g_e2e_conn_log; (p = wcsstr(p, text)) != NULL; p++) n++;
+    ReleaseSRWLockShared(&g_e2e_conn_log_lock);
+    return n;
 }
 
 static BOOL __stdcall e2e_request_proc(
@@ -415,9 +463,9 @@ static BOOL __stdcall e2e_request_proc(
     int maxlen
 ) {
     (void)PluginNr;
-    (void)CustomTitle;
     if (RequestType == RT_Password) {
         g_e2e_pwd_prompts++;
+        wcsncpy_s(g_e2e_last_title, _countof(g_e2e_last_title), CustomTitle ? CustomTitle : L"", _TRUNCATE);
         if (CustomText) {
             wcsncpy_s(g_e2e_last_prompt, _countof(g_e2e_last_prompt), CustomText, _TRUNCATE);
         }
@@ -471,7 +519,7 @@ static DWORD WINAPI mt_list_worker(LPVOID param) {
         int entries = 1;
         while (job->plugin->find_next_w(h, &fd)) entries++;
         job->plugin->find_close(h);
-        if (entries != 2) InterlockedIncrement(&g_e2e_mt_failures); /* Fixture has two snapshots */
+        if (entries != 5) InterlockedIncrement(&g_e2e_mt_failures); /* Two snapshots, latest and its two aliases */
     }
     return 0;
 }
@@ -798,6 +846,34 @@ static void test_e2e_extraction_edge_cases(const Plugin* p, const WCHAR* dir, co
     g_e2e_pwd_mode    = saved_mode;
 }
 
+/*
+ * Lists `path` and joins the entry names with '|' (sorted as the plugin returns them); FALSE on
+ * error and when they do not fit into `cap` characters. Checked here, not left to wcscat_s: its
+ * overflow is an invalid parameter, which the Debug CRT reports in a modal dialog that stops an
+ * unattended run, and which the Release CRT lets pass with an emptied buffer.
+ */
+static BOOL list_names(const Plugin* p, const WCHAR* path, WCHAR* out, size_t cap) {
+    WIN32_FIND_DATAW fd;
+    out[0] = L'\0';
+    HANDLE h = p->find_first_w((WCHAR*)path, &fd);
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
+    BOOL fits   = TRUE;
+    size_t used = 0;
+    do {
+        size_t len = wcslen(fd.cFileName);
+        if (used + (used > 0 ? 1 : 0) + len >= cap) {
+            fits = FALSE;
+            continue;
+        }
+        if (used > 0) out[used++] = L'|';
+        wmemcpy(out + used, fd.cFileName, len);
+        used += len;
+        out[used] = L'\0';
+    } while (p->find_next_w(h, &fd));
+    p->find_close(h);
+    return fits;
+}
+
 /* Recursively descends the first directory at each depth until the fixture "data" directory is found */
 static BOOL descend_to_fixture_data(
     const Plugin* p,
@@ -838,6 +914,285 @@ static BOOL descend_to_fixture_data(
     return descend_to_fixture_data(p, next_path, depth + 1, out_data_path, out_cap);
 }
 
+/* Number of restic processes the plugin started so far, as its diagnostic log records them */
+static int count_restic_runs(const WCHAR* log_file) {
+    char* text = read_text_file(log_file);
+    int n = 0;
+    for (const char* p = text; p && (p = strstr(p, "restic run: ")) != NULL; p++) n++;
+    free(text);
+    return n;
+}
+
+/*
+ * Entering a snapshot starts reading all of it in the background; once that is done, its folders
+ * are listed without running restic, and forgetting the password drops what was read
+ */
+static void test_e2e_snapshot_cache(const Plugin* p, const WCHAR* dir, const WCHAR* data_path) {
+    /* data\many holds 300 names of 60 characters: room for all of them */
+    static WCHAR log_file[MAX_PATH], sub[MAX_PATH * 2], names[4096], names_again[32768];
+    swprintf_s(log_file, _countof(log_file), L"%ls\\log dir\\e2e.log", dir);
+    BOOL read = FALSE;
+    for (int i = 0; i < 600 && !read; ++i) { /* Up to two minutes */
+        char* text = read_text_file(log_file);
+        read = text && strstr(text, "Listing of snapshot ") && strstr(text, " read: ");
+        free(text);
+        if (!read) Sleep(200);
+    }
+    EXPECT_TRUE(read, "The whole snapshot was read in the background after entering it");
+    /* (The test has entered two snapshots by now: one through ids\, one through snapshots\) */
+    EXPECT_TRUE(conn_log_count(L"3:[MainRepo] Reading every file and folder of snapshot ") >= 1 &&
+                conn_log_count(L"3:[MainRepo] Snapshot ") >= 1 &&
+                conn_log_count(L"files and folders, ") >= 1 && conn_log_count(L"its folders now open without restic") >= 1,
+                "The connection log tells when the background read starts and when it is done (MSGTYPE_DETAILS)");
+
+    int runs = count_restic_runs(log_file);
+    g_e2e_pwd_prompts = 0;
+    WIN32_FIND_DATAW fd;
+    EXPECT_TRUE(list_names(p, data_path, names, _countof(names)) && wcsstr(names, L"readme.txt") != NULL,
+                "Fixture folder listed from memory");
+    swprintf_s(sub, _countof(sub), L"%ls\\many", data_path);
+    EXPECT_TRUE(list_names(p, sub, names_again, _countof(names_again)) && wcsstr(names_again, L"|") != NULL,
+                "Its subfolder too");
+    swprintf_s(sub, _countof(sub), L"%ls\\empty_dir", data_path);
+    SetLastError(0);
+    EXPECT_TRUE(p->find_first_w(sub, &fd) == INVALID_HANDLE_VALUE && GetLastError() == ERROR_NO_MORE_FILES,
+                "An empty folder is still empty");
+    swprintf_s(sub, _countof(sub), L"%ls\\readme.txt", data_path);
+    SetLastError(0);
+    EXPECT_TRUE(p->find_first_w(sub, &fd) == INVALID_HANDLE_VALUE && GetLastError() == ERROR_PATH_NOT_FOUND,
+                "A file is not a folder");
+    swprintf_s(sub, _countof(sub), L"%ls\\no_such_folder", data_path);
+    SetLastError(0);
+    EXPECT_TRUE(p->find_first_w(sub, &fd) == INVALID_HANDLE_VALUE && GetLastError() == ERROR_PATH_NOT_FOUND,
+                "A missing folder is missing");
+    EXPECT_TRUE(count_restic_runs(log_file) == runs && g_e2e_pwd_prompts == 0, "None of it ran restic");
+
+    /* Forgetting the passwords drops the listing with them: the next visit asks and runs restic */
+    WCHAR forget[] = L"\\\U0001F5D1 Forget 1 Password", open_verb[] = L"open";
+    g_e2e_msg_dialogs = 0;
+    EXPECT_TRUE(p->execute_w(NULL, forget, open_verb) == FS_EXEC_SYMLINK, "Forget the passwords");
+    EXPECT_TRUE(conn_log_count(L"3:All remembered passwords and cached listings forgotten; Disconnect closes this toolbar") == 1 &&
+                conn_log_count(L"2:DISCONNECT") == 0,
+                "...which the connection log says, pointing to Disconnect: the plugin cannot close the connection itself");
+    g_e2e_pwd_mode = 1;
+    EXPECT_TRUE(list_names(p, data_path, names_again, _countof(names_again)) && wcscmp(names, names_again) == 0,
+                "Listed again after a password prompt, with the same entries");
+    EXPECT_TRUE(g_e2e_pwd_prompts == 1 && count_restic_runs(log_file) > runs, "Asked for the password and ran restic");
+    EXPECT_TRUE(conn_log_count(L"1:CONNECT \\\n") == 1, "...on the connection still listed, not a new one");
+    g_e2e_pwd_prompts = 0;
+    g_e2e_msg_dialogs = 0;
+}
+
+/* Lists `path` and stores the number of entries (0 on error) */
+static void count_entries(const Plugin* p, const WCHAR* path, size_t* out) {
+    WIN32_FIND_DATAW fd;
+    *out = 0;
+    HANDLE h = p->find_first_w((WCHAR*)path, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do (*out)++; while (p->find_next_w(h, &fd));
+    p->find_close(h);
+}
+
+/* Takes one more snapshot of the fixture data into `repo` with restic itself */
+static BOOL run_restic_backup(const WCHAR* restic_exe, const WCHAR* repo) {
+    static WCHAR cmd[MAX_PATH * 4], data[MAX_PATH];
+    GetFullPathNameW(L"tmp\\test_fixture\\data", MAX_PATH, data, NULL);
+    swprintf_s(cmd, _countof(cmd), L"\"%ls\" -r \"%ls\" backup \"%ls\" --quiet --host fresh-test", restic_exe, repo, data);
+    SetEnvironmentVariableW(L"RESTIC_PASSWORD", FIXTURE_PASSWORD);
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    BOOL ok = CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    SetEnvironmentVariableW(L"RESTIC_PASSWORD", NULL);
+    if (!ok) return FALSE;
+    DWORD code = 1;
+    WaitForSingleObject(pi.hProcess, 120000);
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return code == 0;
+}
+
+/* TRUE for a time within the last hour (and not ahead of the clock) */
+static BOOL is_recent(const FILETIME* t) {
+    FILETIME now;
+    GetSystemTimeAsFileTime(&now);
+    ULONGLONG n = ((ULONGLONG)now.dwHighDateTime << 32) | now.dwLowDateTime;
+    ULONGLONG v = ((ULONGLONG)t->dwHighDateTime << 32) | t->dwLowDateTime;
+    return v <= n + 600000000ull && n - v < 36000000000ull; /* 1 min ahead, 1 hour back */
+}
+
+static BOOL file_mtime(const WCHAR* path, FILETIME* out) {
+    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE) return FALSE;
+    BOOL ok = GetFileTime(f, NULL, NULL, out);
+    CloseHandle(f);
+    return ok;
+}
+
+/*
+ * snapshots.csv in the repository's folder (the E2E INI sets CsvSeparator=;): listed as a read-only
+ * file of its exact size, copied through FsGetFileW with the overwrite protocol, never a folder.
+ * `latest_id` is the short ID of the newer of the fixture's two snapshots (same host and paths).
+ */
+static void test_snapshots_csv(const Plugin* p, const WCHAR* dir, const WCHAR* some_id, const WCHAR* latest_id) {
+    WIN32_FIND_DATAW fd;
+    RemoteInfo ri;
+    memset(&ri, 0, sizeof(ri));
+    BOOL listed = FALSE;
+    FILETIME newest_snapshot = {0, 0};
+    HANDLE h = p->find_first_w(L"\\MainRepo", &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (wcscmp(fd.cFileName, L"snapshots") == 0) newest_snapshot = fd.ftLastWriteTime;
+            if (wcscmp(fd.cFileName, L"snapshots.csv") != 0) continue;
+            listed = (fd.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY)) ==
+                         FILE_ATTRIBUTE_READONLY &&
+                     fd.nFileSizeHigh == 0 && fd.nFileSizeLow > 0 && fd.ftLastWriteTime.dwHighDateTime != 0xFFFFFFFF;
+            ri.SizeLow       = fd.nFileSizeLow;
+            ri.SizeHigh      = fd.nFileSizeHigh;
+            ri.LastWriteTime = fd.ftLastWriteTime;
+            ri.Attr          = (int)fd.dwFileAttributes;
+        } while (p->find_next_w(h, &fd));
+        p->find_close(h);
+    }
+    EXPECT_TRUE(listed, "snapshots.csv is listed as a read-only file with a size and a time");
+    EXPECT_TRUE(is_recent(&ri.LastWriteTime) && CompareFileTime(&ri.LastWriteTime, &newest_snapshot) > 0,
+                "Its time is when restic listed the snapshots, after the newest one was taken");
+
+    WCHAR local[MAX_PATH];
+    swprintf_s(local, MAX_PATH, L"%ls\\snapshots.csv", dir);
+    DeleteFileW(local);
+    EXPECT_TRUE(p->get_file_w(L"\\MainRepo\\snapshots.csv", local, 0, &ri) == FS_FILE_OK, "snapshots.csv copied");
+    static char text[4096];
+    DWORD got = 0;
+    HANDLE f  = CreateFileW(local, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    FILETIME mtime = {0};
+    if (f != INVALID_HANDLE_VALUE) {
+        if (!ReadFile(f, text, sizeof(text) - 1, &got, NULL)) got = 0;
+        GetFileTime(f, NULL, NULL, &mtime);
+        CloseHandle(f);
+    }
+    text[got] = '\0';
+    EXPECT_TRUE(got == ri.SizeLow, "The copy has exactly the listed size");
+    EXPECT_TRUE(CompareFileTime(&mtime, &ri.LastWriteTime) == 0, "The copy carries the listed time");
+    const char* header = "\xEF\xBB\xBFshort ID;host;paths;timestamp;tags;full ID\r\n";
+    EXPECT_TRUE(strncmp(text, header, strlen(header)) == 0, "UTF-8 BOM, then the header with CsvSeparator=;");
+    char some_a[16] = {0}, latest_a[16] = {0};
+    WideCharToMultiByte(CP_UTF8, 0, some_id, -1, some_a, sizeof(some_a), NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, latest_id, -1, latest_a, sizeof(latest_a), NULL, NULL);
+    const char* first  = strstr(text, "\r\n");
+    const char* second = first ? strstr(first + 2, "\r\n") : NULL;
+    EXPECT_TRUE(first && second && strncmp(second + 2, latest_a, 8) == 0 &&
+                    strstr(second + 2, "\r\n") == text + got - 2,
+                "Two records sorted by time: the newer snapshot is the last line");
+    enum { FULL_ID_CHARS = 64 };
+    const char* last_id = text + got - 2 - FULL_ID_CHARS;
+    EXPECT_TRUE(got > FULL_ID_CHARS + 3 && last_id[-1] == ';' && strncmp(last_id, latest_a, 8) == 0 &&
+                    strspn(last_id, "0123456789abcdef") == FULL_ID_CHARS,
+                "Each record ends with the full ID, the last one the newer snapshot's");
+    EXPECT_TRUE(strstr(text, some_a) != NULL && strstr(text, "\\test_fixture\\data") != NULL,
+                "The records hold the short IDs and the backed-up path");
+
+    EXPECT_TRUE(p->get_file_w(L"\\MainRepo\\snapshots.csv", local, 0, &ri) == FS_FILE_EXISTS,
+                "An existing copy is reported first (overwrite protocol)");
+    EXPECT_TRUE(p->get_file_w(L"\\MainRepo\\SNAPSHOTS.CSV", local, FS_COPYFLAGS_OVERWRITE, &ri) == FS_FILE_OK,
+                "... and replaced with FS_COPYFLAGS_OVERWRITE (the name compares ignoring case)");
+    SetLastError(0);
+    EXPECT_TRUE(p->find_first_w(L"\\MainRepo\\snapshots.csv", &fd) == INVALID_HANDLE_VALUE &&
+                    GetLastError() == ERROR_PATH_NOT_FOUND,
+                "snapshots.csv is not a folder");
+    SetLastError(0);
+    EXPECT_TRUE(p->find_first_w(L"\\MainRepo\\snapshots.csv\\x", &fd) == INVALID_HANDLE_VALUE &&
+                    GetLastError() == ERROR_PATH_NOT_FOUND &&
+                    p->get_file_w(L"\\MainRepo\\snapshots.csv\\x", local, FS_COPYFLAGS_OVERWRITE, &ri) == FS_FILE_NOTFOUND,
+                "Nothing is below snapshots.csv");
+    EXPECT_TRUE(p->get_file_w(L"\\MainRepo\\hosts\\snapshots.csv", local, FS_COPYFLAGS_OVERWRITE, &ri) == FS_FILE_NOTFOUND,
+                "snapshots.csv is only in the repository's folder");
+    DeleteFileW(local);
+}
+
+/* Reads a small local file into `text` (NUL-terminated); its length, or -1 */
+static int read_small_file(const WCHAR* path, char* text, DWORD cap) {
+    DWORD got = 0;
+    HANDLE f  = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE) return -1;
+    BOOL ok = ReadFile(f, text, cap - 1, &got, NULL);
+    CloseHandle(f);
+    text[ok ? got : 0] = '\0';
+    return ok ? (int)got : -1;
+}
+
+/*
+ * repository_id.txt beside snapshots.csv: listed with its fixed size (64 hexadecimal characters and
+ * CRLF), read by restic once and then taken from the cache, never a folder
+ */
+static void test_repository_id(const Plugin* p, const WCHAR* dir) {
+    WIN32_FIND_DATAW fd;
+    RemoteInfo ri;
+    memset(&ri, 0, sizeof(ri));
+    BOOL listed  = FALSE;
+    FILETIME csv = {0, 0};
+    HANDLE h     = p->find_first_w(L"\\MainRepo", &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (wcscmp(fd.cFileName, L"snapshots.csv") == 0) csv = fd.ftLastWriteTime;
+            if (wcscmp(fd.cFileName, L"repository_id.txt") != 0) continue;
+            listed = (fd.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY)) ==
+                         FILE_ATTRIBUTE_READONLY && fd.nFileSizeHigh == 0 && fd.nFileSizeLow == 66;
+            ri.SizeLow       = fd.nFileSizeLow;
+            ri.LastWriteTime = fd.ftLastWriteTime;
+            ri.Attr          = (int)fd.dwFileAttributes;
+        } while (p->find_next_w(h, &fd));
+        p->find_close(h);
+    }
+    EXPECT_TRUE(listed, "repository_id.txt is listed as a read-only file of 66 bytes");
+    EXPECT_TRUE(ri.LastWriteTime.dwHighDateTime != 0xFFFFFFFF && CompareFileTime(&ri.LastWriteTime, &csv) == 0,
+                "Before restic was asked for the ID, the time of snapshots.csv");
+    FILETIME asked;
+    GetSystemTimeAsFileTime(&asked);
+
+    WCHAR local[MAX_PATH];
+    swprintf_s(local, MAX_PATH, L"%ls\\repository_id.txt", dir);
+    DeleteFileW(local);
+    int reads_before = conn_log_count(L"Repository ID read by restic");
+    int prompts      = g_e2e_pwd_prompts;
+    static char first[128], second[128];
+    EXPECT_TRUE(p->get_file_w(L"\\MainRepo\\repository_id.txt", local, 0, &ri) == FS_FILE_OK &&
+                    read_small_file(local, first, sizeof(first)) == 66,
+                "repository_id.txt copied: 66 bytes");
+    EXPECT_TRUE(strspn(first, "0123456789abcdef") == 64 && strcmp(first + 64, "\r\n") == 0,
+                "One line: the 64-character ID and a Windows line end");
+    EXPECT_TRUE(p->get_file_w(L"\\MainRepo\\repository_id.txt", local, 0, &ri) == FS_FILE_EXISTS,
+                "An existing copy is reported first (overwrite protocol)");
+    EXPECT_TRUE(p->get_file_w(L"\\MainRepo\\Repository_ID.TXT", local, FS_COPYFLAGS_OVERWRITE, &ri) == FS_FILE_OK &&
+                    read_small_file(local, second, sizeof(second)) == 66 && strcmp(first, second) == 0,
+                "... and replaced by the same ID (the name compares ignoring case)");
+    EXPECT_TRUE(conn_log_count(L"Repository ID read by restic") == reads_before + 1 && g_e2e_pwd_prompts == prompts,
+                "restic read the ID once, without a prompt; the second copy came from the cache");
+    FILETIME copied = {0, 0}, relisted = {0, 0};
+    h = p->find_first_w(L"\\MainRepo", &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (wcscmp(fd.cFileName, L"repository_id.txt") == 0) relisted = fd.ftLastWriteTime;
+        } while (p->find_next_w(h, &fd));
+        p->find_close(h);
+    }
+    EXPECT_TRUE(file_mtime(local, &copied) && CompareFileTime(&copied, &asked) >= 0 && is_recent(&copied) &&
+                    CompareFileTime(&copied, &relisted) == 0,
+                "The copy has the time restic was asked for the ID, which the listing now shows too");
+    SetLastError(0);
+    EXPECT_TRUE(p->find_first_w(L"\\MainRepo\\repository_id.txt", &fd) == INVALID_HANDLE_VALUE &&
+                    GetLastError() == ERROR_PATH_NOT_FOUND &&
+                    p->get_file_w(L"\\MainRepo\\repository_id.txt\\x", local, FS_COPYFLAGS_OVERWRITE, &ri) ==
+                        FS_FILE_NOTFOUND &&
+                    p->get_file_w(L"\\MainRepo\\ids\\repository_id.txt", local, FS_COPYFLAGS_OVERWRITE, &ri) ==
+                        FS_FILE_NOTFOUND,
+                "repository_id.txt is no folder, has nothing below it and is only in the repository's folder");
+    DeleteFileW(local);
+}
+
 /* Scenario C: full end-to-end navigation (Level 0 -> Level 1 -> Level 2+, password retry & session) */
 static void test_live_end_to_end_navigation(void) {
     if (GetFileAttributesW(L"tmp\\restic.exe") == INVALID_FILE_ATTRIBUTES ||
@@ -865,7 +1220,9 @@ static void test_live_end_to_end_navigation(void) {
     int ini_len = snprintf(
         ini_text,
         sizeof(ini_text),
-        "[Settings]\r\nResticPath=%s\r\n[Logging]\r\nLogPath=%s\\log dir\\e2e.log\r\n"
+        "[Settings]\r\nResticPath=%s\r\nSnapshotTimeFormat=YYYY-MM-DDThh.mm.ss\r\n" /* ConnectionLog: default */
+        "CsvSeparator=;\r\n"
+        "[Logging]\r\nLogPath=%s\\log dir\\e2e.log\r\n"
         "[Repositories]\r\nMainRepo=%s\r\nSecondRepo=%s\r\nThirdRepo=%s\r\n"
         "ExtractRepo=%s\r\nHintRepo=%s\r\n"
         "MissingRepo=C:\\no_such_restic_repo_999\r\n%s=C:\\no_such_restic_repo_999\r\n",
@@ -878,8 +1235,9 @@ static void test_live_end_to_end_navigation(void) {
         repo_a,
         long_alias
     );
-    for (int i = 1; i <= 10; ++i) { /* More aliases than session slots (8) */
-        ini_len += snprintf(ini_text + ini_len, sizeof(ini_text) - (size_t)ini_len, "Slot%02d=%s\r\n", i, repo_a);
+    for (int i = 1; i <= 10 && ini_len > 0 && (size_t)ini_len < sizeof(ini_text); ++i) { /* More than 8 slots */
+        int wrote = snprintf(ini_text + ini_len, sizeof(ini_text) - (size_t)ini_len, "Slot%02d=%s\r\n", i, repo_a);
+        ini_len = wrote < 0 || (size_t)wrote >= sizeof(ini_text) - (size_t)ini_len ? -1 : ini_len + wrote;
     }
     EXPECT_TRUE(ini_len > 0 && (size_t)ini_len < sizeof(ini_text), "E2E INI fits its buffer");
     EXPECT_TRUE(write_file(ini, ini_text), "Write E2E INI");
@@ -889,32 +1247,93 @@ static void test_live_end_to_end_navigation(void) {
     EXPECT_TRUE(p.init_w(42, (void*)e2e_progress_proc, (void*)e2e_log_proc, (void*)e2e_request_proc) == 0,
                 "Register Total Commander callbacks");
 
-    /* 1. Level 1 (\MainRepo): wrong password on first prompt -> automatic retry -> 2 snapshots listed */
+    /* 1. Level 1 (\MainRepo): wrong password on first prompt -> automatic retry -> restic mount's folders */
     g_e2e_pwd_mode    = 0;
     g_e2e_pwd_prompts = 0;
     g_e2e_msg_dialogs = 0;
     g_e2e_error_logs  = 0;
 
     WIN32_FIND_DATAW fd;
-    HANDLE h = p.find_first_w(L"\\MainRepo", &fd);
-    EXPECT_TRUE(h != INVALID_HANDLE_VALUE, "Level 1 snapshot enumeration succeeds after password retry");
+    static WCHAR names[1024];
+    EXPECT_TRUE(list_names(&p, L"\\MainRepo", names, _countof(names)) &&
+                    wcscmp(names, L"hosts|ids|snapshots|tags|snapshots.csv|repository_id.txt") == 0,
+                "Level 1 shows restic mount's folders, snapshots.csv and repository_id.txt after a password retry");
     EXPECT_TRUE(g_e2e_pwd_prompts == 2, "Prompted twice (initial + 1 retry after wrong password)");
     EXPECT_TRUE(wcsstr(g_e2e_last_prompt, L"Wrong password") != NULL, "Retry prompt tells the user the password was wrong");
+    EXPECT_TRUE(wcscmp(g_e2e_last_title, L"MainRepo - Restic repository password") == 0,
+                "The dialog title names the repository (for password managers matching window titles)");
     EXPECT_TRUE(g_e2e_msg_dialogs == 0, "No error dialog when retry succeeds");
 
+    /* The levels above the snapshots come from the one snapshot list cached for this repository */
+    g_e2e_pwd_prompts = 0;
+    HANDLE h = p.find_first_w(L"\\MainRepo\\snapshots", &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE, "snapshots/ listed");
     WCHAR latest_snap[MAX_PATH] = {0};
     size_t snap_count = 0;
+    BOOL has_latest = FALSE;
+    WCHAR latest_link[MAX_PATH] = {0}, latest_folder_link[MAX_PATH] = {0};
     do {
         snap_count++;
-        wcsncpy_s(latest_snap, MAX_PATH, fd.cFileName, _TRUNCATE);
+        EXPECT_TRUE((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 && fd.ftLastWriteTime.dwHighDateTime != 0xFFFFFFFF,
+                    "Snapshot folders carry the snapshot time");
+        if (wcscmp(fd.cFileName, L"latest") == 0) {
+            has_latest = TRUE;
+        } else if (wcsncmp(fd.cFileName, L"latest \u2192 ", 9) == 0) {
+            /* latest → <short id> (8 characters) or latest → <the latest snapshot's folder> */
+            wcsncpy_s(wcslen(fd.cFileName) == 17 ? latest_link : latest_folder_link, MAX_PATH, fd.cFileName, _TRUNCATE);
+        } else if (wcscmp(fd.cFileName, latest_snap) > 0) {
+            wcsncpy_s(latest_snap, MAX_PATH, fd.cFileName, _TRUNCATE); /* Names sort by time */
+        }
     } while (p.find_next_w(h, &fd));
     p.find_close(h);
-    EXPECT_TRUE(snap_count == 2, "Both fixture snapshots returned at Level 1");
+    EXPECT_TRUE(snap_count == 5 && has_latest && wcslen(latest_link) == 17,
+                "Both fixture snapshots, latest, latest → <short id> and latest → <folder> in snapshots/");
+    EXPECT_TRUE(wcscmp(latest_folder_link + 9, latest_snap) == 0,
+                "latest → <folder> names the newest snapshot's folder, as restic mount's latest link does");
+    EXPECT_TRUE(latest_snap[4] == L'-' && latest_snap[10] == L'T' && latest_snap[13] == L'.' && wcslen(latest_snap) >= 19,
+                "Named by [Settings] SnapshotTimeFormat=YYYY-MM-DDThh.mm.ss");
+    EXPECT_TRUE(list_names(&p, L"\\MainRepo\\ids", names, _countof(names)) && wcslen(names) == 17 && names[8] == L'|',
+                "ids/ holds two 8-character short IDs");
+    WCHAR short_id[9] = {0};
+    wcsncpy_s(short_id, _countof(short_id), names, 8);
+    EXPECT_TRUE(list_names(&p, L"\\MainRepo\\hosts", names, _countof(names)) && wcschr(names, L'|') == NULL &&
+                names[0] != L'\0', "hosts/ holds the fixture's single host");
+    static WCHAR host_dir[MAX_PATH * 2];
+    swprintf_s(host_dir, _countof(host_dir), L"\\MainRepo\\hosts\\%ls", names);
+    EXPECT_TRUE(list_names(&p, host_dir, names, _countof(names)) && wcsstr(names, L"|latest") != NULL,
+                "hosts/<host>/ holds the snapshots and latest");
+    SetLastError(0);
+    EXPECT_TRUE(p.find_first_w(L"\\MainRepo\\tags", &fd) == INVALID_HANDLE_VALUE && GetLastError() == ERROR_NO_MORE_FILES,
+                "tags/ is empty: the fixture snapshots have no tags");
+    SetLastError(0);
+    EXPECT_TRUE(p.find_first_w(L"\\MainRepo\\no-such-folder", &fd) == INVALID_HANDLE_VALUE &&
+                GetLastError() == ERROR_PATH_NOT_FOUND, "Unknown folder below the alias -> ERROR_PATH_NOT_FOUND");
+    SetLastError(0);
+    EXPECT_TRUE(p.find_first_w(L"\\MainRepo\\snapshots\\1999-01-01_00-00-00", &fd) == INVALID_HANDLE_VALUE &&
+                GetLastError() == ERROR_PATH_NOT_FOUND, "Unknown snapshot -> ERROR_PATH_NOT_FOUND");
+    EXPECT_TRUE(g_e2e_pwd_prompts == 0 && g_e2e_msg_dialogs == 0, "No prompt and no dialog while browsing the tree");
+    test_snapshots_csv(&p, dir, short_id, latest_link + 9);
+    test_repository_id(&p, dir);
+
+    /* The snapshot root is the same through latest and ids/ */
+    static WCHAR via_latest[1024], via_id[1024];
+    EXPECT_TRUE(list_names(&p, L"\\MainRepo\\snapshots\\latest", via_latest, _countof(via_latest)) && via_latest[0],
+                "latest/ shows the newest snapshot's root");
+    static WCHAR id_path[MAX_PATH];
+    swprintf_s(id_path, _countof(id_path), L"\\MainRepo\\ids\\%ls", short_id);
+    EXPECT_TRUE(list_names(&p, id_path, via_id, _countof(via_id)) && wcscmp(via_id, via_latest) == 0,
+                "ids/<short id>/ shows a snapshot root");
+    static WCHAR link_path[MAX_PATH], via_link[1024], latest_id_path[MAX_PATH], via_latest_id[1024];
+    swprintf_s(link_path, _countof(link_path), L"\\MainRepo\\snapshots\\%ls", latest_link);
+    swprintf_s(latest_id_path, _countof(latest_id_path), L"\\MainRepo\\ids\\%ls", latest_link + 9);
+    EXPECT_TRUE(list_names(&p, link_path, via_link, _countof(via_link)) && wcscmp(via_link, via_latest) == 0 &&
+                list_names(&p, latest_id_path, via_latest_id, _countof(via_latest_id)) &&
+                wcscmp(via_latest_id, via_latest) == 0, "latest → <short id> is latest, and ids/<that id> too");
 
     /* 2. Level 2+ (\MainRepo\<snap>\...): session password cached in RAM (0 additional prompts) */
     g_e2e_pwd_prompts = 0;
     static WCHAR snap_root[MAX_PATH * 2], data_path[MAX_PATH * 2]; /* Static: /analyze (C6262) caps a frame at 16 KB */
-    swprintf_s(snap_root, _countof(snap_root), L"\\MainRepo\\%ls", latest_snap);
+    swprintf_s(snap_root, _countof(snap_root), L"\\MainRepo\\snapshots\\%ls", latest_snap);
     EXPECT_TRUE(descend_to_fixture_data(&p, snap_root, 0, data_path, _countof(data_path)),
                 "Descend snapshot directory tree down to fixture data folder");
 
@@ -949,6 +1368,7 @@ static void test_live_end_to_end_navigation(void) {
                 GetLastError() == ERROR_PATH_NOT_FOUND, "Missing snapshot path returns ERROR_PATH_NOT_FOUND");
     EXPECT_TRUE(g_e2e_pwd_prompts == 0 && g_e2e_msg_dialogs == 0,
                 "All navigations within MainRepo reused the cached RAM password with no popups");
+    test_e2e_snapshot_cache(&p, dir, data_path);
 
     /* 3. Repositories keep independent sessions: SecondRepo prompts once, MainRepo is NOT asked again */
     g_e2e_pwd_mode = 1;
@@ -964,6 +1384,34 @@ static void test_live_end_to_end_navigation(void) {
     p.find_close(h);
     EXPECT_TRUE(g_e2e_pwd_prompts == 1, "Alternating between two panels' repositories never re-prompts");
 
+    /* The connection log (on by default): one connection for all repositories, announced once */
+    EXPECT_TRUE(conn_log_count(L"1:CONNECT \\\n") == 1 && conn_log_count(L"1:CONNECT") == 1,
+                "One connection (MSGTYPE_CONNECT \"CONNECT \\\"), announced when a repository was first used, "
+                "not again for another repository nor after the forget entry");
+    /* What the log shows besides the background work */
+    EXPECT_TRUE(conn_log_count(L"3:[MainRepo] Password refused by restic\n") >= 1 &&
+                conn_log_count(L"3:[MainRepo] Password accepted\n") >= 1 && conn_log_count(L"3:[SecondRepo] Password accepted\n") == 1,
+                "Passwords refused and accepted are logged (the connection is announced before the first prompt)");
+    EXPECT_TRUE(conn_log_count(L"3:[MainRepo] Snapshot list read: 2 snapshots, ") >= 1,
+                "The snapshot list read in the foreground is logged, also on the very first visit");
+    EXPECT_TRUE(conn_log_count(L" entries listed by restic in ") >= 1, "Folders listed by restic are logged with the time");
+    EXPECT_TRUE(conn_log_count(L"4:\\MainRepo\\snapshots\\") >= 1 && conn_log_count(L"\\readme.txt -> ") >= 1,
+                "Files copied are logged as MSGTYPE_TRANSFERCOMPLETE \"source -> target\"");
+    /* Its Disconnect button forgets every password and what was read: the next visits ask again */
+    EXPECT_TRUE(p.disconnect_w != NULL && p.disconnect_w(L"\\"), "FsDisconnectW succeeds");
+    EXPECT_TRUE(conn_log_count(L"2:DISCONNECT \\\n") == 1 &&
+                conn_log_count(L"3:All remembered passwords and cached listings forgotten\n") == 1,
+                "Disconnect is logged (MSGTYPE_DISCONNECT)");
+    EXPECT_TRUE(p.disconnect_w(L"\\") && p.disconnect_w(NULL) && conn_log_count(L"2:DISCONNECT") == 1,
+                "Disconnecting again succeeds and does nothing");
+    h = p.find_first_w(L"\\SecondRepo", &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 2, "After Disconnect the password is asked again");
+    p.find_close(h);
+    EXPECT_TRUE(conn_log_count(L"1:CONNECT \\\n") == 2, "...and the plugin connected again");
+    h = p.find_first_w(L"\\MainRepo", &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 3 && conn_log_count(L"1:CONNECT \\\n") == 2,
+                "Disconnect forgot every repository's password; the connection is not announced twice");
+    p.find_close(h);
     /* 4. Exhausting all 3 password attempts returns ERROR_ACCESS_DENIED and shows an error dialog */
     g_e2e_pwd_mode    = 2;
     g_e2e_pwd_prompts = 0;
@@ -1014,6 +1462,12 @@ static void test_live_end_to_end_navigation(void) {
     h = p.find_first_w(L"\\Slot01", &fd);
     p.find_close(h);
     EXPECT_TRUE(g_e2e_pwd_prompts == 1, "Oldest session was evicted and requires a new password (no crash, no corruption)");
+    BOOL recycled_logged = FALSE; /* Logged by a worker: the eviction happens with the session lock held */
+    for (int i = 0; i < 100 && !recycled_logged; ++i) {
+        recycled_logged = conn_log_count(L"to make room for another repository's (8 are remembered at most)") >= 1;
+        if (!recycled_logged) Sleep(50);
+    }
+    EXPECT_TRUE(recycled_logged, "A password forgotten to make room is logged");
 
     /* 5. Non-existent repository (\MissingRepo) -> exit code 10 -> ERROR_PATH_NOT_FOUND + dialog */
     g_e2e_pwd_mode    = 1;
@@ -1058,10 +1512,11 @@ static void test_live_end_to_end_navigation(void) {
     h = p.find_first_w(L"\\SecondRepo", &fd);
     EXPECT_TRUE(h != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 1, "Unverified password not cached after a user abort");
     p.find_close(h);
-    /* A password restic has accepted survives a later ESC */
+    /* A password restic has accepted survives a later ESC (inside a snapshot: the folders above come from
+       the cached snapshot list and run no restic that could be aborted) */
     g_e2e_force_abort = TRUE;
-    EXPECT_TRUE(p.find_first_w(L"\\SecondRepo", &fd) == INVALID_HANDLE_VALUE && GetLastError() == ERROR_CANCELLED,
-                "Second user abort");
+    EXPECT_TRUE(p.find_first_w(L"\\SecondRepo\\snapshots\\latest", &fd) == INVALID_HANDLE_VALUE &&
+                GetLastError() == ERROR_CANCELLED, "Second user abort");
     g_e2e_force_abort = FALSE;
     g_e2e_pwd_prompts = 0;
     h = p.find_first_w(L"\\SecondRepo", &fd);
@@ -1076,7 +1531,7 @@ static void test_live_end_to_end_navigation(void) {
         g_e2e_mt_failures = 0;
         for (int i = 0; i < THREADS; ++i) {
             jobs[i].plugin = &p;
-            jobs[i].path   = (i % 2) ? L"\\MainRepo" : L"\\SecondRepo";
+            jobs[i].path   = (i % 2) ? L"\\MainRepo\\snapshots" : L"\\SecondRepo\\snapshots";
             threads[i]     = CreateThread(NULL, 0, mt_list_worker, &jobs[i], 0, NULL);
         }
         WaitForMultipleObjects(THREADS, threads, TRUE, 120000);
@@ -1143,7 +1598,7 @@ static void test_live_end_to_end_navigation(void) {
                 wcscmp(g_e2e_last_msg, L"No repository password was remembered.") == 0 &&
                 wcscmp(exec_name, L"\\") == 0,
                 "Nothing to forget: a stale entry still sends Total Commander back to the root");
-    WCHAR some_file[] = L"\\MainRepo\\2026-10-18_12-00-00_[abcd1234]\\readme.txt";
+    WCHAR some_file[] = L"\\MainRepo\\snapshots\\2026-10-18_12-00-00\\readme.txt";
     WCHAR properties[] = L"properties", chmod_verb[] = L"chmod 755", quote_verb[] = L"quote cd x";
     EXPECT_TRUE(p.execute_w(NULL, some_file, open_verb) == FS_EXEC_YOURSELF,
                 "Enter on a snapshot file is left to Total Commander (download and open)");
@@ -1151,6 +1606,11 @@ static void test_live_end_to_end_navigation(void) {
                 p.execute_w(NULL, some_file, chmod_verb) == FS_EXEC_ERROR &&
                 p.execute_w(NULL, some_file, quote_verb) == FS_EXEC_ERROR,
                 "properties is a no-op, chmod and quote commands are refused");
+    WCHAR mode_binary[] = L"MODE I", mode_text[] = L"mode A", mode_auto[] = L"MODE X *.txt *.ini", modem[] = L"modem";
+    WCHAR repo_dir[] = L"\\MainRepo";
+    EXPECT_TRUE(p.execute_w(NULL, repo_dir, mode_binary) == FS_EXEC_OK && p.execute_w(NULL, repo_dir, mode_text) == FS_EXEC_OK &&
+                p.execute_w(NULL, repo_dir, mode_auto) == FS_EXEC_OK && p.execute_w(NULL, repo_dir, modem) == FS_EXEC_ERROR,
+                "The toolbar's transfer modes are accepted and ignored (files are copied byte for byte)");
     EXPECT_TRUE(p.find_first_w(forget, &fd) == INVALID_HANDLE_VALUE, "The forget entry is not a folder");
 
     /* [Logging] LogPath: restic runs, exit codes and prompts are logged; passwords never are */
@@ -1268,7 +1728,8 @@ static void test_live_paths_with_spaces(void) {
     int ini_len = snprintf(
         ini_text,
         sizeof(ini_text),
-        "[Settings]\r\nResticPath=%s\r\nPasswordTimeoutSeconds=5\r\n[Logging]\r\nLogPath=%s\\spaces.log\r\n"
+        "[Settings]\r\nResticPath=%s\r\nPasswordTimeoutSeconds=5\r\nConnectionLog=off\r\n"
+        "[Logging]\r\nLogPath=%s\\spaces.log\r\n"
         "[Repositories]\r\n"
         "Plain=%s\r\nTrailing Backslash=%s\\\r\nQuoted=\"%s\"\r\nQuoted Trailing=\"%s\\\"\r\nTimed=%s\r\n",
         exe_u8, dir_u8, repo_u8, repo_u8, repo_u8, repo_u8, repo_u8
@@ -1278,6 +1739,7 @@ static void test_live_paths_with_spaces(void) {
 
     Plugin p;
     EXPECT_TRUE(load_plugin_copy(dir, &p), "Load plugin copy from a folder with spaces");
+    int connects_before = conn_log_count(L"1:CONNECT"); /* ConnectionLog=off: none here */
     EXPECT_TRUE(p.init_w(43, (void*)e2e_progress_proc, (void*)e2e_log_proc, (void*)e2e_request_proc) == 0,
                 "Register Total Commander callbacks (spaces)");
 
@@ -1287,7 +1749,7 @@ static void test_live_paths_with_spaces(void) {
         g_e2e_pwd_prompts = 0;
         g_e2e_msg_dialogs = 0;
         WCHAR path[MAX_PATH];
-        swprintf_s(path, MAX_PATH, L"\\%ls", aliases[i]);
+        swprintf_s(path, MAX_PATH, L"\\%ls\\snapshots", aliases[i]);
         WIN32_FIND_DATAW fd;
         HANDLE h = p.find_first_w(path, &fd);
         size_t snaps = 0;
@@ -1298,7 +1760,7 @@ static void test_live_paths_with_spaces(void) {
         char msg[160];
         snprintf(msg, sizeof(msg), "Snapshots listed through alias #%u (path with spaces), one prompt, no error",
                  (unsigned)i);
-        EXPECT_TRUE(snaps == 2 && g_e2e_pwd_prompts == 1 && g_e2e_msg_dialogs == 0, msg);
+        EXPECT_TRUE(snaps == 5 && g_e2e_pwd_prompts == 1 && g_e2e_msg_dialogs == 0, msg); /* Two, latest, aliases */
     }
 
     /* PasswordTimeoutSeconds=5: reused within the timeout (counted from when restic first accepted
@@ -1325,7 +1787,7 @@ static void test_live_paths_with_spaces(void) {
        in active use outlives the timeout; once it is left alone the password expires */
     int reset_len = snprintf(
         ini_text, sizeof(ini_text),
-        "[Settings]\r\nResticPath=%s\r\nPasswordTimeoutSeconds=4\r\nPasswordTimeoutResetOnUse=yes\r\n"
+        "[Settings]\r\nResticPath=%s\r\nPasswordTimeoutSeconds=4\r\nPasswordTimeoutResetOnUse=yes\r\nConnectionLog=off\r\n"
         "[Logging]\r\nLogPath=%s\\spaces.log\r\n[Repositories]\r\nSliding=%s\r\n",
         exe_u8, dir_u8, repo_u8);
     EXPECT_TRUE(reset_len > 0 && (size_t)reset_len < sizeof(ini_text) && write_file(ini, ini_text),
@@ -1341,6 +1803,36 @@ static void test_live_paths_with_spaces(void) {
     h2 = p.find_first_w(L"\\Sliding", &fd2);
     if (h2 != INVALID_HANDLE_VALUE) p.find_close(h2);
     EXPECT_TRUE(h2 != INVALID_HANDLE_VALUE && g_e2e_pwd_prompts == 2, "Password expires once it is no longer used");
+
+    /* SnapshotListRefreshSeconds: an outdated snapshot list is still shown at once, and re-read in
+       the background for the next listing */
+    int fresh_len = snprintf(
+        ini_text, sizeof(ini_text),
+        "[Settings]\r\nResticPath=%s\r\nSnapshotListRefreshSeconds=1\r\nConnectionLog=off\r\n"
+        "[Logging]\r\nLogPath=%s\\spaces.log\r\n[Repositories]\r\nFresh=%s\r\n",
+        exe_u8, dir_u8, repo_u8);
+    EXPECT_TRUE(fresh_len > 0 && (size_t)fresh_len < sizeof(ini_text) && write_file(ini, ini_text),
+                "Rewrite the INI with SnapshotListRefreshSeconds=1");
+    g_e2e_pwd_prompts = 0;
+    size_t before = 0, stale = 0, after = 0;
+    count_entries(&p, L"\\Fresh\\snapshots", &before);
+    EXPECT_TRUE(before == 5 && g_e2e_pwd_prompts == 1, "Two snapshots, latest and its two aliases");
+    EXPECT_TRUE(run_restic_backup(exe, repo), "Another snapshot taken by restic itself");
+    Sleep(1500);
+    count_entries(&p, L"\\Fresh\\snapshots", &stale);
+    EXPECT_TRUE(stale == 5, "The outdated list is shown at once");
+    BOOL reread = FALSE;
+    for (int i = 0; i < 300 && !reread; ++i) {
+        char* text = read_text_file(log_file);
+        reread = text && strstr(text, "Snapshots of 'Fresh' re-read in the background");
+        free(text);
+        if (!reread) Sleep(200);
+    }
+    EXPECT_TRUE(reread, "Meanwhile restic re-read it in the background");
+    count_entries(&p, L"\\Fresh\\snapshots", &after);
+    EXPECT_TRUE(after == 6 && g_e2e_pwd_prompts == 1, "The next listing shows the new snapshot, without a prompt");
+    EXPECT_TRUE(conn_log_count(L"1:CONNECT") == connects_before && conn_log_count(L"[Fresh]") == 0,
+                "With ConnectionLog=off no connection is announced and nothing goes to its log");
 
     unload_plugin_copy(&p, dir);
     DeleteFileW(ini);
@@ -1358,7 +1850,60 @@ static BOOL path_next_to_exe(const WCHAR* name, WCHAR* out, size_t cap) {
     return swprintf_s(out, cap, L"%ls\\%ls", exe, name) > 0;
 }
 
+/*
+ * A test that hangs (a deadlock in the plugin, a restic that never ends) must not keep a CI run
+ * waiting for hours without a word: when no check has finished for WATCHDOG_MINUTES, say which one
+ * finished last and what the connection log holds, and end the process. TerminateProcess, not
+ * exit(): a deadlock may hold the loader lock, which exit() would need for DLL_PROCESS_DETACH.
+ */
+#ifndef WATCHDOG_MINUTES
+#define WATCHDOG_MINUTES 10u
+#endif
+static DWORD WINAPI watchdog_thread(void* arg) {
+    (void)arg;
+    LONG seen       = -1;
+    ULONGLONG since = GetTickCount64();
+    for (;;) {
+        Sleep(5000);
+        LONG done = InterlockedCompareExchange(&g_checks_done, 0, 0);
+        if (done != seen) {
+            seen  = done;
+            since = GetTickCount64();
+            continue;
+        }
+        if (GetTickCount64() - since < WATCHDOG_MINUTES * 60000ull) continue;
+        printf("[FAIL] Watchdog: no check finished for %u minutes; the last one was %s:%ld: %s\n", WATCHDOG_MINUTES,
+               g_last_check_function, (long)g_last_check_line, g_last_check);
+        if (TryAcquireSRWLockShared(&g_e2e_conn_log_lock)) {
+            /* As UTF-8: printf("%ls") would stop at the first character the C locale cannot show (→) */
+            static char tail[3000 * 3 + 1];
+            size_t len = wcslen(g_e2e_conn_log);
+            int n = WideCharToMultiByte(CP_UTF8, 0, g_e2e_conn_log + (len > 3000 ? len - 3000 : 0), -1, tail,
+                                        (int)sizeof(tail), NULL, NULL);
+            ReleaseSRWLockShared(&g_e2e_conn_log_lock);
+            printf("       End of the connection log:\n");
+            if (n > 1) fwrite(tail, 1, (size_t)n - 1, stdout);
+            printf("\n");
+        }
+        fflush(stdout);
+        TerminateProcess(GetCurrentProcess(), 3);
+    }
+}
+
 int main(void) {
+    /* No modal system dialog (crash, missing disk, failed start) may stop an unattended CI run */
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+#if defined(_DEBUG) && !defined(__SANITIZE_ADDRESS__)
+    /* Nor may a Debug CRT report: it goes to stderr (the plugin's own CRT does the same, see DllMain) */
+    _CrtSetReportMode(_CRT_WARN, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_WARN, _CRTDBG_FILE_STDERR);
+    _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
+    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
+#endif
+    HANDLE watchdog = CreateThread(NULL, 0, watchdog_thread, NULL, 0, NULL);
+    if (watchdog) CloseHandle(watchdog);
     printf("Running Restic WFX plugin DLL smoke tests...\n");
     if (!path_next_to_exe(L"" RESTIC_WFX_FILE_NAME, g_plugin_dll, MAX_PATH) ||
         !path_next_to_exe(L"pluginst.inf", g_pluginst_inf, MAX_PATH)) {
