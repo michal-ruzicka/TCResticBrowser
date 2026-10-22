@@ -31,7 +31,7 @@
 #include "log.h"
 #include "version.h"
 
-#define SESSION_MAX_PASSWORD  512
+#define SESSION_MAX_PASSWORD  REPO_SECRET_CHARS
 #define SESSION_SLOTS         8
 #define MAX_PASSWORD_ATTEMPTS 3
 /*
@@ -75,14 +75,27 @@ static void conn_log(BOOL deferred, const WCHAR* alias, const WCHAR* format, ...
  */
 typedef struct {
     BOOL  used;
+    BOOL  has_password;                     /* A typed-in repository password is cached */
+    BOOL  has_aws_secret;                   /* A typed-in AWS secret access key is cached */
     WCHAR alias[MAX_PATH];
-    WCHAR password[SESSION_MAX_PASSWORD]; /* CryptProtectMemory ciphertext, never plaintext */
-    ULONGLONG cached_at;                  /* GetTickCount64() when restic first accepted it (last used) */
-    ULONGLONG generation;                 /* Unique per session_put: tells a replaced password apart */
+    WCHAR password[SESSION_MAX_PASSWORD];   /* CryptProtectMemory ciphertext, never plaintext */
+    WCHAR aws_secret[SESSION_MAX_PASSWORD]; /* Likewise */
+    ULONGLONG cached_at;                    /* GetTickCount64() when restic first accepted it (last used) */
+    ULONGLONG generation;                   /* Unique per session_put: tells a replaced password apart */
 } SessionSlot;
+/*
+ * A slot holding neither: the repository gets its password from PasswordFile or PasswordCommand
+ * and needs no secret key, and restic accepted that; the slot then only lets what was read with it
+ * be cached and dropped like a password's.
+ */
 
 _Static_assert(sizeof(((SessionSlot*)0)->password) % CRYPTPROTECTMEMORY_BLOCK_SIZE == 0,
                "CryptProtectMemory works on whole blocks");
+_Static_assert(sizeof(((SessionSlot*)0)->aws_secret) % CRYPTPROTECTMEMORY_BLOCK_SIZE == 0,
+               "CryptProtectMemory works on whole blocks");
+_Static_assert(sizeof(((SessionSlot*)0)->password) == sizeof(((RepoSecrets*)0)->password) &&
+               sizeof(((SessionSlot*)0)->aws_secret) == sizeof(((RepoSecrets*)0)->aws_secret_access_key),
+               "session_get decrypts a slot into RepoSecrets");
 
 typedef HRESULT (WINAPI *PFN_WerRegisterExcludedMemoryBlock)(const void*, DWORD);
 typedef HRESULT (WINAPI *PFN_WerUnregisterExcludedMemoryBlock)(const void*);
@@ -216,14 +229,14 @@ typedef struct {
 } RepoPath;
 
 /*
- * One operation on a repository, run by run_with_password() with a password that is either the
- * cached one (trusted: restic accepted it before, so cached data read with it may be shown) or one
- * just typed in (data must come from restic, which checks it).
+ * One operation on a repository, run by run_with_password() with credentials that are either the
+ * cached ones (trusted: restic accepted them before, so cached data read with them may be shown)
+ * or ones just typed in or not yet proven (data must come from restic, which checks them).
  */
 typedef struct {
     const ResticConfig* cfg;
     const ResticRepoEntry* repo;
-    const ResticRepo* access; /* repo's target with the password, as restic gets them */
+    const ResticRepo* access; /* repo's target with its credentials, as restic gets them */
     BOOL trusted;
     const ResticExecOptions* exec;
     ULONGLONG generation;    /* repo_cache_generation() before the operation */
@@ -322,38 +335,57 @@ static SessionSlot* session_find_locked(const WCHAR* alias) {
     return NULL;
 }
 
+/* Decrypts one ciphertext buffer of a slot into `out` (same size); FALSE (and `out` wiped) on failure */
+static BOOL session_decrypt(const WCHAR* cipher, WCHAR* out, size_t chars) {
+    memcpy(out, cipher, chars * sizeof(WCHAR));
+    if (!CryptUnprotectMemory(out, (DWORD)(chars * sizeof(WCHAR)), CRYPTPROTECTMEMORY_SAME_PROCESS)) {
+        SecureZeroMemory(out, chars * sizeof(WCHAR));
+        return FALSE;
+    }
+    out[chars - 1] = L'\0';
+    return TRUE;
+}
+
 /*
- * Decrypts the cached password of `alias` into out_pwd (SESSION_MAX_PASSWORD characters; the caller
- * wipes it) and returns its generation for session_touch/session_forget. Returns FALSE if none is
- * cached.
+ * Decrypts what is cached for `alias` into `out` (the caller wipes it; empty strings for what the
+ * slot does not hold) and returns its generation for session_touch/session_forget. Returns FALSE if
+ * nothing is cached.
  */
-static BOOL session_get(const WCHAR* alias, WCHAR* out_pwd, size_t cap, ULONGLONG* out_generation) {
+static BOOL session_get(const WCHAR* alias, RepoSecrets* out, ULONGLONG* out_generation) {
     BOOL found      = FALSE;
     *out_generation = 0;
-    if (cap < SESSION_MAX_PASSWORD) return FALSE;
+    SecureZeroMemory(out, sizeof(*out));
     AcquireSRWLockExclusive(&g_SessionLock);
     session_expire_locked();
     SessionSlot* slot = session_find_locked(alias);
     if (slot) {
-        memcpy(out_pwd, slot->password, sizeof(slot->password));
-        found = CryptUnprotectMemory(out_pwd, (DWORD)sizeof(slot->password), CRYPTPROTECTMEMORY_SAME_PROCESS);
+        found = (!slot->has_password || session_decrypt(slot->password, out->password, _countof(out->password))) &&
+                (!slot->has_aws_secret || session_decrypt(slot->aws_secret, out->aws_secret_access_key,
+                                                          _countof(out->aws_secret_access_key)));
         if (!found) {
-            SecureZeroMemory(out_pwd, sizeof(slot->password));
+            SecureZeroMemory(out, sizeof(*out));
             session_wipe_slot_locked(slot);
         } else {
             *out_generation = slot->generation;
         }
-        out_pwd[SESSION_MAX_PASSWORD - 1] = L'\0';
     }
     ReleaseSRWLockExclusive(&g_SessionLock);
     return found;
 }
 
+/* Copies `text` into a slot buffer of SESSION_MAX_PASSWORD characters and encrypts it there */
+static BOOL session_encrypt(WCHAR* slot_buffer, const WCHAR* text) {
+    wcsncpy_s(slot_buffer, SESSION_MAX_PASSWORD, text, _TRUNCATE);
+    return CryptProtectMemory(slot_buffer, (DWORD)(SESSION_MAX_PASSWORD * sizeof(WCHAR)),
+                              CRYPTPROTECTMEMORY_SAME_PROCESS);
+}
+
 /*
- * Stores (or replaces) the password of `alias`; the least recently cached slot makes room if
- * needed. FALSE when it could not be kept.
+ * Stores (or replaces) what restic accepted for `alias`: the typed-in password and AWS secret key
+ * (NULL or empty: not asked for); the least recently cached slot makes room if needed. FALSE when
+ * it could not be kept.
  */
-static BOOL session_put(const WCHAR* alias, const WCHAR* password) {
+static BOOL session_put(const WCHAR* alias, const WCHAR* password, const WCHAR* aws_secret) {
     AcquireSRWLockExclusive(&g_SessionLock);
     if (!session_table_locked()) {
         ReleaseSRWLockExclusive(&g_SessionLock);
@@ -379,13 +411,15 @@ static BOOL session_put(const WCHAR* alias, const WCHAR* password) {
         session_wipe_slot_locked(slot); /* Recycled: the other repository's data goes with it */
     }
     SecureZeroMemory(slot, sizeof(*slot));
-    slot->used       = TRUE;
-    slot->generation = ++g_SessionGeneration;
+    slot->used           = TRUE;
+    slot->generation     = ++g_SessionGeneration;
+    slot->has_password   = password && password[0] != L'\0';
+    slot->has_aws_secret = aws_secret && aws_secret[0] != L'\0';
     wcsncpy_s(slot->alias, MAX_PATH, alias, _TRUNCATE);
-    wcsncpy_s(slot->password, SESSION_MAX_PASSWORD, password, _TRUNCATE);
     slot->cached_at = GetTickCount64();
     BOOL kept = TRUE;
-    if (!CryptProtectMemory(slot->password, (DWORD)sizeof(slot->password), CRYPTPROTECTMEMORY_SAME_PROCESS)) {
+    if ((slot->has_password && !session_encrypt(slot->password, password)) ||
+        (slot->has_aws_secret && !session_encrypt(slot->aws_secret, aws_secret))) {
         DWORD err = GetLastError();
         SecureZeroMemory(slot, sizeof(*slot)); /* Never keep a plaintext password */
         repo_cache_forget(alias);              /* Nor what was read with it */
@@ -493,13 +527,16 @@ static BOOL is_forget_entry_name(const WCHAR* name) {
     return name && _wcsnicmp(name, FORGET_ENTRY_PREFIX, wcslen(FORGET_ENTRY_PREFIX)) == 0;
 }
 
-/* Number of passwords currently cached */
+/*
+ * Number of repositories with a typed-in password or secret key cached; those that get their
+ * password from a file or command and need no secret key hold nothing to forget
+ */
 static unsigned cached_password_count(void) {
     unsigned n = 0;
     AcquireSRWLockExclusive(&g_SessionLock);
     session_expire_locked();
     for (int i = 0; g_Sessions && i < SESSION_SLOTS; ++i) {
-        if (g_Sessions[i].used) n++;
+        if (g_Sessions[i].used && (g_Sessions[i].has_password || g_Sessions[i].has_aws_secret)) n++;
     }
     ReleaseSRWLockExclusive(&g_SessionLock);
     return n;
@@ -562,10 +599,10 @@ static BOOL load_config(ResticConfig* cfg) {
     return ok;
 }
 
-/* RepoPasswordSource for the background listings: the cached password, never a prompt */
-static BOOL cached_password(const WCHAR* alias, WCHAR* out, size_t cap) {
+/* RepoSecretSource for the background listings: what is cached, never a prompt */
+static BOOL cached_secrets(const WCHAR* alias, RepoSecrets* out) {
     ULONGLONG generation = 0;
-    return session_get(alias, out, cap, &generation);
+    return session_get(alias, out, &generation);
 }
 
 /* The Network Neighborhood root name: [Settings] RootName, or CONFIG_DEFAULT_ROOT_NAME */
@@ -670,6 +707,31 @@ static BOOL prompt_repository_password(
     log_write(L"Password prompt for '%ls'%ls: %u characters entered%ls%ls", repo_alias,
               is_retry ? L" (retry)" : L"", (unsigned)wcslen(out_pwd), odd ? L"; the password " : L"",
               odd ? hint : L"");
+    return TRUE;
+}
+
+/*
+ * Asks for the AWS secret access key of a repository with [Repository: <alias>] AWS_ACCESS_KEY_ID,
+ * like the password: the alias in the title for password managers, nothing logged but its length.
+ * FALSE when the dialog is cancelled or nothing is entered.
+ */
+static BOOL prompt_aws_secret(const ResticRepoEntry* repo, WCHAR* out_secret, size_t cap) {
+    if (!g_RequestProc || cap == 0) return FALSE;
+    WCHAR prompt_text[MAX_PATH + CONFIG_MAX_VALUE + 128];
+    _snwprintf_s(prompt_text, _countof(prompt_text), _TRUNCATE,
+                 L"Enter the S3 secret access key of %ls for repository '%ls':", repo->aws_access_key_id, repo->alias);
+    WCHAR title[MAX_PATH + 64];
+    _snwprintf_s(title, _countof(title), _TRUNCATE, L"%ls - S3 secret access key", repo->alias);
+    out_secret[0] = L'\0';
+    BOOL accepted = g_RequestProc(g_PluginNr, RT_Password, title, prompt_text, out_secret, (int)cap);
+    out_secret[cap - 1] = L'\0';
+    if (!accepted || out_secret[0] == L'\0') {
+        log_write(L"S3 secret key prompt for '%ls': %ls", repo->alias,
+                  accepted ? L"empty key, treated as cancel" : L"cancelled");
+        SecureZeroMemory(out_secret, cap * sizeof(WCHAR));
+        return FALSE;
+    }
+    log_write(L"S3 secret key prompt for '%ls': %u characters entered", repo->alias, (unsigned)wcslen(out_secret));
     return TRUE;
 }
 
@@ -851,21 +913,36 @@ static BOOL password_worth_caching(ResticResult res) {
 }
 
 /*
- * TRUE when config_resolve_restic_path found restic.exe; otherwise shows the reason (a configured
- * ResticPath that is missing, or no restic.exe at all) before any password prompt
+ * TRUE when config_resolve_restic_path found restic.exe and the repository's [Repository: <alias>]
+ * settings are usable; otherwise shows the reason (a configured ResticPath that is missing, no
+ * restic.exe at all, a setting that cannot be used) before any password prompt
  */
-static BOOL restic_path_usable(const ResticConfig* cfg, const WCHAR* repo_alias) {
-    if (config_is_absolute_path(cfg->restic_path)) return TRUE;
-    report_plugin_error(repo_alias, cfg->restic_path_error[0] != L'\0' ? cfg->restic_path_error
-                                                                       : L"restic.exe not found.");
-    return FALSE;
+static BOOL repository_usable(const ResticConfig* cfg, const ResticRepoEntry* repo) {
+    if (!config_is_absolute_path(cfg->restic_path)) {
+        report_plugin_error(repo->alias, cfg->restic_path_error[0] != L'\0' ? cfg->restic_path_error
+                                                                            : L"restic.exe not found.");
+        return FALSE;
+    }
+    if (repo->settings_error[0] != L'\0') {
+        report_plugin_error(repo->alias, repo->settings_error);
+        return FALSE;
+    }
+    return TRUE;
 }
 
 /*
- * Runs `op` with the repository's password: the cached one, or one asked for (up to
- * MAX_PASSWORD_ATTEMPTS prompts while restic answers "wrong password"). A typed password is cached
- * once restic accepted it (password_worth_caching), a cached one wiped when restic refuses it.
- * Returns RESTIC_ERR_CANCELLED when the user cancels the prompt or enters nothing.
+ * Runs `op` with the repository's credentials. The password is typed in, unless the repository
+ * has a PasswordFile or PasswordCommand, which restic reads itself; with AWS_ACCESS_KEY_ID the S3
+ * secret key is typed in as well, before the password. What is cached is used; otherwise the user
+ * is asked, up to MAX_PASSWORD_ATTEMPTS times for the password while restic answers "wrong
+ * password" (that answer also proves the secret key right: restic read the repository's keys).
+ * A password from a file or command is not asked for again: restic's refusal is the result.
+ *
+ * Once restic accepted the credentials (password_worth_caching) what was typed in is cached, and
+ * so, for a password from a file or command, is the fact that restic accepted it, which lets the
+ * repository's listings be cached; cached credentials that restic refuses are forgotten, and so is
+ * a cache entry for credentials the INI no longer asks for. Returns RESTIC_ERR_CANCELLED when the
+ * user cancels a prompt or enters nothing.
  */
 static ResticResult run_with_password(
     const ResticConfig* cfg,
@@ -876,21 +953,38 @@ static ResticResult run_with_password(
     WCHAR* err_msg,
     size_t err_cap
 ) {
-    WCHAR password[SESSION_MAX_PASSWORD] = {0}; /* Local copy, wiped before returning */
+    RepoSecrets secrets;                         /* Local copies, wiped before returning */
     WCHAR wrong_hint[PASSWORD_HINT_CHARS] = {0}; /* What looked odd in a rejected password */
     ULONGLONG cached_generation          = 0;
+    BOOL need_password = repo->password_file[0] == L'\0' && repo->password_command[0] == L'\0';
+    BOOL need_secret   = repo->aws_access_key_id[0] != L'\0';
     /* Before the password is taken: if it is wiped meanwhile, nothing read with it is cached */
     ULONGLONG cache_generation = repo_cache_generation();
     /* As an FTP plugin announces a connection when it starts connecting: the log then shows how it went */
     connection_announce();
-    BOOL have_password = session_get(repo->alias, password, _countof(password), &cached_generation);
-    BOOL from_cache    = have_password; /* Cached: not stored again (see session_touch) */
+    BOOL from_cache = session_get(repo->alias, &secrets, &cached_generation); /* Not stored again (session_touch) */
+    if (from_cache && ((secrets.password[0] != L'\0') != need_password ||
+                       (secrets.aws_secret_access_key[0] != L'\0') != need_secret)) {
+        /* The INI changed how the repository gets its credentials since they were cached */
+        session_forget(repo->alias, cached_generation);
+        cache_generation = repo_cache_generation();
+        SecureZeroMemory(&secrets, sizeof(secrets));
+        from_cache = FALSE;
+        conn_log(FALSE, repo->alias, L"The remembered credentials were forgotten: the INI file changed how they are given");
+    }
+    if (!from_cache && need_secret &&
+        !prompt_aws_secret(repo, secrets.aws_secret_access_key, _countof(secrets.aws_secret_access_key))) {
+        SecureZeroMemory(&secrets, sizeof(secrets));
+        return RESTIC_ERR_CANCELLED;
+    }
+    BOOL have_password = !need_password || secrets.password[0] != L'\0';
     ResticResult res   = RESTIC_ERR_WRONG_PASSWORD;
 
     for (int attempt = 0; attempt < MAX_PASSWORD_ATTEMPTS; ++attempt) {
         if (!have_password) {
-            if (!prompt_repository_password(repo->alias, attempt > 0, wrong_hint, password, _countof(password))) {
-                SecureZeroMemory(password, sizeof(password));
+            if (!prompt_repository_password(repo->alias, attempt > 0, wrong_hint, secrets.password,
+                                            _countof(secrets.password))) {
+                SecureZeroMemory(&secrets, sizeof(secrets));
                 return RESTIC_ERR_CANCELLED;
             }
             have_password = TRUE;
@@ -898,7 +992,7 @@ static ResticResult run_with_password(
         }
 
         err_msg[0] = L'\0';
-        ResticRepo access = {repo->target, password};
+        ResticRepo access = restic_repo_of(repo, secrets.password, secrets.aws_secret_access_key);
         RepoCall call     = {cfg, repo, &access, from_cache, exec, cache_generation, err_msg, err_cap};
         res = op(&call, ctx);
 
@@ -907,12 +1001,14 @@ static ResticResult run_with_password(
                 session_forget(repo->alias, cached_generation);
                 /* Forgetting it dropped the repository's cache: what the typed password reads is kept */
                 cache_generation = repo_cache_generation();
+                from_cache       = FALSE;
                 conn_log(FALSE, repo->alias, L"The remembered password was refused by restic and forgotten");
             } else {
                 conn_log(FALSE, repo->alias, L"Password refused by restic");
             }
-            restic_describe_password(password, wrong_hint, _countof(wrong_hint));
-            SecureZeroMemory(password, sizeof(password));
+            if (!need_password) break; /* The file or command would give restic the same password again */
+            restic_describe_password(secrets.password, wrong_hint, _countof(wrong_hint));
+            SecureZeroMemory(secrets.password, sizeof(secrets.password));
             have_password = FALSE;
             continue;
         }
@@ -924,15 +1020,15 @@ static ResticResult run_with_password(
         if (from_cache) {
             session_touch(repo->alias, cached_generation);
         } else {
-            kept = session_put(repo->alias, password);
-            if (kept) conn_log(FALSE, repo->alias, L"Password accepted");
+            kept = session_put(repo->alias, secrets.password, secrets.aws_secret_access_key);
+            if (kept) conn_log(FALSE, repo->alias, need_password ? L"Password accepted" : L"Credentials accepted");
         }
     }
-    SecureZeroMemory(password, sizeof(password));
+    SecureZeroMemory(&secrets, sizeof(secrets));
     /*
-     * A typed-in password that is not kept (ESC, a timeout or a local write error before restic
-     * proved it right, or no memory to keep it in) takes along what the operation cached with it,
-     * unless another thread has cached a password for the repository meanwhile
+     * Credentials that are not kept (ESC, a timeout or a local write error before restic proved
+     * them right, or no memory to keep them in) take along what the operation cached with them,
+     * unless another thread has cached credentials for the repository meanwhile
      */
     if (have_password && !kept && !session_exists(repo->alias)) repo_cache_forget(repo->alias);
     return res;
@@ -1099,8 +1195,8 @@ static ResticResult resolve_repo_path(const RepoCall* call, const WCHAR* rest, B
                 out->kind == REPO_PATH_REPOSITORY_ID) {
                 ULONGLONG refresh_ms = (ULONGLONG)call->cfg->snapshot_list_refresh_s * 1000ull;
                 if (age >= refresh_ms) {
-                    repo_cache_refresh_tree(call->repo->alias, call->repo->target, call->cfg->restic_path,
-                                            call->cfg->snapshot_time_format, refresh_ms, cached_password);
+                    repo_cache_refresh_tree(call->repo, call->cfg->restic_path,
+                                            call->cfg->snapshot_time_format, refresh_ms, cached_secrets);
                 }
                 return res;
             }
@@ -1189,8 +1285,8 @@ static HANDLE execute_repo_query(
     const WfxParsedPath* parsed,
     WIN32_FIND_DATAW* FindData
 ) {
-    /* Verify that restic.exe was resolved to an explicit path before prompting for a password */
-    if (!restic_path_usable(cfg, repo->alias)) {
+    /* Verify that restic.exe was resolved and the settings are usable before prompting for a password */
+    if (!repository_usable(cfg, repo)) {
         SetLastError(ERROR_FILE_NOT_FOUND);
         return INVALID_HANDLE_VALUE;
     }
@@ -1205,7 +1301,7 @@ static HANDLE execute_repo_query(
     ResticResult res = run_with_password(cfg, repo, &exec_opts, list_operation, &ctx, err_msg, _countof(err_msg));
     if (ctx.snapshot_id[0] != '\0' && (res == RESTIC_OK || res == RESTIC_ERR_PATH_NOT_FOUND)) {
         /* Inside a snapshot, wherever: read all of it in the background (the password is cached by now) */
-        repo_cache_load_index(repo->alias, repo->target, cfg->restic_path, ctx.snapshot_id, cached_password);
+        repo_cache_load_index(repo, cfg->restic_path, ctx.snapshot_id, cached_secrets);
     }
     if (res != RESTIC_OK) {
         free(ctx.items);
@@ -1336,6 +1432,17 @@ static void log_configuration(const ResticConfig* cfg) {
         WCHAR target[CONFIG_MAX_PATH];
         log_redact_target(cfg->repos[i].target, target, _countof(target));
         log_write(L"    %ls = %ls", cfg->repos[i].alias, target);
+        const ResticRepoEntry* r = &cfg->repos[i];
+        if (r->settings_error[0] != L'\0') log_write(L"      unusable: %ls", r->settings_error);
+        if (r->password_file[0] != L'\0') log_write(L"      PasswordFile: %ls", r->password_file);
+        if (r->password_command[0] != L'\0') log_write(L"      PasswordCommand: %ls", r->password_command);
+        if (r->aws_access_key_id[0] != L'\0') {
+            log_write(L"      AWS_ACCESS_KEY_ID: %ls (the secret key is asked for)", r->aws_access_key_id);
+        }
+        if (r->aws_shared_credentials_file[0] != L'\0') {
+            log_write(L"      AWS_SHARED_CREDENTIALS_FILE: %ls", r->aws_shared_credentials_file);
+        }
+        if (r->aws_profile[0] != L'\0') log_write(L"      AWS_PROFILE: %ls", r->aws_profile);
     }
 }
 
@@ -1692,7 +1799,7 @@ int __stdcall FsGetFileW(WCHAR* RemoteName, WCHAR* LocalName, int CopyFlags, Rem
         config_free(&cfg);
         return FS_FILE_NOTFOUND;
     }
-    if (!restic_path_usable(&cfg, repo->alias)) {
+    if (!repository_usable(&cfg, repo)) {
         config_free(&cfg);
         return FS_FILE_READERROR;
     }

@@ -451,6 +451,62 @@ static void test_exec_environment(void) {
     restic_free_command_output(&out);
 }
 
+/*
+ * A password file or command instead of a typed password, and S3 settings: those of a repository
+ * replace every inherited AWS_*, MINIO_* and RESTIC_AWS_* variable, which are inherited otherwise
+ */
+static void test_exec_environment_credentials(void) {
+    WCHAR cmd[MAX_PATH];
+    EXPECT_TRUE(get_cmd_exe(cmd, MAX_PATH), "ComSpec available");
+    static const WCHAR* const inherited[][2] = {
+        {L"AWS_ACCESS_KEY_ID", L"parent_key"}, {L"AWS_DEFAULT_REGION", L"parent_region"},
+        {L"MINIO_ACCESS_KEY", L"parent_minio"}, {L"RESTIC_AWS_ASSUME_ROLE_ARN", L"parent_role"},
+    };
+    for (size_t i = 0; i < _countof(inherited); ++i) SetEnvironmentVariableW(inherited[i][0], inherited[i][1]);
+    static const WCHAR probe[] =
+        L"/c \"echo [%RESTIC_PASSWORD%][%RESTIC_PASSWORD_FILE%][%RESTIC_PASSWORD_COMMAND%][%AWS_ACCESS_KEY_ID%]"
+        L"[%AWS_SECRET_ACCESS_KEY%][%AWS_SHARED_CREDENTIALS_FILE%][%AWS_PROFILE%][%AWS_DEFAULT_REGION%]"
+        L"[%MINIO_ACCESS_KEY%][%RESTIC_AWS_ASSUME_ROLE_ARN%]\"";
+
+    ResticRepo external = {.target = L"r", .password_file = L"C:\\pw dir\\pw.txt",
+                           .password_command = L"\"C:\\x y\\kp.exe\" --name 'a b'"};
+    ResticCommandOutput out;
+    ResticResult res = restic_exec_command(cmd, &external, probe, NULL, &out);
+    EXPECT_TRUE(res == RESTIC_OK, "Probe with a password file and command ran");
+    EXPECT_TRUE(strstr(out.output, "[%RESTIC_PASSWORD%][C:\\pw dir\\pw.txt][\"C:\\x y\\kp.exe\" --name 'a b']"
+                                   "[parent_key][%AWS_SECRET_ACCESS_KEY%][%AWS_SHARED_CREDENTIALS_FILE%][%AWS_PROFILE%]"
+                                   "[parent_region][parent_minio][parent_role]") != NULL,
+                "No RESTIC_PASSWORD; file and command both passed verbatim; without S3 settings AWS_* are inherited");
+    restic_free_command_output(&out);
+
+    ResticRepo s3 = {.target = L"s3:host/bucket", .password = L"pw", .aws_access_key_id = L"AKIAOWN",
+                     .aws_secret_access_key = L"s3cr3t/key+", .aws_shared_credentials_file = L"C:\\aws\\credentials",
+                     .aws_profile = L"backup"};
+    res = restic_exec_command(cmd, &s3, probe, NULL, &out);
+    EXPECT_TRUE(res == RESTIC_OK, "Probe with S3 settings ran");
+    EXPECT_TRUE(strstr(out.output, "[pw][%RESTIC_PASSWORD_FILE%][%RESTIC_PASSWORD_COMMAND%][AKIAOWN][s3cr3t/key+]"
+                                   "[C:\\aws\\credentials][backup][%AWS_DEFAULT_REGION%][%MINIO_ACCESS_KEY%]"
+                                   "[%RESTIC_AWS_ASSUME_ROLE_ARN%]") != NULL,
+                "The repository's S3 settings replace every inherited AWS_*, MINIO_*, RESTIC_AWS_* variable");
+    restic_free_command_output(&out);
+
+    ResticRepo profile_only = {.target = L"s3:host/bucket", .password = L"pw", .aws_profile = L"backup"};
+    res = restic_exec_command(cmd, &profile_only, probe, NULL, &out);
+    EXPECT_TRUE(res == RESTIC_OK && strstr(out.output, "[pw][%RESTIC_PASSWORD_FILE%][%RESTIC_PASSWORD_COMMAND%]"
+                                                       "[%AWS_ACCESS_KEY_ID%]") != NULL,
+                "AWS_PROFILE alone also leaves the inherited access key out");
+    restic_free_command_output(&out);
+
+    for (size_t i = 0; i < _countof(inherited); ++i) SetEnvironmentVariableW(inherited[i][0], NULL);
+
+    ResticRepo no_password = {.target = L"r", .aws_access_key_id = L"AKIA"};
+    EXPECT_TRUE(restic_exec_command(cmd, &no_password, probe, NULL, &out) == RESTIC_ERR_INVALID_ARG &&
+                    !restic_repo_usable(&no_password) && !restic_repo_usable(NULL),
+                "No password, password file or command: refused before anything is started");
+    ResticRepo empty_password = {.target = L"r", .password = L"", .password_file = L""};
+    EXPECT_TRUE(!restic_repo_usable(&empty_password), "Empty strings count as not set");
+}
+
 static int g_cancel_polls = 0;
 static BOOL cancel_after_first_poll(void* ctx) {
     (void)ctx;
@@ -615,10 +671,19 @@ static void test_repo_cache_generations(void) {
     repo_cache_clear();
 }
 
-/* RepoPasswordSource for the background loads of the live test */
-static BOOL fixture_password(const WCHAR* alias, WCHAR* out, size_t cap) {
+/* RepoSecretSource for the background loads of the live test */
+static BOOL fixture_password(const WCHAR* alias, RepoSecrets* out) {
     (void)alias;
-    return wcscpy_s(out, cap, L"p@ss \"w0rd\" \u00fc %PATH% \u65e5\u672c") == 0;
+    memset(out, 0, sizeof(*out));
+    return wcscpy_s(out->password, _countof(out->password), L"p@ss \"w0rd\" \u00fc %PATH% \u65e5\u672c") == 0;
+}
+
+/* A configured repository without [Repository: <alias>] settings, for the background loads */
+static const ResticRepoEntry* live_entry(ResticRepoEntry* e, const WCHAR* alias, const WCHAR* target) {
+    memset(e, 0, sizeof(*e));
+    wcscpy_s(e->alias, MAX_PATH, alias);
+    wcscpy_s(e->target, CONFIG_MAX_PATH, target);
+    return e;
 }
 
 /* Counts the lines a line consumer receives, checking that they arrive whole and in order */
@@ -1025,10 +1090,13 @@ static void test_live_restic_cli(void) {
     /* Background loads: one at a time, and the snapshot being read makes room within SnapshotCacheMB */
     WCHAR live_repo[MAX_PATH];
     wcscpy_s(live_repo, MAX_PATH, repo);
+    static ResticRepoEntry live, live2;
+    live_entry(&live, L"Live", live_repo);
+    live_entry(&live2, L"Live2", live_repo);
     repo_cache_clear();
     repo_cache_set_index_limit(64u * 1024u * 1024u);
-    repo_cache_load_index(L"Live", live_repo, restic_bin, snap1, fixture_password);
-    repo_cache_load_index(L"Live", live_repo, restic_bin, snap2, fixture_password); /* Not while snap1 loads */
+    repo_cache_load_index(&live, restic_bin, snap1, fixture_password);
+    repo_cache_load_index(&live, restic_bin, snap2, fixture_password); /* Not while snap1 loads */
     EXPECT_TRUE(repo_cache_wait_idle(120000), "First background load finishes");
     const SnapshotIndex* one = repo_cache_lock_index(L"Live", live_repo, snap1);
     size_t one_bytes = one ? snapshot_index_memory(one) : 0;
@@ -1037,7 +1105,7 @@ static void test_live_restic_cli(void) {
     if (two) repo_cache_unlock();
     EXPECT_TRUE(one_bytes > 0 && two == NULL, "Snapshot 1 read; snapshot 2 was not started while it loaded");
     repo_cache_set_index_limit(one_bytes + one_bytes / 2); /* Room for one listing, not for two */
-    repo_cache_load_index(L"Live", live_repo, restic_bin, snap2, fixture_password);
+    repo_cache_load_index(&live, restic_bin, snap2, fixture_password);
     EXPECT_TRUE(repo_cache_wait_idle(120000), "Second background load finishes");
     one = repo_cache_lock_index(L"Live", live_repo, snap1);
     if (one) repo_cache_unlock();
@@ -1047,8 +1115,8 @@ static void test_live_restic_cli(void) {
     repo_cache_clear();
     /* Two repositories (here two aliases of the same one) are read side by side */
     repo_cache_set_index_limit(64u * 1024u * 1024u);
-    repo_cache_load_index(L"Live", live_repo, restic_bin, snap1, fixture_password);
-    repo_cache_load_index(L"Live2", live_repo, restic_bin, snap2, fixture_password);
+    repo_cache_load_index(&live, restic_bin, snap1, fixture_password);
+    repo_cache_load_index(&live2, restic_bin, snap2, fixture_password);
     EXPECT_TRUE(repo_cache_wait_idle(120000), "Both background loads finish");
     one = repo_cache_lock_index(L"Live", live_repo, snap1);
     if (one) repo_cache_unlock();
@@ -1314,6 +1382,7 @@ int main(void) {
     test_parse_ls_ndjson();
     test_exec_streams_and_exit_codes();
     test_exec_environment();
+    test_exec_environment_credentials();
     test_exec_limits_and_failures();
     test_exec_large_output_and_long_args();
     test_exec_line_streaming();

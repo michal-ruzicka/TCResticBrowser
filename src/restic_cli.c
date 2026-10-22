@@ -510,21 +510,80 @@ static const WCHAR* const kStrippedEnvKeys[] = {
 };
 
 /*
+ * Inherited variables left out when the repository has S3 settings of its own: the credential
+ * chain of restic's S3 backend reads AWS_* and MINIO_* variables and files before and after the
+ * configured ones, and RESTIC_AWS_ASSUME_ROLE_* would change what is done with them
+ */
+static const WCHAR* const kAwsEnvPrefixes[] = {L"AWS_", L"MINIO_", L"RESTIC_AWS_"};
+
+static BOOL has_text(const WCHAR* s) {
+    return s && s[0] != L'\0';
+}
+
+BOOL restic_repo_usable(const ResticRepo* repo) {
+    return repo && has_text(repo->target) &&
+           (has_text(repo->password) || has_text(repo->password_file) || has_text(repo->password_command));
+}
+
+ResticRepo restic_repo_of(const ResticRepoEntry* entry, const WCHAR* password, const WCHAR* aws_secret_access_key) {
+    ResticRepo repo = {entry->target,
+                       password,
+                       entry->password_file,
+                       entry->password_command,
+                       entry->aws_access_key_id,
+                       aws_secret_access_key,
+                       entry->aws_shared_credentials_file,
+                       entry->aws_profile};
+    return repo;
+}
+
+static BOOL has_aws_settings(const ResticRepo* repo) {
+    return has_text(repo->aws_access_key_id) || has_text(repo->aws_secret_access_key) ||
+           has_text(repo->aws_shared_credentials_file) || has_text(repo->aws_profile);
+}
+
+/* TRUE for an inherited environment entry ("NAME=value") that the child must not get */
+static BOOL env_entry_stripped(const WCHAR* entry, BOOL own_aws) {
+    for (size_t i = 0; i < _countof(kStrippedEnvKeys); ++i) {
+        if (starts_with_env_key(entry, kStrippedEnvKeys[i])) return TRUE;
+    }
+    for (size_t i = 0; own_aws && i < _countof(kAwsEnvPrefixes); ++i) {
+        if (starts_with_env_key(entry, kAwsEnvPrefixes[i])) return TRUE;
+    }
+    return FALSE;
+}
+
+/*
  * Builds a UTF-16 environment block: the parent environment (Go needs SystemRoot, APPDATA, TEMP...)
- * minus conflicting RESTIC_* credential variables, plus RESTIC_REPOSITORY and RESTIC_PASSWORD.
+ * minus the variables ResticRepo describes as left out, plus the repository and its credentials.
  * The caller must wipe the block with SecureZeroMemory before releasing it.
  */
 static WCHAR* build_child_environment(const ResticRepo* repo, size_t* out_chars) {
     *out_chars = 0;
+    const struct {
+        const WCHAR* name;
+        const WCHAR* value;
+    } vars[] = {
+        {L"RESTIC_REPOSITORY", repo->target},
+        {L"RESTIC_PASSWORD", repo->password},
+        {L"RESTIC_PASSWORD_FILE", repo->password_file},
+        {L"RESTIC_PASSWORD_COMMAND", repo->password_command},
+        {L"AWS_ACCESS_KEY_ID", repo->aws_access_key_id},
+        {L"AWS_SECRET_ACCESS_KEY", repo->aws_secret_access_key},
+        {L"AWS_SHARED_CREDENTIALS_FILE", repo->aws_shared_credentials_file},
+        {L"AWS_PROFILE", repo->aws_profile},
+    };
+    BOOL own_aws = has_aws_settings(repo);
     LPWCH parent_env = GetEnvironmentStringsW();
-    size_t parent_chars = 0;
+    size_t total_cap = 1; /* Block terminator */
 
     for (const WCHAR* p = parent_env; p && *p != L'\0'; p += wcslen(p) + 1) {
-        parent_chars += wcslen(p) + 1;
+        total_cap += wcslen(p) + 1;
+    }
+    for (size_t i = 0; i < _countof(vars); ++i) {
+        if (has_text(vars[i].value)) total_cap += wcslen(vars[i].name) + 1 + wcslen(vars[i].value) + 1;
     }
 
-    size_t total_cap = parent_chars + wcslen(L"RESTIC_REPOSITORY=") + wcslen(repo->target) + 1 +
-                       wcslen(L"RESTIC_PASSWORD=") + wcslen(repo->password) + 1 + 1;
     WCHAR* block = (WCHAR*)calloc(total_cap, sizeof(WCHAR));
     if (!block) {
         if (parent_env) FreeEnvironmentStringsW(parent_env);
@@ -533,14 +592,7 @@ static WCHAR* build_child_environment(const ResticRepo* repo, size_t* out_chars)
 
     size_t offset = 0;
     for (const WCHAR* p = parent_env; p && *p != L'\0'; p += wcslen(p) + 1) {
-        BOOL stripped = FALSE;
-        for (size_t i = 0; i < _countof(kStrippedEnvKeys); ++i) {
-            if (starts_with_env_key(p, kStrippedEnvKeys[i])) {
-                stripped = TRUE;
-                break;
-            }
-        }
-        if (!stripped) {
+        if (!env_entry_stripped(p, own_aws)) {
             size_t len = wcslen(p) + 1;
             wmemcpy(block + offset, p, len);
             offset += len;
@@ -548,12 +600,12 @@ static WCHAR* build_child_environment(const ResticRepo* repo, size_t* out_chars)
     }
     if (parent_env) FreeEnvironmentStringsW(parent_env);
 
-    int n = swprintf_s(block + offset, total_cap - offset, L"RESTIC_REPOSITORY=%ls", repo->target);
-    if (n < 0) goto fail;
-    offset += (size_t)n + 1;
-    n = swprintf_s(block + offset, total_cap - offset, L"RESTIC_PASSWORD=%ls", repo->password);
-    if (n < 0) goto fail;
-    offset += (size_t)n + 1;
+    for (size_t i = 0; i < _countof(vars); ++i) {
+        if (!has_text(vars[i].value)) continue;
+        int n = swprintf_s(block + offset, total_cap - offset, L"%ls=%ls", vars[i].name, vars[i].value);
+        if (n < 0) goto fail;
+        offset += (size_t)n + 1;
+    }
 
     block[offset++] = L'\0'; /* Block terminator */
     *out_chars = offset;
@@ -594,7 +646,21 @@ static void log_restic_start(const WCHAR* cmd_line, const ResticRepo* repo) {
     WCHAR target[1024];
     log_redact_target(repo->target, target, _countof(target));
     log_write(L"restic run: %ls", cmd_line);
-    log_write(L"  repository: %ls; password: %u characters", target, (unsigned)wcslen(repo->password));
+    if (has_text(repo->password)) {
+        log_write(L"  repository: %ls; password: %u characters", target, (unsigned)wcslen(repo->password));
+    } else {
+        log_write(L"  repository: %ls", target);
+    }
+    if (has_text(repo->password_file)) log_write(L"  RESTIC_PASSWORD_FILE: %ls", repo->password_file);
+    if (has_text(repo->password_command)) log_write(L"  RESTIC_PASSWORD_COMMAND: %ls", repo->password_command);
+    if (has_aws_settings(repo)) {
+        log_write(L"  AWS_ACCESS_KEY_ID: %ls; AWS_SECRET_ACCESS_KEY: %u characters; AWS_SHARED_CREDENTIALS_FILE: %ls; "
+                  L"AWS_PROFILE: %ls (inherited AWS_*, MINIO_*, RESTIC_AWS_* left out)",
+                  has_text(repo->aws_access_key_id) ? repo->aws_access_key_id : L"-",
+                  has_text(repo->aws_secret_access_key) ? (unsigned)wcslen(repo->aws_secret_access_key) : 0u,
+                  has_text(repo->aws_shared_credentials_file) ? repo->aws_shared_credentials_file : L"-",
+                  has_text(repo->aws_profile) ? repo->aws_profile : L"-");
+    }
 }
 
 /* Logs how a run ended, with restic's stderr (line breaks shown as " | ") */
@@ -891,7 +957,7 @@ ResticResult restic_exec_command(
     const ResticExecOptions* options,
     ResticCommandOutput* out_result
 ) {
-    if (!restic_exe || !repo || !repo->target || !repo->password || !args || !out_result) {
+    if (!restic_exe || !restic_repo_usable(repo) || !args || !out_result) {
         return RESTIC_ERR_INVALID_ARG;
     }
     memset(out_result, 0, sizeof(ResticCommandOutput));
@@ -1016,7 +1082,7 @@ ResticResult restic_list_snapshots(
 ) {
     if (out_error_msg && err_capacity > 0) out_error_msg[0] = L'\0';
     if (out_tree) *out_tree = NULL;
-    if (!restic_exe || !repo || !repo->target || !repo->password || !out_tree) {
+    if (!restic_exe || !restic_repo_usable(repo) || !out_tree) {
         return RESTIC_ERR_INVALID_ARG;
     }
 
@@ -1050,7 +1116,7 @@ ResticResult restic_read_repository_id(
 ) {
     if (out_error_msg && err_capacity > 0) out_error_msg[0] = L'\0';
     if (out_id) out_id[0] = '\0';
-    if (!restic_exe || !repo || !repo->target || !repo->password || !out_id) {
+    if (!restic_exe || !restic_repo_usable(repo) || !out_id) {
         return RESTIC_ERR_INVALID_ARG;
     }
 
@@ -1085,7 +1151,7 @@ ResticResult restic_list_directory(
 ) {
     if (out_error_msg && err_capacity > 0) out_error_msg[0] = L'\0';
     /* The snapshot ID goes on the command line unquoted: only hexadecimal IDs are accepted */
-    if (!restic_exe || !repo || !repo->target || !repo->password || !out_items || !out_count ||
+    if (!restic_exe || !restic_repo_usable(repo) || !out_items || !out_count ||
         !is_hex_string(snapshot_id) || strlen(snapshot_id) > 64) {
         return RESTIC_ERR_INVALID_ARG;
     }
@@ -1150,7 +1216,7 @@ ResticResult restic_list_snapshot_index(
     if (out_error_msg && err_capacity > 0) out_error_msg[0] = L'\0';
     if (out_index_status) *out_index_status = SNAPSHOT_INDEX_OK;
     /* The snapshot ID goes on the command line unquoted: only hexadecimal IDs are accepted */
-    if (!restic_exe || !repo || !repo->target || !repo->password || !index || !is_hex_string(snapshot_id) ||
+    if (!restic_exe || !restic_repo_usable(repo) || !index || !is_hex_string(snapshot_id) ||
         strlen(snapshot_id) > 64) {
         return RESTIC_ERR_INVALID_ARG;
     }
@@ -1342,7 +1408,7 @@ ResticResult restic_dump_file(
     size_t err_capacity
 ) {
     if (out_error_msg && err_capacity > 0) out_error_msg[0] = L'\0';
-    if (!restic_exe || !repo || !repo->target || !repo->password || !snapshot_id || !subpath_w ||
+    if (!restic_exe || !restic_repo_usable(repo) || !snapshot_id || !subpath_w ||
         !local_dest_path || local_dest_path[0] == L'\0' || !is_hex_string(snapshot_id) ||
         strlen(snapshot_id) > 64) {
         return RESTIC_ERR_INVALID_ARG;

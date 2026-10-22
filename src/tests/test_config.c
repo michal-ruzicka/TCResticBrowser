@@ -1184,6 +1184,144 @@ static void test_logging(void) {
 }
 
 /* Target file names: only names Windows stores exactly as given are accepted */
+/* Loads `ini` (UTF-8) from plugin_dir and returns the repository `alias` in *cfg (NULL when missing) */
+static const ResticRepoEntry* load_repo(const WCHAR* plugin_dir, const char* ini, const WCHAR* alias, ResticConfig* cfg) {
+    WCHAR ini_path[CONFIG_MAX_PATH];
+    swprintf_s(ini_path, CONFIG_MAX_PATH, L"%ls\\%ls", plugin_dir, CONFIG_INI_FILENAME);
+    write_text_file(ini_path, ini);
+    config_set_plugin_dir(plugin_dir);
+    config_load(cfg);
+    return config_find_repo(cfg, alias);
+}
+
+/* [Repository: <alias>] sections: PasswordFile, PasswordCommand and the three AWS settings */
+static void test_repository_sections(void) {
+    /* Static: /analyze (C6262) caps a frame at 16 KB, and a ResticConfig alone takes half of it */
+    static WCHAR plugin_dir[CONFIG_MAX_PATH], spaced_dir[CONFIG_MAX_PATH], path[CONFIG_MAX_PATH];
+    make_temp_dir(L"restic_repo_sections", plugin_dir, CONFIG_MAX_PATH);
+    swprintf_s(spaced_dir, CONFIG_MAX_PATH, L"%ls\\dir with space", plugin_dir);
+    CreateDirectoryW(spaced_dir, NULL);
+    static const WCHAR* const files[] = {L"pw.txt", L"creds", L"get-pass.cmd", L"dir with space\\get pass.cmd"};
+    for (size_t i = 0; i < _countof(files); ++i) {
+        swprintf_s(path, CONFIG_MAX_PATH, L"%ls\\%ls", plugin_dir, files[i]);
+        write_text_file(path, "x\r\n");
+    }
+    static char dir[CONFIG_MAX_PATH * 3];
+    WideCharToMultiByte(CP_UTF8, 0, plugin_dir, -1, dir, (int)sizeof(dir), NULL, NULL);
+
+    static char ini[16384];
+    snprintf(ini, sizeof(ini),
+             "[Repository: Second]\r\n" /* Before [Repositories] */
+             "PasswordFile=pw.txt\r\n"
+             "AWS_ACCESS_KEY_ID=AKIAEXAMPLE\r\n"
+             "aws_shared_credentials_file=%s\\creds\r\n"
+             "AWS_PROFILE = backup \r\n"
+             "PasswordFile=missing.txt\r\n" /* Not the first occurrence: ignored */
+             "Unknown=1\r\n"
+             "[Repositories]\r\n"
+             "First=C:\\r1\r\n"
+             "Second=s3:s3.example.com/bucket\r\n"
+             "Third=C:\\r3\r\n"
+             "Odd]Name=C:\\r4\r\n"
+             "Plain=C:\\r5\r\n"
+             "[repository:first]\r\n"
+             "PasswordCommand=%s\\dir with space\\get pass.cmd\r\n"
+             "[Repository: Third]\r\n"
+             "PasswordCommand=\"%s\\get-pass.cmd\" --name 'my repo'\r\n"
+             "PasswordFile=%s\\pw.txt\r\n"
+             "[Repository: Odd]Name] \r\n"
+             "AWS_PROFILE=odd\r\n"
+             "[Repository: Unknown]\r\n"
+             "PasswordFile=pw.txt\r\n"
+             "[Repository: Second]\r\n"
+             "AWS_PROFILE=other\r\n", /* Repeated section: the first occurrence still wins */
+             dir, dir, dir, dir);
+    static ResticConfig cfg;
+    const ResticRepoEntry* r = load_repo(plugin_dir, ini, L"Second", &cfg);
+    EXPECT_TRUE(cfg.repo_count == 5 && r != NULL, "Repository sections add no repository");
+    swprintf_s(path, CONFIG_MAX_PATH, L"%ls\\pw.txt", plugin_dir);
+    EXPECT_WSTR_EQ(r->password_file, path, "PasswordFile relative to the plugin folder, first occurrence");
+    EXPECT_WSTR_EQ(r->aws_access_key_id, L"AKIAEXAMPLE", "AWS_ACCESS_KEY_ID");
+    swprintf_s(path, CONFIG_MAX_PATH, L"%ls\\creds", plugin_dir);
+    EXPECT_WSTR_EQ(r->aws_shared_credentials_file, path, "AWS_SHARED_CREDENTIALS_FILE, key compared ignoring case");
+    EXPECT_WSTR_EQ(r->aws_profile, L"backup", "AWS_PROFILE trimmed, first occurrence across sections");
+    EXPECT_TRUE(r->settings_error[0] == L'\0' && r->password_command[0] == L'\0', "No error, no command");
+
+    r = config_find_repo(&cfg, L"First");
+    swprintf_s(path, CONFIG_MAX_PATH, L"\"%ls\\dir with space\\get pass.cmd\"", plugin_dir);
+    EXPECT_TRUE(r && r->settings_error[0] == L'\0', "A plain PasswordCommand path is fine");
+    EXPECT_WSTR_EQ(r->password_command, path, "... and handed to restic in double quotes");
+
+    r = config_find_repo(&cfg, L"Third");
+    swprintf_s(path, CONFIG_MAX_PATH, L"\"%ls\\get-pass.cmd\" --name 'my repo'", plugin_dir);
+    EXPECT_TRUE(r && r->settings_error[0] == L'\0', "A quoted command line is fine");
+    EXPECT_WSTR_EQ(r->password_command, path, "... and passed as written");
+    swprintf_s(path, CONFIG_MAX_PATH, L"%ls\\pw.txt", plugin_dir);
+    EXPECT_WSTR_EQ(r->password_file, path, "PasswordFile and PasswordCommand together: both kept for restic");
+
+    r = config_find_repo(&cfg, L"Odd]Name");
+    EXPECT_TRUE(r != NULL, "An alias with ']'");
+    EXPECT_WSTR_EQ(r->aws_profile, L"odd", "... has its section, closed by the last ']'");
+    r = config_find_repo(&cfg, L"Plain");
+    EXPECT_TRUE(r && r->password_file[0] == L'\0' && r->password_command[0] == L'\0' && r->aws_access_key_id[0] == L'\0' &&
+                    r->settings_error[0] == L'\0',
+                "A repository without a section has no settings");
+    config_free(&cfg);
+
+    /* Accepted command lines */
+    static const struct {
+        const char* value;
+        const WCHAR* command;
+    } good[] = {
+        {"\"kp\" --x", L"\"kp\" --x"},                                  /* A bare name: restic finds it in PATH */
+        {"cmd /c \"type C:\\pw.txt\"", L"cmd /c \"type C:\\pw.txt\""}, /* Backslashes inside quotes */
+        {"'pass.exe' show", L"'pass.exe' show"},
+        {"", L""},                                                      /* Empty: not set */
+    };
+    for (size_t i = 0; i < _countof(good); ++i) {
+        snprintf(ini, sizeof(ini), "[Repositories]\r\nR=C:\\r\r\n[Repository: R]\r\nPasswordCommand=%s\r\n", good[i].value);
+        r = load_repo(plugin_dir, ini, L"R", &cfg);
+        EXPECT_TRUE(r && r->settings_error[0] == L'\0', "Usable PasswordCommand");
+        EXPECT_WSTR_EQ(r->password_command, good[i].command, "PasswordCommand as restic gets it");
+        config_free(&cfg);
+    }
+
+    /* Unusable values: the repository carries the reason, naming the setting */
+    static const struct {
+        const char* line;
+        const WCHAR* reason;
+    } bad[] = {
+        {"PasswordFile=missing.txt", L"does not exist"},
+        {"PasswordFile=C:pw.txt", L"depends on the current drive"},
+        {"PasswordFile=\\pw.txt", L"depends on the current drive"},
+        {"AWS_SHARED_CREDENTIALS_FILE=no-such-creds", L"does not exist"},
+        {"PasswordCommand=C:\\x\\kp.exe \"a b\"", L"backslash outside quotes"},
+        {"PasswordCommand=\"C:\\x\\kp.exe", L"not closed"},
+        {"PasswordCommand=\"relative\\kp.exe\" arg", L"depends on the current drive"},
+        {"PasswordCommand=\"C:\\no\\such\\kp.exe\" arg", L"does not exist"},
+        {"PasswordCommand=no-such-password-tool-xyz", L"neither in the plugin folder nor in PATH"},
+        {"PasswordCommand=\"\" \"\"", L"names no program"},
+        {"AWS_PROFILE=a\x01" "b", L"control character"},
+    };
+    for (size_t i = 0; i < _countof(bad); ++i) {
+        snprintf(ini, sizeof(ini), "[Repositories]\r\nR=C:\\r\r\n[Repository: R]\r\n%s\r\n", bad[i].line);
+        r = load_repo(plugin_dir, ini, L"R", &cfg);
+        if (r && !wcsstr(r->settings_error, bad[i].reason)) printf("       %s: '%ls'\n", bad[i].line, r->settings_error);
+        EXPECT_TRUE(r && wcsstr(r->settings_error, bad[i].reason) != NULL, "Unusable setting reported");
+        EXPECT_TRUE(wcsstr(r->settings_error, L"[Repository: R]") != NULL, "... naming the section");
+        config_free(&cfg);
+    }
+
+    for (size_t i = 0; i < _countof(files); ++i) {
+        swprintf_s(path, CONFIG_MAX_PATH, L"%ls\\%ls", plugin_dir, files[i]);
+        DeleteFileW(path);
+    }
+    swprintf_s(path, CONFIG_MAX_PATH, L"%ls\\%ls", plugin_dir, CONFIG_INI_FILENAME);
+    DeleteFileW(path);
+    RemoveDirectoryW(spaced_dir);
+    RemoveDirectoryW(plugin_dir);
+}
+
 static void test_plain_file_names(void) {
     static const WCHAR* const plain[] = {
         L"C:\\t\\readme.txt", L"C:/t/.bashrc", L"a.b.c", L"..x", L"CONSOLE.log", L"COM10", L"LPT", L"x CON",
@@ -1236,6 +1374,7 @@ int main(void) {
     test_logging();
     test_password_timeout_setting();
     test_plain_file_names();
+    test_repository_sections();
 
     RemoveDirectoryW(user_dir);
     RemoveDirectoryW(appdata_dir);

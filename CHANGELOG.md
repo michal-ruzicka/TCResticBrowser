@@ -12,6 +12,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`snapshots.csv` has a `size` column** after `paths`: the size of each
   snapshot as `restic snapshots` shows it (`1.234 GiB`), from the summary
   restic 0.17 and later record with a snapshot; empty for older snapshots.
+- **Settings per repository in `[Repository: <alias>]` sections.**
+  `PasswordFile=` and `PasswordCommand=` let restic read the password from
+  a file or a password manager's command, so the repository opens without
+  a password dialog and the plugin never sees the password.
+  `AWS_ACCESS_KEY_ID=` gives an S3 repository its own access key; the
+  plugin asks for the secret access key in a dialog like the password and
+  keeps it in memory only, encrypted, as long as the password.
+  `AWS_SHARED_CREDENTIALS_FILE=` and `AWS_PROFILE=` select an AWS
+  credentials file and profile instead. A repository with any of these
+  S3 settings no longer inherits `AWS_*`, `MINIO_*` and `RESTIC_AWS_*`
+  variables from Total Commander's environment.
 
 ## [v2.1.0] – 2026-10-22
 

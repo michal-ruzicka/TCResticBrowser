@@ -107,7 +107,7 @@ entries pointing there need to be recreated.
   - Inspect files directly with Total Commander's **Lister (`F3`)** or **Quick View (`Ctrl+Q`)**.
   - Constant-memory streaming (`64 KB` chunks via `restic dump --no-lock`) into a temporary file with **atomic replacement** on completion: an interrupted or failed overwrite never corrupts or deletes your existing local file.
 - **Strictly Read-Only by Design:** Every Restic command runs with `--no-lock`. Repository modification entry points (`FsPutFile`, `FsDeleteFile`, `FsRemoveDir`, `FsMkDir`, `FsRenMovFile`) are intentionally not exported, and `F6` (Move) is rejected.
-- **Zero Passwords on Disk:** Repository passwords are requested interactively via Total Commander's native password dialog (`RequestProcW`), kept only in RAM per repository alias for 30 minutes by default (see [Password Timeout](#password-timeout)), passed to `restic.exe` via an isolated environment block (`RESTIC_PASSWORD`), and wiped with `SecureZeroMemory`. Cached passwords are encrypted in memory (`CryptProtectMemory`), in pages locked out of the page file and excluded from Windows Error Reporting crash dumps, so a memory dump or the hibernation file does not reveal them.
+- **Zero Passwords on Disk:** Repository passwords are requested interactively via Total Commander's native password dialog (`RequestProcW`), kept only in RAM per repository alias for 30 minutes by default (see [Password Timeout](#password-timeout)), passed to `restic.exe` via an isolated environment block (`RESTIC_PASSWORD`), and wiped with `SecureZeroMemory`. Cached passwords are encrypted in memory (`CryptProtectMemory`), in pages locked out of the page file and excluded from Windows Error Reporting crash dumps, so a memory dump or the hibernation file does not reveal them. A repository can instead take its password from a file or a password manager's command, which restic reads itself, and S3 repositories can have their own access key, whose secret key is asked for and kept like a password (see [Repository Settings](#repository-settings-password-file-password-command-s3-credentials)).
 - **Responsive Cancellation (`ESC`):** Long operations on remote backends can be aborted with `ESC`. Extraction uses a 30-minute **inactivity** timeout (so slow multi-gigabyte transfers are never cut off as long as bytes keep flowing); a folder listing is stopped after 30 minutes in total.
 
 **Project page:** <https://github.com/michal-ruzicka/TCResticBrowser> — source
@@ -559,6 +559,56 @@ Quotes around the whole value are allowed and removed. A backslash at the
 end of a path is kept and does not continue the line, so
 `Local Time Machine=C:\Users\me\AppData\Local\Time Machine.restic-repo\` works as well.
 
+#### Repository Settings (Password File, Password Command, S3 Credentials)
+
+A repository can have settings of its own in a section named after its
+alias, `[Repository: <alias>]` (upper and lower case alike). Without one,
+the plugin asks for the password as described above.
+
+```ini
+[Repositories]
+LocalBackup=D:\Backups\restic_repo
+CloudS3=s3:s3.amazonaws.com/my-backup-bucket/restic
+
+[Repository: LocalBackup]
+PasswordFile=C:\Users\me\restic\local-backup.txt
+
+[Repository: CloudS3]
+PasswordCommand="C:\Program Files\KeePassXC\keepassxc-cli.exe" show -a password "C:\Keys\backup.kdbx" restic
+AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+```
+
+| Setting | Effect |
+| --- | --- |
+| `PasswordFile` | restic reads the password from this file (`--password-file`); no password dialog. A full path, or one relative to the plugin folder, without quotes. |
+| `PasswordCommand` | restic runs this program and uses what it prints as the password (`--password-command`), e.g. a password manager's command-line tool; no password dialog. Usually just the program's or script's path, written like `ResticPath` (full path, relative to the plugin folder, or a bare name found in `PATH`) without quotes. To pass arguments, write the command line the way restic splits it: the program's path in double quotes, then the arguments, quoting each one with spaces or backslashes, as in the example. Unquoted backslashes are refused, because restic would split the command there. |
+| `AWS_ACCESS_KEY_ID` | The S3 access key ID. The plugin then asks for the **secret access key** in a dialog titled `<alias> - S3 secret access key` (before the password, if that is asked for too) and keeps it in memory only, encrypted, exactly like a password: it is forgotten together with the password. The secret key is never read from the INI file. |
+| `AWS_SHARED_CREDENTIALS_FILE` | An AWS credentials file (full path or relative to the plugin folder) for restic to read the key from instead. |
+| `AWS_PROFILE` | The profile to use in that file (or in `%USERPROFILE%\.aws\credentials`). |
+
+Everything is passed to restic in its environment
+(`RESTIC_PASSWORD_FILE`, `RESTIC_PASSWORD_COMMAND`, `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, `AWS_SHARED_CREDENTIALS_FILE`, `AWS_PROFILE`), never
+on its command line. `PasswordFile` and `PasswordCommand` together are both
+passed, as if both were given to restic itself, and restic refuses the
+combination. A password from a file or command that restic rejects is
+reported and not asked for. A setting that cannot be used (a missing file,
+a path relative to the current folder, a broken command line) is reported
+when the repository is opened, before anything runs.
+
+restic runs as a child of Total Commander and inherits its environment.
+For a repository with any of the three AWS settings, every `AWS_*`,
+`MINIO_*` and `RESTIC_AWS_*` variable Total Commander was started with is
+left out, so the repository uses only its own S3 credentials and never
+someone else's key or region by accident. Repositories without them
+inherit those variables as before; other S3 options (a region, an assumed
+role) are left to restic's defaults, and backends with more involved
+credentials are best reached through `rclone:`.
+
+The `🗑 Forget N Passwords` entry counts the repositories with a password
+or secret key typed in; it also forgets that a password file or command
+was accepted, so the next listing runs restic again.
+
 #### Logging
 
 Diagnostic logging is **off by default**. To find out why a repository does
@@ -630,13 +680,27 @@ RemoteRestTLS=rest:https://backup.example.com:8000/prod
 LinuxServerSftp=sftp:backupuser@192.168.1.20:/srv/restic/repo
 
 ; 5. Amazon S3 / S3-compatible storage (MinIO, Wasabi, Backblaze B2, Cloudflare R2)
-;    Backend environment variables (e.g. AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
-;    are inherited from Total Commander's process environment.
+;    Credentials from a [Repository: <Alias>] section below, or else inherited
+;    from Total Commander's process environment (AWS_ACCESS_KEY_ID, ...).
 AwsS3=s3:s3.amazonaws.com/my-backup-bucket/restic
 LocalMinio=s3:http://192.168.1.60:9000/restic-backups
 
 ; 6. Rclone backend (Google Drive, OneDrive, Dropbox, Box, etc.)
 GoogleDrive=rclone:gdrive:Backups/restic_repo
+
+; The password comes from a file, not from a dialog
+[Repository: LocalDocs]
+PasswordFile=C:\Users\me\restic\docs-password.txt
+
+; The plugin asks for the S3 secret key of this access key
+[Repository: AwsS3]
+AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+
+; Credentials file and profile; the password from a script
+[Repository: LocalMinio]
+AWS_SHARED_CREDENTIALS_FILE=C:\Users\me\.aws\minio-credentials
+AWS_PROFILE=backup
+PasswordCommand=C:\Tools\get-restic-password.cmd
 ```
 
 ## External Dependencies
@@ -715,19 +779,9 @@ How the reader is tested:
 
 Planned for later versions, in no particular order:
 
-- **S3 credentials asked for like the repository password.** Instead of
-  relying on `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` in Total
-  Commander's environment, the plugin would ask for the access key and
-  secret key in a dialog and keep them in memory only, as it does with the
-  Restic password.
 - **Verified rclone backends.** Check (and add tests) that `rclone:`
   repositories work through the plugin; restic handles them itself, so no
   problems are expected.
-- **`--password-file` and `--password-command` per repository.** An INI
-  setting whose value the plugin passes to `restic` as the ordinary
-  `--password-file` / `--password-command` argument, so such repositories
-  open without a password prompt. Total Commander and the plugin never see
-  the password.
 - **Stop restic's helper processes on `ESC`.** Cancelling terminates
   `restic.exe`, but an `rclone` or `ssh` process it started lives on until
   it notices the closed pipe; so does a `restic` still reading a snapshot in

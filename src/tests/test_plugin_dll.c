@@ -1699,6 +1699,132 @@ static void delete_tree(const WCHAR* path) {
     RemoveDirectoryW(path);
 }
 
+/* Lists \<alias>\snapshots; TRUE when it worked and has a latest folder */
+static BOOL lists_snapshots(const Plugin* p, const WCHAR* alias) {
+    WCHAR path[MAX_PATH];
+    static WCHAR names[2048];
+    swprintf_s(path, MAX_PATH, L"\\%ls\\snapshots", alias);
+    return list_names(p, path, names, _countof(names)) && wcsstr(names, L"latest") != NULL;
+}
+
+/*
+ * Scenario E: [Repository: <alias>] settings. A password from PasswordFile or PasswordCommand opens
+ * the repository without a prompt, also from a .cmd in a folder with spaces; both together are
+ * passed to restic, which refuses them; a wrong one is reported, not asked for again; an unusable
+ * setting stops the repository before restic runs. AWS_ACCESS_KEY_ID makes the plugin ask for the
+ * S3 secret key (restic ignores it for a local repository), before the password if that is asked
+ * for too, and caches it like a password.
+ */
+static void test_live_repository_settings(void) {
+    if (GetFileAttributesW(L"tmp\\restic.exe") == INVALID_FILE_ATTRIBUTES ||
+        GetFileAttributesW(L"tmp\\test_fixture\\repo\\config") == INVALID_FILE_ATTRIBUTES) {
+        printf("[SKIP] tmp\\restic.exe or tmp\\test_fixture\\repo not found: repository settings E2E test skipped.\n");
+        return;
+    }
+    WCHAR restic_abs[MAX_PATH] = {0}, repo_abs[MAX_PATH] = {0};
+    GetFullPathNameW(L"tmp\\restic.exe", MAX_PATH, restic_abs, NULL);
+    GetFullPathNameW(L"tmp\\test_fixture\\repo", MAX_PATH, repo_abs, NULL);
+
+    WCHAR dir[MAX_PATH], tools[MAX_PATH], path[MAX_PATH], ini[MAX_PATH];
+    EXPECT_TRUE(make_unique_dir(L"restic_dll_settings", dir, MAX_PATH), "Create plugin directory");
+    swprintf_s(tools, MAX_PATH, L"%ls\\tools dir", dir);
+    EXPECT_TRUE(CreateDirectoryW(tools, NULL) || GetLastError() == ERROR_ALREADY_EXISTS, "Create a folder with spaces");
+    char fixture_pwd_u8[128] = {0};
+    WideCharToMultiByte(CP_UTF8, 0, FIXTURE_PASSWORD, -1, fixture_pwd_u8, sizeof(fixture_pwd_u8), NULL, NULL);
+    swprintf_s(path, MAX_PATH, L"%ls\\pw.txt", dir);
+    EXPECT_TRUE(write_file(path, fixture_pwd_u8), "Write the password file");
+    swprintf_s(path, MAX_PATH, L"%ls\\wrong.txt", dir);
+    EXPECT_TRUE(write_file(path, "not the password\r\n"), "Write a wrong password file");
+    swprintf_s(path, MAX_PATH, L"%ls\\get pw.cmd", tools);
+    EXPECT_TRUE(write_file(path, "@type \"%~dp0..\\pw.txt\"\r\n"), "Write a password script in a folder with spaces");
+
+    char restic_u8[MAX_PATH * 3] = {0}, repo_u8[MAX_PATH * 3] = {0}, dir_u8[MAX_PATH * 3] = {0};
+    WideCharToMultiByte(CP_UTF8, 0, restic_abs, -1, restic_u8, sizeof(restic_u8), NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, repo_abs, -1, repo_u8, sizeof(repo_u8), NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, dir, -1, dir_u8, sizeof(dir_u8), NULL, NULL);
+    static char ini_text[8192]; /* Static: /analyze (C6262) caps a frame at 16 KB */
+    int ini_len = snprintf(
+        ini_text, sizeof(ini_text),
+        "[Settings]\r\nResticPath=%s\r\n"
+        "[Logging]\r\nLogPath=%s\\settings.log\r\n"
+        "[Repositories]\r\nFileRepo=%s\r\nCommandRepo=%s\r\nQuotedCommand=%s\r\nBothRepo=%s\r\nWrongFile=%s\r\n"
+        "BadSetting=%s\r\nS3Key=%s\r\nS3Typed=%s\r\n"
+        "[Repository: FileRepo]\r\nPasswordFile=pw.txt\r\n"
+        "[Repository: CommandRepo]\r\nPasswordCommand=%s\\tools dir\\get pw.cmd\r\n"
+        "[Repository: QuotedCommand]\r\nPasswordCommand=\"%s\\tools dir\\get pw.cmd\" unused-argument\r\n"
+        "[Repository: BothRepo]\r\nPasswordFile=pw.txt\r\nPasswordCommand=%s\\tools dir\\get pw.cmd\r\n"
+        "[Repository: WrongFile]\r\nPasswordFile=wrong.txt\r\n"
+        "[Repository: BadSetting]\r\nPasswordFile=missing.txt\r\n"
+        "[Repository: S3Key]\r\nPasswordFile=pw.txt\r\nAWS_ACCESS_KEY_ID=AKIATESTKEY\r\nAWS_PROFILE=backup\r\n"
+        "[Repository: S3Typed]\r\nAWS_ACCESS_KEY_ID=AKIATESTKEY\r\n",
+        restic_u8, dir_u8, repo_u8, repo_u8, repo_u8, repo_u8, repo_u8, repo_u8, repo_u8, repo_u8, dir_u8, dir_u8,
+        dir_u8);
+    EXPECT_TRUE(ini_len > 0 && (size_t)ini_len < sizeof(ini_text), "Settings INI fits its buffer");
+    swprintf_s(ini, MAX_PATH, L"%ls\\TCResticBrowser.ini", dir);
+    EXPECT_TRUE(write_file(ini, ini_text), "Write settings INI");
+
+    Plugin p;
+    EXPECT_TRUE(load_plugin_copy(dir, &p), "Load plugin copy (settings)");
+    EXPECT_TRUE(p.init_w(44, (void*)e2e_progress_proc, (void*)e2e_log_proc, (void*)e2e_request_proc) == 0,
+                "Register Total Commander callbacks (settings)");
+
+    /* A prompt would be answered wrongly: none may come */
+    g_e2e_pwd_mode = 2;
+    static const WCHAR* const opened[] = {L"FileRepo", L"CommandRepo", L"QuotedCommand"};
+    for (size_t i = 0; i < _countof(opened); ++i) {
+        g_e2e_pwd_prompts = 0;
+        g_e2e_msg_dialogs = 0;
+        EXPECT_TRUE(lists_snapshots(&p, opened[i]) && g_e2e_pwd_prompts == 0 && g_e2e_msg_dialogs == 0,
+                    "PasswordFile / PasswordCommand: the repository opens without a prompt");
+        EXPECT_TRUE(lists_snapshots(&p, opened[i]) && g_e2e_pwd_prompts == 0, "... and again from the cache");
+    }
+
+    g_e2e_pwd_prompts = 0;
+    g_e2e_msg_dialogs = 0;
+    EXPECT_TRUE(!lists_snapshots(&p, L"BothRepo") && g_e2e_pwd_prompts == 0 && g_e2e_msg_dialogs == 1 &&
+                    wcsstr(g_e2e_last_msg, L"mutually exclusive") != NULL,
+                "PasswordFile and PasswordCommand together: restic's refusal shown, no prompt");
+    g_e2e_msg_dialogs = 0;
+    EXPECT_TRUE(!lists_snapshots(&p, L"WrongFile") && g_e2e_pwd_prompts == 0 && g_e2e_msg_dialogs == 1,
+                "A wrong password from a file is reported once and not asked for");
+    g_e2e_msg_dialogs = 0;
+    EXPECT_TRUE(!lists_snapshots(&p, L"BadSetting") && g_e2e_pwd_prompts == 0 && g_e2e_msg_dialogs == 1 &&
+                    wcsstr(g_e2e_last_msg, L"PasswordFile=missing.txt") != NULL,
+                "An unusable setting is shown before anything runs");
+
+    /* AWS_ACCESS_KEY_ID: the secret key is asked for once, then cached */
+    g_e2e_pwd_mode    = 1;
+    g_e2e_pwd_prompts = 0;
+    g_e2e_msg_dialogs = 0;
+    EXPECT_TRUE(lists_snapshots(&p, L"S3Key") && g_e2e_pwd_prompts == 1 &&
+                    wcscmp(g_e2e_last_title, L"S3Key - S3 secret access key") == 0 &&
+                    wcsstr(g_e2e_last_prompt, L"AKIATESTKEY") != NULL,
+                "AWS_ACCESS_KEY_ID: the S3 secret key is asked for, naming the repository and the key");
+    EXPECT_TRUE(lists_snapshots(&p, L"S3Key") && g_e2e_pwd_prompts == 1, "The secret key is cached");
+    g_e2e_pwd_prompts = 0;
+    EXPECT_TRUE(lists_snapshots(&p, L"S3Typed") && g_e2e_pwd_prompts == 2 &&
+                    wcscmp(g_e2e_last_title, L"S3Typed - Restic repository password") == 0 && g_e2e_msg_dialogs == 0,
+                "With a typed password too: the secret key first, then the password");
+    static WCHAR root[1024];
+    static const WCHAR forget_two[] = L"\U0001F5D1 Forget 2 Passwords|";
+    EXPECT_TRUE(list_names(&p, L"\\", root, _countof(root)) && wcsncmp(root, forget_two, wcslen(forget_two)) == 0,
+                "The forget entry counts the repositories with something typed in, not those using a file or command");
+
+    WCHAR log_file[MAX_PATH];
+    swprintf_s(log_file, MAX_PATH, L"%ls\\settings.log", dir);
+    char* log_text = read_text_file(log_file);
+    BOOL logged = log_text && strstr(log_text, "RESTIC_PASSWORD_FILE: ") && strstr(log_text, "RESTIC_PASSWORD_COMMAND: ") &&
+                  strstr(log_text, "AWS_ACCESS_KEY_ID: AKIATESTKEY; AWS_SECRET_ACCESS_KEY: ") &&
+                  strstr(log_text, "S3 secret key prompt for 'S3Key': ");
+    BOOL leaked = log_text && strstr(log_text, fixture_pwd_u8) != NULL;
+    free(log_text);
+    EXPECT_TRUE(logged, "The log shows where restic gets the password and the S3 settings");
+    EXPECT_TRUE(!leaked, "Neither the password nor the secret key appears in the log");
+
+    unload_plugin_copy(&p, dir);
+    delete_tree(dir);
+}
+
 /*
  * Scenario D: paths with spaces, written the ways a user would write them in TCResticBrowser.ini -
  * ResticPath and repository paths with spaces, unquoted and quoted, with and without a trailing
@@ -1939,6 +2065,7 @@ int main(void) {
     test_user_ini_overrides_plugin_ini();
     test_live_end_to_end_navigation();
     test_live_paths_with_spaces();
+    test_live_repository_settings();
 
     RemoveDirectoryW(g_user_dir);
     RemoveDirectoryW(appdata_dir);
