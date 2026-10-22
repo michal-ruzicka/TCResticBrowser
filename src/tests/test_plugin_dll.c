@@ -26,13 +26,27 @@ static WCHAR g_pluginst_inf[MAX_PATH];
 static int g_tests_run    = 0;
 static int g_tests_failed = 0;
 
+/* The last check that finished, for the watchdog (see watchdog_thread) */
+static volatile LONG g_checks_done = 0;
+static const char* volatile g_last_check_function = "main";
+static volatile LONG g_last_check_line = 0;
+static const char* volatile g_last_check = "(none yet)";
+#define CHECK_DONE(msg) do { \
+    g_last_check_function = __FUNCTION__; \
+    g_last_check_line     = __LINE__; \
+    g_last_check          = (msg); \
+    InterlockedIncrement(&g_checks_done); \
+} while (0)
+
 #define EXPECT_TRUE(cond, msg) do { \
     g_tests_run++; \
     if (!(cond)) { \
         printf("[FAIL] %s:%d: %s\n", __FUNCTION__, __LINE__, (msg)); \
         g_tests_failed++; \
+        CHECK_DONE(msg); \
         return; \
     } \
+    CHECK_DONE(msg); \
 } while (0)
 
 #define EXPECT_WSTR_EQ(actual, expected, msg) do { \
@@ -41,8 +55,10 @@ static int g_tests_failed = 0;
         printf("[FAIL] %s:%d: %s (expected '%ls', got '%ls')\n", \
                __FUNCTION__, __LINE__, (msg), (expected), (actual)); \
         g_tests_failed++; \
+        CHECK_DONE(msg); \
         return; \
     } \
+    CHECK_DONE(msg); \
 } while (0)
 
 /* Local copies of the WFX constants and prototypes (the plugin is only reachable through GetProcAddress) */
@@ -1815,9 +1831,45 @@ static BOOL path_next_to_exe(const WCHAR* name, WCHAR* out, size_t cap) {
     return swprintf_s(out, cap, L"%ls\\%ls", exe, name) > 0;
 }
 
+/*
+ * A test that hangs (a deadlock in the plugin, a restic that never ends) must not keep a CI run
+ * waiting for hours without a word: when no check has finished for WATCHDOG_MINUTES, say which one
+ * finished last and what the connection log holds, and end the process. TerminateProcess, not
+ * exit(): a deadlock may hold the loader lock, which exit() would need for DLL_PROCESS_DETACH.
+ */
+#ifndef WATCHDOG_MINUTES
+#define WATCHDOG_MINUTES 10u
+#endif
+static DWORD WINAPI watchdog_thread(void* arg) {
+    (void)arg;
+    LONG seen       = -1;
+    ULONGLONG since = GetTickCount64();
+    for (;;) {
+        Sleep(5000);
+        LONG done = InterlockedCompareExchange(&g_checks_done, 0, 0);
+        if (done != seen) {
+            seen  = done;
+            since = GetTickCount64();
+            continue;
+        }
+        if (GetTickCount64() - since < WATCHDOG_MINUTES * 60000ull) continue;
+        printf("[FAIL] Watchdog: no check finished for %u minutes; the last one was %s:%ld: %s\n", WATCHDOG_MINUTES,
+               g_last_check_function, (long)g_last_check_line, g_last_check);
+        if (TryAcquireSRWLockShared(&g_e2e_conn_log_lock)) {
+            size_t len = wcslen(g_e2e_conn_log);
+            printf("       End of the connection log:\n%ls\n", g_e2e_conn_log + (len > 3000 ? len - 3000 : 0));
+            ReleaseSRWLockShared(&g_e2e_conn_log_lock);
+        }
+        fflush(stdout);
+        TerminateProcess(GetCurrentProcess(), 3);
+    }
+}
+
 int main(void) {
     /* No modal system dialog (crash, missing disk, failed start) may stop an unattended CI run */
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+    HANDLE watchdog = CreateThread(NULL, 0, watchdog_thread, NULL, 0, NULL);
+    if (watchdog) CloseHandle(watchdog);
     printf("Running Restic WFX plugin DLL smoke tests...\n");
     if (!path_next_to_exe(L"" RESTIC_WFX_FILE_NAME, g_plugin_dll, MAX_PATH) ||
         !path_next_to_exe(L"pluginst.inf", g_pluginst_inf, MAX_PATH)) {
