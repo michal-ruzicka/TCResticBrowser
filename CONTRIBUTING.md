@@ -26,9 +26,17 @@ it up to date with every change.
   `vs_buildtools.exe --config .vsconfig` (as
   `setup-build-environment-example.cmd` and the CI workflow do) selects
   exactly those. The full Visual Studio IDE works too, but is not required.
-- *(Optional)* `tmp\restic.exe`: with it the live end-to-end tests run
-  against a real repository they create in `tmp\test_fixture\`; without it
-  they report `[SKIP]`.
+- *(Optional, but CI has it)* `tmp\restic.exe`: with it the live end-to-end
+  tests run against a real repository they create in `tmp\test_fixture\`;
+  without it they report `[SKIP]`, and a local `build.cmd` or
+  `build.cmd check` covers much less than CI does (a test bug that only the
+  Debug CRT of `build.cmd check` reports once hung CI while every local run
+  passed). Use the version CI pins: `RESTIC_VERSION` in
+  `.github/workflows/build.yml`, from
+  `restic_<version>_windows_amd64.zip` of the restic GitHub release, checked
+  against `RESTIC_ZIP_SHA256` there (`Get-FileHash -Algorithm SHA256`), the
+  `.exe` inside copied to `tmp\restic.exe` (the 64-bit `restic.exe` serves the
+  x86 tests too).
 
 Nothing else: no Bash, no Python, no .NET. The plugin is pure C11 / Win32,
 linked against the static MSVC runtime, and contains no third-party code.
