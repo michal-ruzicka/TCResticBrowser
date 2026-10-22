@@ -302,9 +302,11 @@ line, sorted by host, then paths, then time:
 The file is UTF-8 with a byte-order mark, so Excel shows non-ASCII host
 names and paths correctly, and follows RFC 4180: a cell that contains the
 separator, a quote or a line break is quoted, and quotes in it are
-doubled. A host name, path or tag that starts like a spreadsheet formula
-(`=`, `+`, `-`, `@`) gets a leading apostrophe, so opening the file never
-evaluates anything a backup put into its tags.
+doubled. Where a host name, path or tag could start a cell with a
+spreadsheet formula (`=`, `+`, `-`, `@` at its start, at the start of one
+of its lines, or after a `,` `;` `|` tab or quote, should the file be read
+with another separator), an apostrophe is put before that character, so
+opening the file never evaluates anything a backup put into its tags.
 
 Excel separates the columns of a CSV file by the *list separator* of your
 Windows regional settings (a semicolon in many European countries, a comma
@@ -318,9 +320,9 @@ CsvSeparator=;
 
 Opened by a double click, Excel guesses the type of every cell: a short
 ID made only of digits (`01234567`) or looking like a number with an
-exponent (`123456e7`) is turned into a number. To keep every ID as it is,
-import the file instead (*Data* -> *From Text/CSV*) and set the `snapshot`
-column to *Text*.
+exponent (`123456e7`) is turned into a number, and a host name or tag
+such as `1-2` into a date. To keep every value as it is, import the file
+instead (*Data* -> *From Text/CSV*) and set those columns to *Text*.
 
 The size and time Total Commander shows for the file are those of the
 snapshot list at the time of the listing; the file copied is made from

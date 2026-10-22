@@ -13,7 +13,8 @@
  * format or a memory limit. Everything that parses is walked and the invariants the plugin relies
  * on are checked - every name is one Windows-safe path component, folders are sorted, unique and
  * found again by name, snapshot IDs are hexadecimal, snapshots.csv reads back as one record of five
- * fields per snapshot - so a violation aborts like a sanitizer finding.
+ * fields per snapshot with no cell that could start with a formula, whatever the separator - so a
+ * violation aborts like a sanitizer finding.
  */
 #include <stddef.h>
 #include <stdint.h>
@@ -90,6 +91,8 @@ static void check_csv(const char* csv, size_t len, char sep, size_t records) {
         ++seen;
     }
     CHECK(seen == records);
+    /* Whatever separator a reader splits at, no cell can start with a formula character */
+    for (i = 4; i < len; ++i) CHECK(!(strchr("=+-@", csv[i]) && strchr(",;|\t\n\r\"", csv[i - 1])));
 }
 
 static void fuzz_tree(const char* data, size_t size, const char* format) {

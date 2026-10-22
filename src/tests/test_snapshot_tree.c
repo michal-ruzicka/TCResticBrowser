@@ -343,19 +343,32 @@ static void test_csv(void) {
     static const char expected[] =
         "\xEF\xBB\xBF" "snapshot,host,paths,timestamp,tags\r\n"
         "eeeeeeee,,,2026-10-16 00:00:00,\r\n"                                    /* No host sorts first */
-        "cccccccc,alpha,C:\\Users,2026-10-17 06:00:00,\"'-daily\n@x\nplain\"\r\n"
+        "cccccccc,alpha,C:\\Users,2026-10-17 06:00:00,\"'-daily\n'@x\nplain\"\r\n"
         "aaaaaaaa,\"pc,1\",/home,2026-10-18 07:00:00,\r\n"                        /* Same host and paths: by time */
         "dddddddd,\"pc,1\",/home,2026-10-20 05:04:03,\r\n"
-        "bbbbbbbb,\"pc,1\",\"/home\n/etc\",2026-10-19 08:00:00,\"say \"\"hi\"\"\n=1+2\"\r\n"; /* Paths after "/home" */
+        "bbbbbbbb,\"pc,1\",\"/home\n/etc\",2026-10-19 08:00:00,\"say \"\"hi\"\"\n'=1+2\"\r\n"; /* Paths after "/home" */
     if (!csv || strcmp(csv, expected) != 0) printf("       got: %s\n", csv ? csv : "(null)");
     EXPECT_TRUE(csv && strcmp(csv, expected) == 0 && len == strlen(expected),
                 "BOM, header, CRLF; sorted by host, paths, time; quoting, doubled quotes, lines in a field, "
-                "a value starting like a formula defused (a spreadsheet looks at the start of a field only)");
+                "a formula character at the start of a value or of a line in it defused");
     free(csv);
     csv = snapshot_tree_csv(tree, ';', &len);
     EXPECT_TRUE(csv && strstr(csv, "snapshot;host;paths;timestamp;tags\r\n") && strstr(csv, ";pc,1;/home;") &&
                 strstr(csv, "eeeeeeee;;;2026-10-16 00:00:00;\r\n"), "Another separator; a comma then needs no quotes");
     free(csv);
+    snapshot_tree_free(tree);
+
+    /* Read with another separator, a comma or a quote in a value could start a cell there */
+    tree = build("[{\"time\":\"2026-10-19T08:00:00Z\",\"id\":\"" ID("f") "\",\"hostname\":\"x,=HYPERLINK(1)\","
+                 "\"paths\":[\"/a|+b;-c\\t@d\"],\"tags\":[\"q\\\"=1\",\"a - b\"]}]");
+    csv = snapshot_tree_csv(tree, ';', &len);
+    EXPECT_TRUE(csv && strstr(csv, "\r\nffffffff;x,'=HYPERLINK(1);\"/a|'+b;'-c\t'@d\";2026-10-19 08:00:00;"
+                                   "\"q\"\"'=1\na - b\"\r\n"),
+                "A formula character after , ; | tab or a quote defused too; one after a space is left alone");
+    free(csv);
+    snapshot_tree_free(tree);
+
+    tree = build("[]");
     EXPECT_TRUE(snapshot_tree_csv(tree, '"', &len) == NULL && snapshot_tree_csv(tree, '\n', &len) == NULL &&
                 snapshot_tree_csv(NULL, ',', &len) == NULL, "Unusable separators refused");
     snapshot_tree_free(tree);

@@ -565,18 +565,24 @@ static void csv_put(CsvText* t, const char* text, size_t len) {
     t->data[t->len] = '\0';
 }
 
+/* A character a spreadsheet takes as the start of a formula when a cell begins with it */
+static int formula_start(char c) {
+    return c != '\0' && strchr("=+-@\t\r", c) != NULL;
+}
+
 /*
  * One CSV field (RFC 4180): quoted when it holds the separator, a quote or a line break, quotes
- * doubled. A value that a spreadsheet would take for a formula (=, +, -, @, tab or CR first) gets a
- * leading apostrophe, as OWASP advises against CSV injection: host names, paths and tags come from
- * the backed-up systems.
+ * doubled. Host names, paths and tags come from the backed-up systems, so as OWASP advises against
+ * CSV injection a formula character gets an apostrophe before it where a cell could begin with it:
+ * at the start of the value, and also after any character a reader with another separator or a
+ * looser parser might split cells or records at (, ; | tab, line breaks, quote) - Excel opening the
+ * file with the list separator of other regional settings, say.
  */
 static void csv_field(CsvText* t, const char* value, char separator) {
-    int formula = value[0] != '\0' && strchr("=+-@\t\r", value[0]) != NULL;
     int quote = strchr(value, separator) || strchr(value, '"') || strchr(value, '\n') || strchr(value, '\r');
     if (quote) csv_put(t, "\"", 1);
-    if (formula) csv_put(t, "'", 1);
     for (const char* p = value; *p; ++p) {
+        if (formula_start(*p) && (p == value || strchr(",;|\t\n\r\"", p[-1]))) csv_put(t, "'", 1);
         csv_put(t, p, 1);
         if (*p == '"') csv_put(t, "\"", 1);
     }
