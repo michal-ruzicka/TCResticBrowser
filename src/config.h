@@ -179,7 +179,10 @@ BOOL config_load(ResticConfig* out_config);
  * - Any "<backend>.<option>" key (letters, digits and '-' around one dot, e.g. s3.region,
  *   s3.bucket-lookup, sftp.command): an extended option, passed as restic -o <key>=<value> and
  *   checked by restic itself. The key is lowercased, as restic does; quotes around the value are
- *   removed unless the value has more of them inside (a command line).
+ *   removed unless the value has more of them inside. The four options restic splits into a
+ *   command line itself follow the PasswordCommand rules instead: rclone.program and sftp.command
+ *   (a plain path, or a command line with quotes, kept as written), rclone.args and sftp.args
+ *   (arguments only, kept as written, refused with a backslash outside quotes).
  * PasswordFile and PasswordCommand may both be set: restic gets both and decides (it refuses the
  * combination). An unusable value sets the entry's settings_error; unknown keys, empty values and
  * sections for an alias that is not configured are ignored.

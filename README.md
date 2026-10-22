@@ -588,7 +588,7 @@ s3.region=eu-central-1
 | `AWS_PROFILE` | The profile to use in that file (or in `%USERPROFILE%\.aws\credentials`). |
 | `AWS_DEFAULT_REGION` | The S3 region. |
 | `RESTIC_AWS_ASSUME_ROLE_ARN`, `..._SESSION_NAME`, `..._EXTERNAL_ID`, `..._POLICY`, `..._REGION`, `..._STS_ENDPOINT` | An IAM role for restic to assume with the credentials above. |
-| `<backend>.<option>` | Any restic extended option, passed as `-o <backend>.<option>=<value>`: `s3.region`, `s3.bucket-lookup`, `s3.connections`, `s3.retries`, `s3.list-objects-v1`, `s3.unsafe-anonymous-auth`, `s3.enable-restore`, `s3.restore-days`, `s3.restore-timeout`, `s3.restore-tier`, and those of the other backends (`sftp.command`, `rclone.program`, `rest.connections`...). restic checks names and values itself (`restic options` lists them); `s3.region` wins over `AWS_DEFAULT_REGION`. |
+| `<backend>.<option>` | Any restic extended option, passed as `-o <backend>.<option>=<value>`: `s3.region`, `s3.bucket-lookup`, `s3.connections`, `s3.retries`, `s3.list-objects-v1`, `s3.unsafe-anonymous-auth`, `s3.enable-restore`, `s3.restore-days`, `s3.restore-timeout`, `s3.restore-tier`, and those of the other backends (`sftp.command`, `rclone.program`, `rest.connections`...). restic checks names and values itself (`restic options` lists them); `s3.region` wins over `AWS_DEFAULT_REGION`. `rclone.program` and `sftp.command` are written like `PasswordCommand` (a plain path, or the program's path in double quotes followed by arguments), `rclone.args` and `sftp.args` with paths in double quotes, since restic splits all four into a command line itself. |
 
 The S3 variables are exactly those restic documents (except the secret
 ones: `AWS_SECRET_ACCESS_KEY` is asked for, `AWS_SESSION_TOKEN` comes from

@@ -539,18 +539,41 @@ static BOOL has_aws_settings(const ResticRepo* repo) {
 #define FOR_EACH_BLOCK_ENTRY(p, block) for (const WCHAR* p = (block); p && *p != L'\0'; p += wcslen(p) + 1)
 
 /*
- * The extended options as command-line arguments, "-o <quoted key=value> " each (CommandLineToArgvW
- * quoting), or "" without any; heap, NULL when out of memory
+ * The extended options as command-line arguments, "-o <key=value> " each, or "" without any; heap,
+ * NULL when out of memory. restic's -o is a pflag string slice, which reads its value as one line
+ * of CSV: a quote anywhere but around the whole value is an error ("bare " in non-quoted-field")
+ * and a comma would split the value into two options. So a key=value with a quote, comma or line
+ * break becomes one quoted CSV field, inner quotes doubled (rclone.program="C:\a b\rclone.exe"
+ * reaches restic as "rclone.program=""C:\a b\rclone.exe"""), and that then gets the command-line
+ * quoting of CommandLineToArgvW on top.
  */
 static WCHAR* option_arguments(const ResticRepo* repo) {
     size_t cap = 1;
-    FOR_EACH_BLOCK_ENTRY(p, repo->options) cap += 4 + 2 * wcslen(p) + 3; /* "-o " + worst-case quoting + " " */
-    WCHAR* out = (WCHAR*)calloc(cap, sizeof(WCHAR));
-    if (!out) return NULL;
+    FOR_EACH_BLOCK_ENTRY(p, repo->options) cap += 4 * wcslen(p) + 10; /* "-o " + worst-case CSV and quoting + " " */
+    WCHAR* out   = (WCHAR*)calloc(cap, sizeof(WCHAR));
+    WCHAR* field = (WCHAR*)calloc(cap, sizeof(WCHAR));
+    if (!out || !field) {
+        free(out);
+        free(field);
+        return NULL;
+    }
     FOR_EACH_BLOCK_ENTRY(p, repo->options) {
-        WCHAR* quoted = restic_quote_arg(p);
+        if (wcspbrk(p, L"\",\r\n")) {
+            size_t f = 0;
+            field[f++] = L'"';
+            for (const WCHAR* c = p; *c; ++c) {
+                if (*c == L'"') field[f++] = L'"';
+                field[f++] = *c;
+            }
+            field[f++] = L'"';
+            field[f]   = L'\0';
+        } else {
+            wcscpy_s(field, cap, p);
+        }
+        WCHAR* quoted = restic_quote_arg(field);
         if (!quoted) {
             free(out);
+            free(field);
             return NULL;
         }
         wcscat_s(out, cap, L"-o ");
@@ -558,6 +581,7 @@ static WCHAR* option_arguments(const ResticRepo* repo) {
         wcscat_s(out, cap, L" ");
         free(quoted);
     }
+    free(field);
     return out;
 }
 

@@ -1371,18 +1371,22 @@ static void test_dump_with_fake_restic(void) {
     EXPECT_TRUE(slow_ms > 1800, "The whole transfer lasted longer than the timeout value (it is not a total-time limit)");
 #undef FAKE_DUMP
 
-    /* Extended options go before the command, one -o each, quoted as one argument */
+    /*
+     * Extended options go before the command, one -o each, one argument each; restic reads an -o
+     * value as CSV, so one with a quote or a comma is a quoted CSV field
+     */
     ResticRepo with_options = {.target = L"repo-url", .password = L"pw",
-                               .options = L"s3.region=eu-west-1\0sftp.command=\"C:\\x y\\ssh.exe\" -s sftp\0"};
+                               .options = L"s3.region=eu-west-1\0sftp.command=\"C:\\x y\\ssh.exe\" -s sftp\0"
+                                          L"s3.storage-class=a,b\0"};
     ResticCommandOutput out;
     res = restic_exec_command(fake, &with_options, L"snapshots /args", NULL, &out);
-    EXPECT_TRUE(res == RESTIC_OK && strcmp(out.output, "-o|s3.region=eu-west-1|-o|sftp.command=\"C:\\x y\\ssh.exe\" -s sftp|"
-                                                       "snapshots|/args|") == 0,
-                "Options as -o arguments before the command, each one argument, quotes intact");
+    EXPECT_TRUE(res == RESTIC_OK && strcmp(out.output, "-o|s3.region=eu-west-1|-o|\"sftp.command=\"\"C:\\x y\\ssh.exe\"\" -s sftp\"|"
+                                                       "-o|\"s3.storage-class=a,b\"|snapshots|/args|") == 0,
+                "Options as -o arguments before the command, each one argument, a CSV field where restic needs one");
     restic_free_command_output(&out);
     res = restic_dump_file(fake, &with_options, "abcd1234", L"\\args", dest, TRUE, NULL, 0, NULL, NULL, err, _countof(err));
-    EXPECT_TRUE(res == RESTIC_OK && file_equals(dest, "-o|s3.region=eu-west-1|-o|sftp.command=\"C:\\x y\\ssh.exe\" -s sftp|"
-                                                      "dump|--no-lock|abcd1234|/args|"),
+    EXPECT_TRUE(res == RESTIC_OK && file_equals(dest, "-o|s3.region=eu-west-1|-o|\"sftp.command=\"\"C:\\x y\\ssh.exe\"\" -s sftp\"|"
+                                                      "-o|\"s3.storage-class=a,b\"|dump|--no-lock|abcd1234|/args|"),
                 "restic dump gets the options too");
     res = restic_exec_command(fake, REPO(L"repo-url", L"pw"), L"snapshots /args", NULL, &out);
     EXPECT_TRUE(res == RESTIC_OK && strcmp(out.output, "snapshots|/args|") == 0, "No options: nothing added");

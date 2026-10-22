@@ -1248,7 +1248,10 @@ static void test_repository_sections(void) {
              "s3.region = eu-west-1\r\n"
              "S3.Bucket-Lookup=dns\r\n"                 /* Lowercased as restic does */
              "s3.storage-class=\"STANDARD\"\r\n"         /* Quotes around the whole value removed */
-             "sftp.command=\"C:\\Program Files\\ssh.exe\" -s sftp\r\n" /* Quotes inside kept */
+             "sftp.command=\"%s\\dir with space\\get pass.cmd\" -s sftp\r\n" /* Quotes kept: restic splits it */
+             "rclone.program=%s\\get-pass.cmd\r\n"     /* A plain path, quoted for restic */
+             "rclone.args=serve restic --stdio\r\n"     /* Arguments only, as written */
+             "sftp.args='-i C:\\key'\r\n"
              "s3.region=ignored\r\n"                     /* Not the first occurrence */
              "PasswordFile=missing.txt\r\n" /* Not the first occurrence: ignored */
              "Unknown=1\r\n"
@@ -1271,7 +1274,7 @@ static void test_repository_sections(void) {
              "PasswordFile=pw.txt\r\n"
              "[Repository: Second]\r\n"
              "AWS_PROFILE=other\r\n", /* Repeated section: the first occurrence still wins */
-             dir, dir, dir, dir);
+             dir, dir, dir, dir, dir, dir);
     static ResticConfig cfg;
     const ResticRepoEntry* r = load_repo(plugin_dir, ini, L"Second", &cfg);
     EXPECT_TRUE(cfg.repo_count == 5 && r != NULL, "Repository sections add no repository");
@@ -1295,9 +1298,13 @@ static void test_repository_sections(void) {
     EXPECT_WSTR_EQ(option_of(r, L"s3.region"), L"eu-west-1", "Option s3.region, first occurrence");
     EXPECT_WSTR_EQ(option_of(r, L"s3.bucket-lookup"), L"dns", "Option name lowercased");
     EXPECT_WSTR_EQ(option_of(r, L"s3.storage-class"), L"STANDARD", "Quotes around a whole option value removed");
-    EXPECT_WSTR_EQ(option_of(r, L"sftp.command"), L"\"C:\\Program Files\\ssh.exe\" -s sftp",
-                   "Quotes inside an option value (a command line) kept");
-    EXPECT_TRUE(block_count(r->options) == 4, "Four options; malformed keys are not options");
+    swprintf_s(path, CONFIG_MAX_PATH, L"\"%ls\\dir with space\\get pass.cmd\" -s sftp", plugin_dir);
+    EXPECT_WSTR_EQ(option_of(r, L"sftp.command"), path, "A command line option keeps its quotes (restic splits it)");
+    swprintf_s(path, CONFIG_MAX_PATH, L"\"%ls\\get-pass.cmd\"", plugin_dir);
+    EXPECT_WSTR_EQ(option_of(r, L"rclone.program"), path, "rclone.program as a plain path is quoted for restic");
+    EXPECT_WSTR_EQ(option_of(r, L"rclone.args"), L"serve restic --stdio", "rclone.args as written");
+    EXPECT_WSTR_EQ(option_of(r, L"sftp.args"), L"'-i C:\\key'", "sftp.args keeps the quotes around its whole value");
+    EXPECT_TRUE(block_count(r->options) == 7, "Seven options; malformed keys are not options");
     EXPECT_TRUE(r->settings_error[0] == L'\0' && r->password_command[0] == L'\0', "No error, no command");
 
     r = config_find_repo(&cfg, L"First");
@@ -1356,6 +1363,9 @@ static void test_repository_sections(void) {
         {"PasswordCommand=\"\" \"\"", L"names no program"},
         {"AWS_PROFILE=a\x01" "b", L"control character"},
         {"s3.region=a\x01" "b", L"control character"},
+        {"rclone.program=C:\\no\\such\\rclone.exe", L"does not exist"},
+        {"rclone.args=serve restic --stdio C:\\x", L"backslash outside quotes"},
+        {"sftp.command=\"C:\\no\\such\\ssh.exe\" -s sftp", L"does not exist"},
         {"AWS_SHARED_CREDENTIALS_FILE=C:creds", L"depends on the current drive"},
     };
     for (size_t i = 0; i < _countof(bad); ++i) {

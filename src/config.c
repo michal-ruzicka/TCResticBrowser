@@ -733,10 +733,15 @@ static int split_restic_command(const WCHAR* cmd, WCHAR* first, size_t cap, BOOL
     return quote != 0 ? -1 : count;
 }
 
-/* PasswordCommand as restic gets it (see config.h); FALSE with the entry's settings_error set */
-static BOOL resolve_password_command(ResticRepoEntry* s, const WCHAR* value, WCHAR unquoted, const WCHAR* ini_path) {
-    static const WCHAR key[] = L"PasswordCommand";
-    if (unquoted == 0 && !wcschr(value, L'"') && !wcschr(value, L'\'')) {
+/*
+ * A setting restic splits into a command line itself (backend.SplitShellStrings) as restic gets it,
+ * into `out` (CONFIG_MAX_PATH): PasswordCommand, rclone.program, sftp.command, which start with a
+ * program (`program`), and rclone.args, sftp.args, which are only arguments. See config.h for the
+ * rules; FALSE with the entry's settings_error set.
+ */
+static BOOL resolve_command(ResticRepoEntry* s, const WCHAR* key, const WCHAR* value, WCHAR unquoted,
+                            const WCHAR* ini_path, BOOL program_first, WCHAR* out) {
+    if (program_first && unquoted == 0 && !wcschr(value, L'"') && !wcschr(value, L'\'')) {
         /* A plain path, as ResticPath: a bare name in the plugin folder, then in PATH */
         WCHAR program[CONFIG_MAX_PATH] = {0};
         if (!has_path_component(value)) {
@@ -752,7 +757,7 @@ static BOOL resolve_password_command(ResticRepoEntry* s, const WCHAR* value, WCH
             repo_setting_error(s, key, value, ini_path, L"is too long.");
             return FALSE;
         }
-        _snwprintf_s(s->password_command, CONFIG_MAX_PATH, _TRUNCATE, L"\"%ls\"", program);
+        _snwprintf_s(out, CONFIG_MAX_PATH, _TRUNCATE, L"\"%ls\"", program);
         return TRUE;
     }
 
@@ -774,7 +779,7 @@ static BOOL resolve_password_command(ResticRepoEntry* s, const WCHAR* value, WCH
         repo_setting_error(s, key, command, ini_path, L"has a quote that is not closed.");
         return FALSE;
     }
-    if (args == 0) {
+    if (args == 0 && program_first) {
         repo_setting_error(s, key, command, ini_path, L"names no program.");
         return FALSE;
     }
@@ -783,6 +788,10 @@ static BOOL resolve_password_command(ResticRepoEntry* s, const WCHAR* value, WCH
                            L"has a backslash outside quotes, where restic splits the command. Put paths in "
                            L"double quotes: \"C:\\Tools\\get-password.exe\" --name backup");
         return FALSE;
+    }
+    if (!program_first) {
+        wcscpy_s(out, CONFIG_MAX_PATH, command);
+        return TRUE;
     }
     if (has_path_component(program) && !config_is_absolute_path(program)) {
         repo_setting_error(s, key, command, ini_path,
@@ -794,7 +803,7 @@ static BOOL resolve_password_command(ResticRepoEntry* s, const WCHAR* value, WCH
         repo_setting_error(s, key, command, ini_path, L"starts with a program that does not exist: %ls", program);
         return FALSE;
     }
-    wcscpy_s(s->password_command, CONFIG_MAX_PATH, command);
+    wcscpy_s(out, CONFIG_MAX_PATH, command);
     return TRUE;
 }
 
@@ -867,7 +876,18 @@ static void read_repo_option(ResticRepoEntry* s, const WCHAR* key, const WCHAR* 
         repo_setting_error(s, key, value, ini_path, L"is too long.");
         return;
     }
-    if (unquoted != 0 && wcschr(value, unquoted)) {
+    /* The options restic splits into a command line, as PasswordCommand: program first or arguments only */
+    static const struct {
+        const WCHAR* name;
+        BOOL program_first;
+    } COMMAND_OPTIONS[] = {
+        {L"rclone.program", TRUE}, {L"sftp.command", TRUE}, {L"rclone.args", FALSE}, {L"sftp.args", FALSE},
+    };
+    size_t c = 0;
+    while (c < _countof(COMMAND_OPTIONS) && wcscmp(name, COMMAND_OPTIONS[c].name) != 0) ++c;
+    if (c < _countof(COMMAND_OPTIONS)) {
+        if (!resolve_command(s, name, value, unquoted, ini_path, COMMAND_OPTIONS[c].program_first, raw)) return;
+    } else if (unquoted != 0 && wcschr(value, unquoted)) {
         _snwprintf_s(raw, CONFIG_MAX_PATH, _TRUNCATE, L"%lc%ls%lc", unquoted, value, unquoted);
     } else {
         wcscpy_s(raw, CONFIG_MAX_PATH, value);
@@ -898,7 +918,7 @@ static void read_repo_setting(RepoSettings* rs, const WCHAR* key, const WCHAR* v
             resolve_setting_file(s, name, value, ini_path, s->password_file, CONFIG_MAX_PATH);
             return;
         case REPO_KEY_PASSWORD_COMMAND:
-            resolve_password_command(s, value, unquoted, ini_path);
+            resolve_command(s, name, value, unquoted, ini_path, TRUE, s->password_command);
             return;
         case REPO_KEY_ENV_FILE:
             if (!resolve_setting_file(s, name, value, ini_path, path, CONFIG_MAX_PATH)) return;
