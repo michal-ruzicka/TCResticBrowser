@@ -1077,7 +1077,7 @@ static void test_snapshots_csv(const Plugin* p, const WCHAR* dir, const WCHAR* s
     text[got] = '\0';
     EXPECT_TRUE(got == ri.SizeLow, "The copy has exactly the listed size");
     EXPECT_TRUE(CompareFileTime(&mtime, &ri.LastWriteTime) == 0, "The copy carries the listed time");
-    const char* header = "\xEF\xBB\xBFshort ID;host;paths;timestamp;tags;full ID\r\n";
+    const char* header = "\xEF\xBB\xBFshort ID;host;paths;size;timestamp;tags;full ID\r\n";
     EXPECT_TRUE(strncmp(text, header, strlen(header)) == 0, "UTF-8 BOM, then the header with CsvSeparator=;");
     char some_a[16] = {0}, latest_a[16] = {0};
     WideCharToMultiByte(CP_UTF8, 0, some_id, -1, some_a, sizeof(some_a), NULL, NULL);
@@ -1094,6 +1094,15 @@ static void test_snapshots_csv(const Plugin* p, const WCHAR* dir, const WCHAR* s
                 "Each record ends with the full ID, the last one the newer snapshot's");
     EXPECT_TRUE(strstr(text, some_a) != NULL && strstr(text, "\\test_fixture\\data") != NULL,
                 "The records hold the short IDs and the backed-up path");
+    /* restic 0.17 and later record a summary, so the size follows the path as restic snapshots prints it */
+    const char* size  = second ? strstr(second + 2, "\\test_fixture\\data;") : NULL;
+    size              = size ? size + strlen("\\test_fixture\\data;") : NULL;
+    const char* end   = size ? strchr(size, ';') : NULL;
+    size_t size_len   = end ? (size_t)(end - size) : 0;
+    int size_has_unit = size_len >= 9 && (strncmp(end - 4, " KiB", 4) == 0 || strncmp(end - 4, " MiB", 4) == 0);
+    EXPECT_TRUE(size_has_unit && size[0] >= '1' && size[0] <= '9' && end[-8] == '.' &&
+                    strspn(end - 7, "0123456789") == 3,
+                "The newer snapshot's size, as \"<n>.<3 decimals> KiB\" or MiB, after its path");
 
     EXPECT_TRUE(p->get_file_w(L"\\MainRepo\\snapshots.csv", local, 0, &ri) == FS_FILE_EXISTS,
                 "An existing copy is reported first (overwrite protocol)");

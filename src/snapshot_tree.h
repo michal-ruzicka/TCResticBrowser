@@ -90,8 +90,9 @@ SnapshotTreeStatus snapshot_tree_build(const char* json, size_t len, const char*
  * The snapshots as CSV text for spreadsheets (heap, NUL-terminated; `*out_len` bytes without the
  * NUL), or NULL when out of memory or for a separator that cannot separate (NUL, quote, line
  * break): a UTF-8 byte-order mark, then RFC 4180 records with CRLF line ends and `separator`
- * between the fields "short ID", host, paths, timestamp ("YYYY-MM-DD hh:mm:ss", the snapshot's
- * own clock time), tags and "full ID", after a header line; host, paths and tags as restic reports
+ * between the fields "short ID", host, paths, size (as `restic snapshots` prints it, "1.234 GiB";
+ * empty for a snapshot without a summary), timestamp ("YYYY-MM-DD hh:mm:ss", the snapshot's own
+ * clock time), tags and "full ID", after a header line; host, paths and tags as restic reports
  * them, not made Windows-safe, several paths or tags one per line in their field. Sorted by host,
  * then paths (both ignoring ASCII case), then time. A field is quoted when it holds the separator,
  * a quote or a line break (quotes doubled). A spreadsheet formula character (= + - @ tab CR) gets an

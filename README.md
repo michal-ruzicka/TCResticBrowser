@@ -211,7 +211,7 @@ documentation.
 | **List Repositories** | Open **Network Neighborhood** (`\\\`) -> **`TCResticBrowser`**. Changes to `TCResticBrowser.ini` take effect immediately on panel refresh (`Ctrl+R` / `F2`). |
 | **Browse Snapshots** | Enter a repository folder (`\<Alias>`). Prompted once for the repository password; once restic accepts it, it is kept in RAM (encrypted) for that alias across both panels for 30 minutes (see [Password Timeout](#password-timeout)). Up to 3 password attempts are allowed. The dialog's title starts with the repository alias (`MyLocalBackup - Restic repository password`), so a password manager that picks an entry by the title of the active window, such as KeePassXC Auto-Type, can offer the right password. |
 | **Connection Log** | Total Commander's FTP connections toolbar (unless `ConnectionLog=no`), whose log window shows what the plugin is doing in the background - reading a whole snapshot (with progress every few seconds) or re-reading the snapshot list - and whose **Disconnect** forgets all passwords and everything read with them. See [Connection Log](#connection-log). |
-| **Snapshot List (`snapshots.csv`)** | Every repository folder also holds the file **`snapshots.csv`**: all snapshots with host, paths, time, tags and full ID, for Excel or another spreadsheet (`F3` to view, `F5` to copy, or open it). See [Snapshot List as a Spreadsheet](#snapshot-list-as-a-spreadsheet). Next to it, **`repository_id.txt`** holds the repository's ID (see [Repository ID](#repository-id)). |
+| **Snapshot List (`snapshots.csv`)** | Every repository folder also holds the file **`snapshots.csv`**: all snapshots with host, paths, size, time, tags and full ID, for Excel or another spreadsheet (`F3` to view, `F5` to copy, or open it). See [Snapshot List as a Spreadsheet](#snapshot-list-as-a-spreadsheet). Next to it, **`repository_id.txt`** holds the repository's ID (see [Repository ID](#repository-id)). |
 | **Forget Passwords** | While passwords are remembered, the plugin's root folder starts with **`🗑 Forget N Passwords`** (N is their number; `🗑 Forget 1 Password` for one). Press **Enter** on it to wipe them all at once; a message says how many were forgotten, the root folder is then re-read without the entry, and the next access asks again. The entry is not removed by itself when the passwords expire; it disappears the next time the root folder is read (`Ctrl+R`). |
 | **Explore Files** | Enter a snapshot through `snapshots`, `ids`, `hosts` or `tags` (or `latest`) and navigate the backed-up directory tree. The snapshot list is read once and then shown at once from memory; when it is older than a minute (`SnapshotListRefreshSeconds=`), as `restic mount` would re-read it, restic reads a new one in the background and the next listing (`Ctrl+R`) shows any new snapshots (see [Snapshot List Refresh](#snapshot-list-refresh)). |
 | **View File (`F3` / `Ctrl+Q`)** | Press **`F3`** (Lister) or **`Ctrl+Q`** (Quick View) on any file to stream it to a temporary location and view its contents. |
@@ -298,6 +298,7 @@ case), then time:
 | `short ID` | The short ID, as `restic snapshots` prints it and as in `ids` |
 | `host` | Host name as restic recorded it |
 | `paths` | The backed-up paths, one per line within the cell when there are several |
+| `size` | The size of the backed-up data, as `restic snapshots` shows it (`1.234 GiB`; `B`, `KiB`, `MiB`, `GiB` or `TiB` with three decimals); empty for a snapshot taken by restic older than 0.17, which recorded no size |
 | `timestamp` | `YYYY-MM-DD hh:mm:ss`, the snapshot's own clock time (the time zone it was taken in), which spreadsheets read as a date and time |
 | `tags` | The tags, one per line within the cell; empty when there are none |
 | `full ID` | The full 64-character ID, which every restic command accepts and which spreadsheets never take for a number |
@@ -684,7 +685,7 @@ sizes as exact 64-bit integers instead of going through floating point.
 
 The reader is generic: it understands any valid JSON, not just a list of
 expected keywords. The plugin looks up the few fields it uses (`id`,
-`time`, `hostname`, `tags`, `paths`, `name`, `type`, `size`, `mtime`, `atime`,
+`time`, `hostname`, `tags`, `paths`, `summary.total_bytes_processed`, `name`, `type`, `size`, `mtime`, `atime`,
 `ctime`, `path`, `message_type`, `message`), so fields and message types that a newer
 Restic adds are simply ignored; a missing field skips the entry or leaves its
 size or time unknown, and a line that is not valid JSON fails the listing

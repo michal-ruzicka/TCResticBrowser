@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`snapshots.csv` has a `size` column** after `paths`: the size of each
+  snapshot as `restic snapshots` shows it (`1.234 GiB`), from the summary
+  restic 0.17 and later record with a snapshot; empty for older snapshots.
+
 ## [v2.1.0] – 2026-10-22
 
 ### Added
