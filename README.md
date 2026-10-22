@@ -576,6 +576,7 @@ PasswordFile=C:\Users\me\restic\local-backup.txt
 [Repository: CloudS3]
 PasswordCommand="C:\Program Files\KeePassXC\keepassxc-cli.exe" show -a password "C:\Keys\backup.kdbx" restic
 AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+s3.region=eu-central-1
 ```
 
 | Setting | Effect |
@@ -583,13 +584,20 @@ AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
 | `PasswordFile` | restic reads the password from this file (`--password-file`); no password dialog. A full path, or one relative to the plugin folder, without quotes. |
 | `PasswordCommand` | restic runs this program and uses what it prints as the password (`--password-command`), e.g. a password manager's command-line tool; no password dialog. Usually just the program's or script's path, written like `ResticPath` (full path, relative to the plugin folder, or a bare name found in `PATH`) without quotes. To pass arguments, write the command line the way restic splits it: the program's path in double quotes, then the arguments, quoting each one with spaces or backslashes, as in the example. Unquoted backslashes are refused, because restic would split the command there. |
 | `AWS_ACCESS_KEY_ID` | The S3 access key ID. The plugin then asks for the **secret access key** in a dialog titled `<alias> - S3 secret access key` (before the password, if that is asked for too) and keeps it in memory only, encrypted, exactly like a password: it is forgotten together with the password. The secret key is never read from the INI file. |
-| `AWS_SHARED_CREDENTIALS_FILE` | An AWS credentials file (full path or relative to the plugin folder) for restic to read the key from instead. |
+| `AWS_SHARED_CREDENTIALS_FILE` | An AWS credentials file (full path or relative to the plugin folder) for restic to read the key from instead; temporary credentials with a session token belong here. |
 | `AWS_PROFILE` | The profile to use in that file (or in `%USERPROFILE%\.aws\credentials`). |
+| `AWS_DEFAULT_REGION` | The S3 region. |
+| `RESTIC_AWS_ASSUME_ROLE_ARN`, `..._SESSION_NAME`, `..._EXTERNAL_ID`, `..._POLICY`, `..._REGION`, `..._STS_ENDPOINT` | An IAM role for restic to assume with the credentials above. |
+| `<backend>.<option>` | Any restic extended option, passed as `-o <backend>.<option>=<value>`: `s3.region`, `s3.bucket-lookup`, `s3.connections`, `s3.retries`, `s3.list-objects-v1`, `s3.unsafe-anonymous-auth`, `s3.enable-restore`, `s3.restore-days`, `s3.restore-timeout`, `s3.restore-tier`, and those of the other backends (`sftp.command`, `rclone.program`, `rest.connections`...). restic checks names and values itself (`restic options` lists them); `s3.region` wins over `AWS_DEFAULT_REGION`. |
 
-Everything is passed to restic in its environment
-(`RESTIC_PASSWORD_FILE`, `RESTIC_PASSWORD_COMMAND`, `AWS_ACCESS_KEY_ID`,
-`AWS_SECRET_ACCESS_KEY`, `AWS_SHARED_CREDENTIALS_FILE`, `AWS_PROFILE`), never
-on its command line. `PasswordFile` and `PasswordCommand` together are both
+The S3 variables are exactly those restic documents (except the secret
+ones: `AWS_SECRET_ACCESS_KEY` is asked for, `AWS_SESSION_TOKEN` comes from
+the credentials file), so everything restic itself can do with an S3
+repository can be set per repository. Credentials and variables are
+passed to restic in its environment (`RESTIC_PASSWORD_FILE`,
+`RESTIC_PASSWORD_COMMAND`, `AWS_*`, `RESTIC_AWS_*`), never on its command
+line; only the `-o` options are on it, as restic has no other way to take
+them. `PasswordFile` and `PasswordCommand` together are both
 passed, as if both were given to restic itself, and restic refuses the
 combination. A password from a file or command that restic rejects is
 reported and not asked for. A setting that cannot be used (a missing file,
@@ -597,13 +605,11 @@ a path relative to the current folder, a broken command line) is reported
 when the repository is opened, before anything runs.
 
 restic runs as a child of Total Commander and inherits its environment.
-For a repository with any of the three AWS settings, every `AWS_*`,
-`MINIO_*` and `RESTIC_AWS_*` variable Total Commander was started with is
-left out, so the repository uses only its own S3 credentials and never
-someone else's key or region by accident. Repositories without them
-inherit those variables as before; other S3 options (a region, an assumed
-role) are left to restic's defaults, and backends with more involved
-credentials are best reached through `rclone:`.
+For a repository with any of the S3 variables, every `AWS_*`, `MINIO_*`
+and `RESTIC_AWS_*` variable Total Commander was started with is left out,
+so the repository uses only its own S3 settings and never someone else's
+key or region by accident. Repositories without them inherit those
+variables as before.
 
 The `🗑 Forget N Passwords` entry counts the repositories with a password
 or secret key typed in; it also forgets that a password file or command

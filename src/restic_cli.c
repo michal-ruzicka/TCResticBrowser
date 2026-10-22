@@ -526,20 +526,39 @@ BOOL restic_repo_usable(const ResticRepo* repo) {
 }
 
 ResticRepo restic_repo_of(const ResticRepoEntry* entry, const WCHAR* password, const WCHAR* aws_secret_access_key) {
-    ResticRepo repo = {entry->target,
-                       password,
-                       entry->password_file,
-                       entry->password_command,
-                       entry->aws_access_key_id,
-                       aws_secret_access_key,
-                       entry->aws_shared_credentials_file,
-                       entry->aws_profile};
+    ResticRepo repo = {entry->target,       password,          entry->password_file, entry->password_command,
+                       entry->environment, aws_secret_access_key, entry->options};
     return repo;
 }
 
 static BOOL has_aws_settings(const ResticRepo* repo) {
-    return has_text(repo->aws_access_key_id) || has_text(repo->aws_secret_access_key) ||
-           has_text(repo->aws_shared_credentials_file) || has_text(repo->aws_profile);
+    return has_text(repo->environment) || has_text(repo->aws_secret_access_key);
+}
+
+/* The entries of a "a=1\0b=2\0\0" block, one after the other */
+#define FOR_EACH_BLOCK_ENTRY(p, block) for (const WCHAR* p = (block); p && *p != L'\0'; p += wcslen(p) + 1)
+
+/*
+ * The extended options as command-line arguments, "-o <quoted key=value> " each (CommandLineToArgvW
+ * quoting), or "" without any; heap, NULL when out of memory
+ */
+static WCHAR* option_arguments(const ResticRepo* repo) {
+    size_t cap = 1;
+    FOR_EACH_BLOCK_ENTRY(p, repo->options) cap += 4 + 2 * wcslen(p) + 3; /* "-o " + worst-case quoting + " " */
+    WCHAR* out = (WCHAR*)calloc(cap, sizeof(WCHAR));
+    if (!out) return NULL;
+    FOR_EACH_BLOCK_ENTRY(p, repo->options) {
+        WCHAR* quoted = restic_quote_arg(p);
+        if (!quoted) {
+            free(out);
+            return NULL;
+        }
+        wcscat_s(out, cap, L"-o ");
+        wcscat_s(out, cap, quoted);
+        wcscat_s(out, cap, L" ");
+        free(quoted);
+    }
+    return out;
 }
 
 /* TRUE for an inherited environment entry ("NAME=value") that the child must not get */
@@ -568,10 +587,7 @@ static WCHAR* build_child_environment(const ResticRepo* repo, size_t* out_chars)
         {L"RESTIC_PASSWORD", repo->password},
         {L"RESTIC_PASSWORD_FILE", repo->password_file},
         {L"RESTIC_PASSWORD_COMMAND", repo->password_command},
-        {L"AWS_ACCESS_KEY_ID", repo->aws_access_key_id},
         {L"AWS_SECRET_ACCESS_KEY", repo->aws_secret_access_key},
-        {L"AWS_SHARED_CREDENTIALS_FILE", repo->aws_shared_credentials_file},
-        {L"AWS_PROFILE", repo->aws_profile},
     };
     BOOL own_aws = has_aws_settings(repo);
     LPWCH parent_env = GetEnvironmentStringsW();
@@ -583,6 +599,7 @@ static WCHAR* build_child_environment(const ResticRepo* repo, size_t* out_chars)
     for (size_t i = 0; i < _countof(vars); ++i) {
         if (has_text(vars[i].value)) total_cap += wcslen(vars[i].name) + 1 + wcslen(vars[i].value) + 1;
     }
+    FOR_EACH_BLOCK_ENTRY(p, repo->environment) total_cap += wcslen(p) + 1;
 
     WCHAR* block = (WCHAR*)calloc(total_cap, sizeof(WCHAR));
     if (!block) {
@@ -605,6 +622,11 @@ static WCHAR* build_child_environment(const ResticRepo* repo, size_t* out_chars)
         int n = swprintf_s(block + offset, total_cap - offset, L"%ls=%ls", vars[i].name, vars[i].value);
         if (n < 0) goto fail;
         offset += (size_t)n + 1;
+    }
+    FOR_EACH_BLOCK_ENTRY(p, repo->environment) {
+        size_t len = wcslen(p) + 1;
+        wmemcpy(block + offset, p, len);
+        offset += len;
     }
 
     block[offset++] = L'\0'; /* Block terminator */
@@ -653,14 +675,11 @@ static void log_restic_start(const WCHAR* cmd_line, const ResticRepo* repo) {
     }
     if (has_text(repo->password_file)) log_write(L"  RESTIC_PASSWORD_FILE: %ls", repo->password_file);
     if (has_text(repo->password_command)) log_write(L"  RESTIC_PASSWORD_COMMAND: %ls", repo->password_command);
-    if (has_aws_settings(repo)) {
-        log_write(L"  AWS_ACCESS_KEY_ID: %ls; AWS_SECRET_ACCESS_KEY: %u characters; AWS_SHARED_CREDENTIALS_FILE: %ls; "
-                  L"AWS_PROFILE: %ls (inherited AWS_*, MINIO_*, RESTIC_AWS_* left out)",
-                  has_text(repo->aws_access_key_id) ? repo->aws_access_key_id : L"-",
-                  has_text(repo->aws_secret_access_key) ? (unsigned)wcslen(repo->aws_secret_access_key) : 0u,
-                  has_text(repo->aws_shared_credentials_file) ? repo->aws_shared_credentials_file : L"-",
-                  has_text(repo->aws_profile) ? repo->aws_profile : L"-");
+    FOR_EACH_BLOCK_ENTRY(p, repo->environment) log_write(L"  %ls", p);
+    if (has_text(repo->aws_secret_access_key)) {
+        log_write(L"  AWS_SECRET_ACCESS_KEY: %u characters", (unsigned)wcslen(repo->aws_secret_access_key));
     }
+    if (has_aws_settings(repo)) log_write(L"  (inherited AWS_*, MINIO_*, RESTIC_AWS_* variables left out)");
 }
 
 /* Logs how a run ended, with restic's stderr (line breaks shown as " | ") */
@@ -967,15 +986,22 @@ ResticResult restic_exec_command(
         return RESTIC_ERR_SPAWN_FAILED;
     }
 
-    size_t cmd_chars = wcslen(restic_exe) + wcslen(args) + 4; /* quotes, space, NUL */
+    WCHAR* option_args = option_arguments(repo);
+    if (!option_args) {
+        return RESTIC_ERR_OUT_OF_MEMORY;
+    }
+    size_t cmd_chars = wcslen(restic_exe) + wcslen(option_args) + wcslen(args) + 4; /* quotes, space, NUL */
     if (cmd_chars > MAX_CMDLINE_CHARS) {
+        free(option_args);
         return RESTIC_ERR_INVALID_ARG;
     }
     WCHAR* cmd_line = (WCHAR*)malloc(cmd_chars * sizeof(WCHAR));
     if (!cmd_line) {
+        free(option_args);
         return RESTIC_ERR_OUT_OF_MEMORY;
     }
-    swprintf_s(cmd_line, cmd_chars, L"\"%ls\" %ls", restic_exe, args);
+    swprintf_s(cmd_line, cmd_chars, L"\"%ls\" %ls%ls", restic_exe, option_args, args);
+    free(option_args);
 
     size_t env_chars = 0;
     WCHAR* env_block = build_child_environment(repo, &env_chars);
@@ -1435,21 +1461,29 @@ ResticResult restic_dump_file(
     MultiByteToWideChar(CP_UTF8, 0, snapshot_id, -1, snap_w, (int)_countof(snap_w));
 
     WCHAR* quoted_filter = restic_quote_arg(filter_w);
-    if (!quoted_filter) return RESTIC_ERR_OUT_OF_MEMORY;
+    WCHAR* option_args   = option_arguments(repo);
+    if (!quoted_filter || !option_args) {
+        free(quoted_filter);
+        free(option_args);
+        return RESTIC_ERR_OUT_OF_MEMORY;
+    }
 
-    size_t cmd_chars = wcslen(restic_exe) + wcslen(L"\"\" dump --no-lock  ") + wcslen(snap_w) +
+    size_t cmd_chars = wcslen(restic_exe) + wcslen(option_args) + wcslen(L"\"\" dump --no-lock  ") + wcslen(snap_w) +
                        wcslen(quoted_filter) + 4;
     if (cmd_chars > MAX_CMDLINE_CHARS) {
         free(quoted_filter);
+        free(option_args);
         return RESTIC_ERR_INVALID_ARG;
     }
     WCHAR* cmd_line = (WCHAR*)malloc(cmd_chars * sizeof(WCHAR));
     if (!cmd_line) {
         free(quoted_filter);
+        free(option_args);
         return RESTIC_ERR_OUT_OF_MEMORY;
     }
-    swprintf_s(cmd_line, cmd_chars, L"\"%ls\" dump --no-lock %ls %ls", restic_exe, snap_w, quoted_filter);
+    swprintf_s(cmd_line, cmd_chars, L"\"%ls\" %lsdump --no-lock %ls %ls", restic_exe, option_args, snap_w, quoted_filter);
     free(quoted_filter);
+    free(option_args);
 
     DumpState st;
     memset(&st, 0, sizeof(st));

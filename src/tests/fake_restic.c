@@ -47,6 +47,13 @@ int main(int argc, char** argv) {
         put_out(password);
         return 0;
     }
+    if (strcmp(mode, "/args") == 0) { /* Every argument, each followed by '|' */
+        for (int i = 1; i < argc; ++i) {
+            put_out(argv[i]);
+            put_out("|");
+        }
+        return 0;
+    }
     if (strcmp(mode, "/empty") == 0) return 0;
     if (strcmp(mode, "/partial") == 0) {
         put_out("partial-data");

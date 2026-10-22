@@ -717,9 +717,10 @@ static BOOL prompt_repository_password(
  */
 static BOOL prompt_aws_secret(const ResticRepoEntry* repo, WCHAR* out_secret, size_t cap) {
     if (!g_RequestProc || cap == 0) return FALSE;
-    WCHAR prompt_text[MAX_PATH + CONFIG_MAX_VALUE + 128];
-    _snwprintf_s(prompt_text, _countof(prompt_text), _TRUNCATE,
-                 L"Enter the S3 secret access key of %ls for repository '%ls':", repo->aws_access_key_id, repo->alias);
+    WCHAR prompt_text[MAX_PATH + 512];
+    const WCHAR* key_id = config_repo_env_value(repo, L"AWS_ACCESS_KEY_ID");
+    _snwprintf_s(prompt_text, _countof(prompt_text), _TRUNCATE, L"Enter the S3 secret access key of %ls for repository '%ls':",
+                 key_id ? key_id : L"", repo->alias);
     WCHAR title[MAX_PATH + 64];
     _snwprintf_s(title, _countof(title), _TRUNCATE, L"%ls - S3 secret access key", repo->alias);
     out_secret[0] = L'\0';
@@ -957,7 +958,7 @@ static ResticResult run_with_password(
     WCHAR wrong_hint[PASSWORD_HINT_CHARS] = {0}; /* What looked odd in a rejected password */
     ULONGLONG cached_generation          = 0;
     BOOL need_password = repo->password_file[0] == L'\0' && repo->password_command[0] == L'\0';
-    BOOL need_secret   = repo->aws_access_key_id[0] != L'\0';
+    BOOL need_secret   = config_repo_env_value(repo, L"AWS_ACCESS_KEY_ID") != NULL;
     /* Before the password is taken: if it is wiped meanwhile, nothing read with it is cached */
     ULONGLONG cache_generation = repo_cache_generation();
     /* As an FTP plugin announces a connection when it starts connecting: the log then shows how it went */
@@ -1436,13 +1437,9 @@ static void log_configuration(const ResticConfig* cfg) {
         if (r->settings_error[0] != L'\0') log_write(L"      unusable: %ls", r->settings_error);
         if (r->password_file[0] != L'\0') log_write(L"      PasswordFile: %ls", r->password_file);
         if (r->password_command[0] != L'\0') log_write(L"      PasswordCommand: %ls", r->password_command);
-        if (r->aws_access_key_id[0] != L'\0') {
-            log_write(L"      AWS_ACCESS_KEY_ID: %ls (the secret key is asked for)", r->aws_access_key_id);
-        }
-        if (r->aws_shared_credentials_file[0] != L'\0') {
-            log_write(L"      AWS_SHARED_CREDENTIALS_FILE: %ls", r->aws_shared_credentials_file);
-        }
-        if (r->aws_profile[0] != L'\0') log_write(L"      AWS_PROFILE: %ls", r->aws_profile);
+        for (const WCHAR* e = r->environment; *e != L'\0'; e += wcslen(e) + 1) log_write(L"      %ls", e);
+        if (config_repo_env_value(r, L"AWS_ACCESS_KEY_ID")) log_write(L"      (AWS_SECRET_ACCESS_KEY is asked for)");
+        for (const WCHAR* o = r->options; *o != L'\0'; o += wcslen(o) + 1) log_write(L"      -o %ls", o);
     }
 }
 

@@ -479,9 +479,9 @@ static void test_exec_environment_credentials(void) {
                 "No RESTIC_PASSWORD; file and command both passed verbatim; without S3 settings AWS_* are inherited");
     restic_free_command_output(&out);
 
-    ResticRepo s3 = {.target = L"s3:host/bucket", .password = L"pw", .aws_access_key_id = L"AKIAOWN",
-                     .aws_secret_access_key = L"s3cr3t/key+", .aws_shared_credentials_file = L"C:\\aws\\credentials",
-                     .aws_profile = L"backup"};
+    ResticRepo s3 = {.target = L"s3:host/bucket", .password = L"pw", .aws_secret_access_key = L"s3cr3t/key+",
+                     .environment = L"AWS_ACCESS_KEY_ID=AKIAOWN\0AWS_SHARED_CREDENTIALS_FILE=C:\\aws\\credentials\0"
+                                    L"AWS_PROFILE=backup\0"};
     res = restic_exec_command(cmd, &s3, probe, NULL, &out);
     EXPECT_TRUE(res == RESTIC_OK, "Probe with S3 settings ran");
     EXPECT_TRUE(strstr(out.output, "[pw][%RESTIC_PASSWORD_FILE%][%RESTIC_PASSWORD_COMMAND%][AKIAOWN][s3cr3t/key+]"
@@ -490,16 +490,25 @@ static void test_exec_environment_credentials(void) {
                 "The repository's S3 settings replace every inherited AWS_*, MINIO_*, RESTIC_AWS_* variable");
     restic_free_command_output(&out);
 
-    ResticRepo profile_only = {.target = L"s3:host/bucket", .password = L"pw", .aws_profile = L"backup"};
+    ResticRepo profile_only = {.target = L"s3:host/bucket", .password = L"pw", .environment = L"AWS_PROFILE=backup\0"};
     res = restic_exec_command(cmd, &profile_only, probe, NULL, &out);
     EXPECT_TRUE(res == RESTIC_OK && strstr(out.output, "[pw][%RESTIC_PASSWORD_FILE%][%RESTIC_PASSWORD_COMMAND%]"
                                                        "[%AWS_ACCESS_KEY_ID%]") != NULL,
                 "AWS_PROFILE alone also leaves the inherited access key out");
     restic_free_command_output(&out);
 
+    ResticRepo region = {.target = L"s3:host/bucket", .password = L"pw",
+                         .environment = L"AWS_DEFAULT_REGION=eu-central-1\0RESTIC_AWS_ASSUME_ROLE_ARN=arn:own\0"};
+    res = restic_exec_command(cmd, &region, probe, NULL, &out);
+    EXPECT_TRUE(res == RESTIC_OK && strstr(out.output, "[%AWS_ACCESS_KEY_ID%][%AWS_SECRET_ACCESS_KEY%]"
+                                                       "[%AWS_SHARED_CREDENTIALS_FILE%][%AWS_PROFILE%][eu-central-1]"
+                                                       "[%MINIO_ACCESS_KEY%][arn:own]") != NULL,
+                "Region and role of the repository replace the inherited ones");
+    restic_free_command_output(&out);
+
     for (size_t i = 0; i < _countof(inherited); ++i) SetEnvironmentVariableW(inherited[i][0], NULL);
 
-    ResticRepo no_password = {.target = L"r", .aws_access_key_id = L"AKIA"};
+    ResticRepo no_password = {.target = L"r", .environment = L"AWS_ACCESS_KEY_ID=AKIA\0"};
     EXPECT_TRUE(restic_exec_command(cmd, &no_password, probe, NULL, &out) == RESTIC_ERR_INVALID_ARG &&
                     !restic_repo_usable(&no_password) && !restic_repo_usable(NULL),
                 "No password, password file or command: refused before anything is started");
@@ -1357,6 +1366,23 @@ static void test_dump_with_fake_restic(void) {
     EXPECT_TRUE(res == RESTIC_OK && file_equals(dest, "abc"), "Child that keeps producing bytes survives the inactivity timeout");
     EXPECT_TRUE(slow_ms > 1800, "The whole transfer lasted longer than the timeout value (it is not a total-time limit)");
 #undef FAKE_DUMP
+
+    /* Extended options go before the command, one -o each, quoted as one argument */
+    ResticRepo with_options = {.target = L"repo-url", .password = L"pw",
+                               .options = L"s3.region=eu-west-1\0sftp.command=\"C:\\x y\\ssh.exe\" -s sftp\0"};
+    ResticCommandOutput out;
+    res = restic_exec_command(fake, &with_options, L"snapshots /args", NULL, &out);
+    EXPECT_TRUE(res == RESTIC_OK && strcmp(out.output, "-o|s3.region=eu-west-1|-o|sftp.command=\"C:\\x y\\ssh.exe\" -s sftp|"
+                                                       "snapshots|/args|") == 0,
+                "Options as -o arguments before the command, each one argument, quotes intact");
+    restic_free_command_output(&out);
+    res = restic_dump_file(fake, &with_options, "abcd1234", L"\\args", dest, TRUE, NULL, 0, NULL, NULL, err, _countof(err));
+    EXPECT_TRUE(res == RESTIC_OK && file_equals(dest, "-o|s3.region=eu-west-1|-o|sftp.command=\"C:\\x y\\ssh.exe\" -s sftp|"
+                                                      "dump|--no-lock|abcd1234|/args|"),
+                "restic dump gets the options too");
+    res = restic_exec_command(fake, REPO(L"repo-url", L"pw"), L"snapshots /args", NULL, &out);
+    EXPECT_TRUE(res == RESTIC_OK && strcmp(out.output, "snapshots|/args|") == 0, "No options: nothing added");
+    restic_free_command_output(&out);
 
     DeleteFileW(dest);
     RemoveDirectoryW(dir);

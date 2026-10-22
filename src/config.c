@@ -607,16 +607,30 @@ static BOOL parse_no(const WCHAR* text) {
 /* The settings of one [Repository: <alias>] section until they are applied to the repository */
 typedef struct {
     ResticRepoEntry settings; /* alias and the settings; target unused */
-    unsigned seen;            /* REPO_KEY_* bits of the keys already read: the first occurrence wins */
+    unsigned seen;            /* Bits of the REPO_KEYS already read: the first occurrence wins */
 } RepoSettings;
 
-enum {
-    REPO_KEY_PASSWORD_FILE    = 1u << 0,
-    REPO_KEY_PASSWORD_COMMAND = 1u << 1,
-    REPO_KEY_AWS_KEY_ID       = 1u << 2,
-    REPO_KEY_AWS_CREDENTIALS  = 1u << 3,
-    REPO_KEY_AWS_PROFILE      = 1u << 4
+typedef enum { REPO_KEY_PASSWORD_FILE, REPO_KEY_PASSWORD_COMMAND, REPO_KEY_ENV_VALUE, REPO_KEY_ENV_FILE } RepoKeyKind;
+
+/* The keys of a [Repository: <alias>] section other than restic options, as restic names them */
+static const struct {
+    const WCHAR* key;
+    RepoKeyKind kind;
+} REPO_KEYS[] = {
+    {L"PasswordFile", REPO_KEY_PASSWORD_FILE},
+    {L"PasswordCommand", REPO_KEY_PASSWORD_COMMAND},
+    {L"AWS_ACCESS_KEY_ID", REPO_KEY_ENV_VALUE},
+    {L"AWS_DEFAULT_REGION", REPO_KEY_ENV_VALUE},
+    {L"AWS_PROFILE", REPO_KEY_ENV_VALUE},
+    {L"AWS_SHARED_CREDENTIALS_FILE", REPO_KEY_ENV_FILE},
+    {L"RESTIC_AWS_ASSUME_ROLE_ARN", REPO_KEY_ENV_VALUE},
+    {L"RESTIC_AWS_ASSUME_ROLE_SESSION_NAME", REPO_KEY_ENV_VALUE},
+    {L"RESTIC_AWS_ASSUME_ROLE_EXTERNAL_ID", REPO_KEY_ENV_VALUE},
+    {L"RESTIC_AWS_ASSUME_ROLE_POLICY", REPO_KEY_ENV_VALUE},
+    {L"RESTIC_AWS_ASSUME_ROLE_REGION", REPO_KEY_ENV_VALUE},
+    {L"RESTIC_AWS_ASSUME_ROLE_STS_ENDPOINT", REPO_KEY_ENV_VALUE},
 };
+_Static_assert(sizeof(REPO_KEYS) / sizeof(REPO_KEYS[0]) <= sizeof(unsigned) * 8, "RepoSettings.seen has a bit per key");
 
 /* Sets the entry's settings_error, unless an earlier setting already did: "<key>=<value> (set in ...) <reason>" */
 static void repo_setting_error(ResticRepoEntry* s, const WCHAR* key, const WCHAR* value, const WCHAR* ini_path,
@@ -784,62 +798,118 @@ static BOOL resolve_password_command(ResticRepoEntry* s, const WCHAR* value, WCH
     return TRUE;
 }
 
-/* A plain value (AWS_ACCESS_KEY_ID, AWS_PROFILE) copied when it has no control character and fits */
-static BOOL copy_setting_value(ResticRepoEntry* s, const WCHAR* key, const WCHAR* value, const WCHAR* ini_path,
-                               WCHAR* out, size_t cap) {
+/* TRUE when `value` has no control character (it goes into an environment block or a command line) */
+static BOOL setting_value_plain(ResticRepoEntry* s, const WCHAR* key, const WCHAR* value, const WCHAR* ini_path) {
     for (const WCHAR* p = value; *p; ++p) {
         if (*p < 0x20 || *p == 0x7F) {
             repo_setting_error(s, key, value, ini_path, L"contains a control character.");
             return FALSE;
         }
     }
-    if (wcslen(value) >= cap) {
-        repo_setting_error(s, key, value, ini_path, L"is too long.");
-        return FALSE;
-    }
-    wcscpy_s(out, cap, value);
     return TRUE;
+}
+
+/*
+ * Appends "<name>=<value>" to a block of NUL-terminated strings ending in an empty one
+ * ("a=1\0b=2\0\0"; an empty block is "\0"), of `cap` characters. FALSE when it does not fit.
+ */
+static BOOL block_append(WCHAR* block, size_t cap, const WCHAR* name, const WCHAR* value) {
+    size_t used = 0;
+    while (block[used] != L'\0') used += wcslen(block + used) + 1;
+    size_t len = wcslen(name) + 1 + wcslen(value);
+    if (used + len + 2 > cap) return FALSE; /* The entry's NUL and the block's */
+    _snwprintf_s(block + used, cap - used, _TRUNCATE, L"%ls=%ls", name, value);
+    block[used + len + 1] = L'\0';
+    return TRUE;
+}
+
+/* The entry "<name>=..." of a block, matching the name ignoring case; NULL when it is not there */
+static const WCHAR* block_find(const WCHAR* block, const WCHAR* name) {
+    size_t len = wcslen(name);
+    for (const WCHAR* p = block; *p != L'\0'; p += wcslen(p) + 1) {
+        if (_wcsnicmp(p, name, len) == 0 && p[len] == L'=') return p;
+    }
+    return NULL;
+}
+
+const WCHAR* config_repo_env_value(const ResticRepoEntry* repo, const WCHAR* name) {
+    const WCHAR* entry = repo && name ? block_find(repo->environment, name) : NULL;
+    return entry ? entry + wcslen(name) + 1 : NULL;
+}
+
+/* TRUE for a restic extended option name: "<backend>.<option>", letters, digits and '-' around one dot */
+static BOOL is_option_key(const WCHAR* key) {
+    const WCHAR* dot = wcschr(key, L'.');
+    if (!dot || dot == key || dot[1] == L'\0' || wcschr(dot + 1, L'.')) return FALSE;
+    for (const WCHAR* p = key; *p; ++p) {
+        BOOL alnum = (*p >= L'a' && *p <= L'z') || (*p >= L'A' && *p <= L'Z') || (*p >= L'0' && *p <= L'9');
+        if (!alnum && *p != L'.' && !(*p == L'-' && p > dot)) return FALSE;
+    }
+    return TRUE;
+}
+
+/*
+ * A restic option "<backend>.<option>=<value>" of the section, first occurrence of a key winning.
+ * The INI reader removed quotes around the whole value; they are put back when the value has more
+ * of them inside, as in a command line like sftp.command="C:\a b\ssh.exe" -s sftp, where they
+ * were not around the whole value at all.
+ */
+static void read_repo_option(ResticRepoEntry* s, const WCHAR* key, const WCHAR* value, WCHAR unquoted,
+                             const WCHAR* ini_path) {
+    WCHAR name[MAX_PATH];
+    if (wcslen(key) >= MAX_PATH) return;
+    wcscpy_s(name, MAX_PATH, key);
+    _wcslwr_s(name, MAX_PATH); /* restic lowercases option names */
+    if (block_find(s->options, name) || value[0] == L'\0') return;
+    if (!setting_value_plain(s, key, value, ini_path)) return;
+    WCHAR raw[CONFIG_MAX_PATH];
+    if (wcslen(value) + 2 >= CONFIG_MAX_PATH) {
+        repo_setting_error(s, key, value, ini_path, L"is too long.");
+        return;
+    }
+    if (unquoted != 0 && wcschr(value, unquoted)) {
+        _snwprintf_s(raw, CONFIG_MAX_PATH, _TRUNCATE, L"%lc%ls%lc", unquoted, value, unquoted);
+    } else {
+        wcscpy_s(raw, CONFIG_MAX_PATH, value);
+    }
+    if (!block_append(s->options, CONFIG_MAX_REPO_OPTIONS, name, raw)) {
+        repo_setting_error(s, key, value, ini_path, L"does not fit: the section's options are too long together.");
+    }
 }
 
 /* Reads one key=value line of a [Repository: <alias>] section into `rs` */
 static void read_repo_setting(RepoSettings* rs, const WCHAR* key, const WCHAR* value, WCHAR unquoted,
                               const WCHAR* ini_path) {
-    static const struct {
-        const WCHAR* key;
-        unsigned bit;
-    } KEYS[] = {
-        {L"PasswordFile", REPO_KEY_PASSWORD_FILE},
-        {L"PasswordCommand", REPO_KEY_PASSWORD_COMMAND},
-        {L"AWS_ACCESS_KEY_ID", REPO_KEY_AWS_KEY_ID},
-        {L"AWS_SHARED_CREDENTIALS_FILE", REPO_KEY_AWS_CREDENTIALS},
-        {L"AWS_PROFILE", REPO_KEY_AWS_PROFILE},
-    };
-    unsigned bit = 0;
-    for (size_t i = 0; i < _countof(KEYS); ++i) {
-        if (_wcsicmp(key, KEYS[i].key) == 0) bit = KEYS[i].bit;
+    ResticRepoEntry* s = &rs->settings;
+    if (is_option_key(key)) {
+        read_repo_option(s, key, value, unquoted, ini_path);
+        return;
     }
-    if (bit == 0 || (rs->seen & bit) != 0) return; /* Unknown, or not the first occurrence */
-    rs->seen |= bit;
+    size_t k = 0;
+    while (k < _countof(REPO_KEYS) && _wcsicmp(key, REPO_KEYS[k].key) != 0) ++k;
+    if (k == _countof(REPO_KEYS) || (rs->seen & (1u << k)) != 0) return; /* Unknown, or not the first */
+    rs->seen |= 1u << k;
     if (value[0] == L'\0') return; /* Empty: not set */
 
-    ResticRepoEntry* s = &rs->settings;
-    switch (bit) {
+    const WCHAR* name = REPO_KEYS[k].key;
+    WCHAR path[CONFIG_MAX_PATH];
+    switch (REPO_KEYS[k].kind) {
         case REPO_KEY_PASSWORD_FILE:
-            resolve_setting_file(s, L"PasswordFile", value, ini_path, s->password_file, CONFIG_MAX_PATH);
-            break;
+            resolve_setting_file(s, name, value, ini_path, s->password_file, CONFIG_MAX_PATH);
+            return;
         case REPO_KEY_PASSWORD_COMMAND:
             resolve_password_command(s, value, unquoted, ini_path);
-            break;
-        case REPO_KEY_AWS_KEY_ID:
-            copy_setting_value(s, L"AWS_ACCESS_KEY_ID", value, ini_path, s->aws_access_key_id, CONFIG_MAX_VALUE);
-            break;
-        case REPO_KEY_AWS_CREDENTIALS:
-            resolve_setting_file(s, L"AWS_SHARED_CREDENTIALS_FILE", value, ini_path, s->aws_shared_credentials_file,
-                                 CONFIG_MAX_PATH);
+            return;
+        case REPO_KEY_ENV_FILE:
+            if (!resolve_setting_file(s, name, value, ini_path, path, CONFIG_MAX_PATH)) return;
+            value = path;
             break;
         default:
-            copy_setting_value(s, L"AWS_PROFILE", value, ini_path, s->aws_profile, CONFIG_MAX_VALUE);
+            if (!setting_value_plain(s, name, value, ini_path)) return;
             break;
+    }
+    if (!block_append(s->environment, CONFIG_MAX_REPO_ENV, name, value)) {
+        repo_setting_error(s, name, value, ini_path, L"does not fit: the section's settings are too long together.");
     }
 }
 
@@ -869,9 +939,8 @@ static void apply_repo_settings(ResticConfig* config, const RepoSettings* rs) {
         const ResticRepoEntry* s = &rs->settings;
         wcscpy_s(e->password_file, CONFIG_MAX_PATH, s->password_file);
         wcscpy_s(e->password_command, CONFIG_MAX_PATH, s->password_command);
-        wcscpy_s(e->aws_access_key_id, CONFIG_MAX_VALUE, s->aws_access_key_id);
-        wcscpy_s(e->aws_shared_credentials_file, CONFIG_MAX_PATH, s->aws_shared_credentials_file);
-        wcscpy_s(e->aws_profile, CONFIG_MAX_VALUE, s->aws_profile);
+        memcpy(e->environment, s->environment, sizeof(e->environment)); /* Blocks with inner NULs */
+        memcpy(e->options, s->options, sizeof(e->options));
         wcscpy_s(e->settings_error, CONFIG_ERROR_CHARS, s->settings_error);
         return;
     }

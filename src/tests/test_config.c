@@ -1194,7 +1194,33 @@ static const ResticRepoEntry* load_repo(const WCHAR* plugin_dir, const char* ini
     return config_find_repo(cfg, alias);
 }
 
-/* [Repository: <alias>] sections: PasswordFile, PasswordCommand and the three AWS settings */
+/* A variable of a repository's environment block, "<unset>" when it is not there */
+static const WCHAR* env_of(const ResticRepoEntry* r, const WCHAR* name) {
+    const WCHAR* v = config_repo_env_value(r, name);
+    return v ? v : L"<unset>";
+}
+
+/* The value of entry "<key>=..." of a "a=1\0b=2\0\0" block, key compared exactly; "<unset>" when missing */
+static const WCHAR* block_value(const WCHAR* block, const WCHAR* key) {
+    size_t len = wcslen(key);
+    for (const WCHAR* p = block; *p != L'\0'; p += wcslen(p) + 1) {
+        if (wcsncmp(p, key, len) == 0 && p[len] == L'=') return p + len + 1;
+    }
+    return L"<unset>";
+}
+
+static const WCHAR* option_of(const ResticRepoEntry* r, const WCHAR* key) {
+    return block_value(r->options, key);
+}
+
+/* Number of entries of a "a=1\0b=2\0\0" block */
+static int block_count(const WCHAR* block) {
+    int n = 0;
+    for (const WCHAR* p = block; *p != L'\0'; p += wcslen(p) + 1) n++;
+    return n;
+}
+
+/* [Repository: <alias>] sections: password file and command, S3 variables, restic options */
 static void test_repository_sections(void) {
     /* Static: /analyze (C6262) caps a frame at 16 KB, and a ResticConfig alone takes half of it */
     static WCHAR plugin_dir[CONFIG_MAX_PATH], spaced_dir[CONFIG_MAX_PATH], path[CONFIG_MAX_PATH];
@@ -1216,8 +1242,18 @@ static void test_repository_sections(void) {
              "AWS_ACCESS_KEY_ID=AKIAEXAMPLE\r\n"
              "aws_shared_credentials_file=%s\\creds\r\n"
              "AWS_PROFILE = backup \r\n"
+             "AWS_DEFAULT_REGION=eu-central-1\r\n"
+             "RESTIC_AWS_ASSUME_ROLE_ARN=arn:aws:iam::123456789012:role/backup\r\n"
+             "restic_aws_assume_role_policy={\"Version\":\"2012-10-17\"}\r\n"
+             "s3.region = eu-west-1\r\n"
+             "S3.Bucket-Lookup=dns\r\n"                 /* Lowercased as restic does */
+             "s3.storage-class=\"STANDARD\"\r\n"         /* Quotes around the whole value removed */
+             "sftp.command=\"C:\\Program Files\\ssh.exe\" -s sftp\r\n" /* Quotes inside kept */
+             "s3.region=ignored\r\n"                     /* Not the first occurrence */
              "PasswordFile=missing.txt\r\n" /* Not the first occurrence: ignored */
              "Unknown=1\r\n"
+             "bad..key=1\r\n"                            /* Neither a known key nor an option: ignored */
+             ".region=1\r\n"
              "[Repositories]\r\n"
              "First=C:\\r1\r\n"
              "Second=s3:s3.example.com/bucket\r\n"
@@ -1241,10 +1277,27 @@ static void test_repository_sections(void) {
     EXPECT_TRUE(cfg.repo_count == 5 && r != NULL, "Repository sections add no repository");
     swprintf_s(path, CONFIG_MAX_PATH, L"%ls\\pw.txt", plugin_dir);
     EXPECT_WSTR_EQ(r->password_file, path, "PasswordFile relative to the plugin folder, first occurrence");
-    EXPECT_WSTR_EQ(r->aws_access_key_id, L"AKIAEXAMPLE", "AWS_ACCESS_KEY_ID");
+    EXPECT_WSTR_EQ(env_of(r, L"AWS_ACCESS_KEY_ID"), L"AKIAEXAMPLE", "AWS_ACCESS_KEY_ID");
     swprintf_s(path, CONFIG_MAX_PATH, L"%ls\\creds", plugin_dir);
-    EXPECT_WSTR_EQ(r->aws_shared_credentials_file, path, "AWS_SHARED_CREDENTIALS_FILE, key compared ignoring case");
-    EXPECT_WSTR_EQ(r->aws_profile, L"backup", "AWS_PROFILE trimmed, first occurrence across sections");
+    EXPECT_WSTR_EQ(env_of(r, L"AWS_SHARED_CREDENTIALS_FILE"), path,
+                   "AWS_SHARED_CREDENTIALS_FILE resolved, key compared ignoring case");
+    EXPECT_WSTR_EQ(env_of(r, L"AWS_PROFILE"), L"backup", "AWS_PROFILE trimmed, first occurrence across sections");
+    EXPECT_WSTR_EQ(env_of(r, L"AWS_DEFAULT_REGION"), L"eu-central-1", "AWS_DEFAULT_REGION");
+    EXPECT_WSTR_EQ(env_of(r, L"RESTIC_AWS_ASSUME_ROLE_ARN"), L"arn:aws:iam::123456789012:role/backup",
+                   "RESTIC_AWS_ASSUME_ROLE_ARN");
+    EXPECT_WSTR_EQ(env_of(r, L"RESTIC_AWS_ASSUME_ROLE_POLICY"), L"{\"Version\":\"2012-10-17\"}",
+                   "RESTIC_AWS_ASSUME_ROLE_POLICY, a JSON value as written");
+    EXPECT_TRUE(wcscmp(block_value(r->environment, L"RESTIC_AWS_ASSUME_ROLE_POLICY"), L"{\"Version\":\"2012-10-17\"}") == 0,
+                "Each variable under restic's own name, whatever case the INI used");
+    EXPECT_TRUE(block_count(r->environment) == 6 && config_repo_env_value(r, L"PasswordFile") == NULL &&
+                    config_repo_env_value(r, L"AWS_SECRET_ACCESS_KEY") == NULL,
+                "Only the S3 variables in the environment block");
+    EXPECT_WSTR_EQ(option_of(r, L"s3.region"), L"eu-west-1", "Option s3.region, first occurrence");
+    EXPECT_WSTR_EQ(option_of(r, L"s3.bucket-lookup"), L"dns", "Option name lowercased");
+    EXPECT_WSTR_EQ(option_of(r, L"s3.storage-class"), L"STANDARD", "Quotes around a whole option value removed");
+    EXPECT_WSTR_EQ(option_of(r, L"sftp.command"), L"\"C:\\Program Files\\ssh.exe\" -s sftp",
+                   "Quotes inside an option value (a command line) kept");
+    EXPECT_TRUE(block_count(r->options) == 4, "Four options; malformed keys are not options");
     EXPECT_TRUE(r->settings_error[0] == L'\0' && r->password_command[0] == L'\0', "No error, no command");
 
     r = config_find_repo(&cfg, L"First");
@@ -1261,10 +1314,10 @@ static void test_repository_sections(void) {
 
     r = config_find_repo(&cfg, L"Odd]Name");
     EXPECT_TRUE(r != NULL, "An alias with ']'");
-    EXPECT_WSTR_EQ(r->aws_profile, L"odd", "... has its section, closed by the last ']'");
+    EXPECT_WSTR_EQ(env_of(r, L"AWS_PROFILE"), L"odd", "... has its section, closed by the last ']'");
     r = config_find_repo(&cfg, L"Plain");
-    EXPECT_TRUE(r && r->password_file[0] == L'\0' && r->password_command[0] == L'\0' && r->aws_access_key_id[0] == L'\0' &&
-                    r->settings_error[0] == L'\0',
+    EXPECT_TRUE(r && r->password_file[0] == L'\0' && r->password_command[0] == L'\0' && r->environment[0] == L'\0' &&
+                    r->options[0] == L'\0' && r->settings_error[0] == L'\0',
                 "A repository without a section has no settings");
     config_free(&cfg);
 
@@ -1302,6 +1355,8 @@ static void test_repository_sections(void) {
         {"PasswordCommand=no-such-password-tool-xyz", L"neither in the plugin folder nor in PATH"},
         {"PasswordCommand=\"\" \"\"", L"names no program"},
         {"AWS_PROFILE=a\x01" "b", L"control character"},
+        {"s3.region=a\x01" "b", L"control character"},
+        {"AWS_SHARED_CREDENTIALS_FILE=C:creds", L"depends on the current drive"},
     };
     for (size_t i = 0; i < _countof(bad); ++i) {
         snprintf(ini, sizeof(ini), "[Repositories]\r\nR=C:\\r\r\n[Repository: R]\r\n%s\r\n", bad[i].line);

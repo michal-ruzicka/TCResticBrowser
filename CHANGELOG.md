@@ -20,8 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plugin asks for the secret access key in a dialog like the password and
   keeps it in memory only, encrypted, as long as the password.
   `AWS_SHARED_CREDENTIALS_FILE=` and `AWS_PROFILE=` select an AWS
-  credentials file and profile instead. A repository with any of these
-  S3 settings no longer inherits `AWS_*`, `MINIO_*` and `RESTIC_AWS_*`
+  credentials file and profile instead; `AWS_DEFAULT_REGION=` and the
+  `RESTIC_AWS_ASSUME_ROLE_*=` variables complete the S3 variables restic
+  reads. Any restic extended option can be given as
+  `<backend>.<option>=` (`s3.region=`, `s3.bucket-lookup=`,
+  `sftp.command=`...) and is passed as `-o`. A repository with S3
+  variables no longer inherits `AWS_*`, `MINIO_*` and `RESTIC_AWS_*`
   variables from Total Commander's environment.
 
 ## [v2.1.0] – 2026-10-22

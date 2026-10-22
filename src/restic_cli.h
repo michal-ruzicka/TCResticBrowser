@@ -46,26 +46,27 @@ typedef BOOL (*ResticDumpProgressProc)(ULONGLONG bytes_written, void* user_data)
 typedef ResticResult (*ResticLineProc)(const char* line, size_t len, void* user_data);
 
 /*
- * A repository and the credentials restic gets for it, all in the child's environment, never on
- * its command line. Empty or NULL strings are not passed. Restic needs a password from at least
- * one of `password`, `password_file` and `password_command`; it gets every one that is set and
- * decides itself (a file and a command together are refused by restic).
+ * A repository and the credentials and settings restic gets for it. Credentials go into the
+ * child's environment, never on its command line; only the extended options (-o) are on the command
+ * line, before the command's own arguments. Empty or NULL strings are not passed. Restic needs a
+ * password from at least one of `password`, `password_file` and `password_command`; it gets every
+ * one that is set and decides itself (a file and a command together are refused by restic).
  *
  * The environment is Total Commander's, minus the RESTIC_* variables that name a repository or a
- * password (they would override or conflict with these). When any of the AWS settings is set, every
- * inherited AWS_*, MINIO_* and RESTIC_AWS_* variable is left out as well, so the S3 credentials are
- * exactly the configured ones and never mixed with whatever Total Commander was started with;
- * without them the environment is inherited as before, for repositories that rely on it.
+ * password (they would override or conflict with these). When the repository has S3 settings of
+ * its own (`environment` or a secret key), every inherited AWS_*, MINIO_* and RESTIC_AWS_*
+ * variable is left out as well, so the S3 credentials and settings are exactly the configured ones
+ * and never mixed with whatever Total Commander was started with; without them the environment is
+ * inherited as before, for repositories that rely on it.
  */
 typedef struct {
-    const WCHAR* target;                      /* RESTIC_REPOSITORY: repository path or URL */
-    const WCHAR* password;                    /* RESTIC_PASSWORD: the password typed in */
-    const WCHAR* password_file;               /* RESTIC_PASSWORD_FILE */
-    const WCHAR* password_command;            /* RESTIC_PASSWORD_COMMAND, as restic splits it */
-    const WCHAR* aws_access_key_id;           /* AWS_ACCESS_KEY_ID */
-    const WCHAR* aws_secret_access_key;       /* AWS_SECRET_ACCESS_KEY: typed in */
-    const WCHAR* aws_shared_credentials_file; /* AWS_SHARED_CREDENTIALS_FILE */
-    const WCHAR* aws_profile;                 /* AWS_PROFILE */
+    const WCHAR* target;                /* RESTIC_REPOSITORY: repository path or URL */
+    const WCHAR* password;              /* RESTIC_PASSWORD: the password typed in */
+    const WCHAR* password_file;         /* RESTIC_PASSWORD_FILE */
+    const WCHAR* password_command;      /* RESTIC_PASSWORD_COMMAND, as restic splits it */
+    const WCHAR* environment;           /* S3 variables, "NAME=value\0...\0\0" (ResticRepoEntry) */
+    const WCHAR* aws_secret_access_key; /* AWS_SECRET_ACCESS_KEY: typed in */
+    const WCHAR* options;               /* -o options, "backend.option=value\0...\0\0" */
 } ResticRepo;
 
 /* TRUE when `repo` names a repository and restic gets a password for it in one of the three ways */

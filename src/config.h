@@ -12,7 +12,8 @@
 #define CONFIG_DEFAULT_SNAPSHOT_CACHE_MB  512u   /* [Settings] SnapshotCacheMB default */
 #define CONFIG_DEFAULT_SNAPSHOT_LIST_REFRESH_S 60u /* [Settings] SnapshotListRefreshSeconds: restic mount's interval */
 #define CONFIG_MAX_PATH           1024
-#define CONFIG_MAX_VALUE          256   /* AWS_ACCESS_KEY_ID, AWS_PROFILE */
+#define CONFIG_MAX_REPO_ENV       4096  /* ResticRepoEntry.environment, in characters */
+#define CONFIG_MAX_REPO_OPTIONS   2048  /* ResticRepoEntry.options, in characters */
 #define CONFIG_ERROR_CHARS        512   /* ResticConfig.restic_path_error */
 #define CONFIG_MAX_INI_BYTES      (4 * 1024 * 1024)  /* A larger TCResticBrowser.ini is not read */
 
@@ -29,9 +30,10 @@ typedef struct {
     WCHAR target[CONFIG_MAX_PATH];  /* Restic repository URI or filesystem path */
     WCHAR password_file[CONFIG_MAX_PATH];     /* PasswordFile: RESTIC_PASSWORD_FILE, full path */
     WCHAR password_command[CONFIG_MAX_PATH];  /* PasswordCommand: RESTIC_PASSWORD_COMMAND */
-    WCHAR aws_access_key_id[CONFIG_MAX_VALUE];          /* AWS_ACCESS_KEY_ID: the secret key is asked for */
-    WCHAR aws_shared_credentials_file[CONFIG_MAX_PATH]; /* AWS_SHARED_CREDENTIALS_FILE, full path */
-    WCHAR aws_profile[CONFIG_MAX_VALUE];                /* AWS_PROFILE */
+    /* The S3 environment variables of the section, "NAME=value\0...\0\0" (empty: "\0") */
+    WCHAR environment[CONFIG_MAX_REPO_ENV];
+    /* The section's restic options (-o), "backend.option=value\0...\0\0" (empty: "\0") */
+    WCHAR options[CONFIG_MAX_REPO_OPTIONS];
     WCHAR settings_error[CONFIG_ERROR_CHARS]; /* Why a setting of the section cannot be used; the
                                                  repository is then not opened. Empty when fine */
 } ResticRepoEntry;
@@ -159,7 +161,7 @@ BOOL config_load(ResticConfig* out_config);
  * [Repository: <alias>] sections (CONFIG_REPOSITORY_SECTION_PREFIX, the alias as in [Repositories],
  * compared ignoring case) hold settings of one repository; config_load_from_file() applies them to
  * the repository of that alias, the first occurrence of each key winning, also across repeated
- * sections. Keys:
+ * sections. Every key is named as restic names it. Keys:
  * - PasswordFile: a file restic reads the password from (RESTIC_PASSWORD_FILE); like ResticPath a
  *   full path or one relative to the plugin folder, unquoted, and it must exist.
  * - PasswordCommand: a program restic runs to get the password (RESTIC_PASSWORD_COMMAND). Without
@@ -169,13 +171,22 @@ BOOL config_load(ResticConfig* out_config);
  *   "..." or '...' grouping, and a backslash outside quotes also separating, which would cut a
  *   Windows path apart; such a value is refused, as are unbalanced quotes and a program that is
  *   neither a full path nor a bare name.
- * - AWS_ACCESS_KEY_ID, AWS_SHARED_CREDENTIALS_FILE (a file, resolved like PasswordFile) and
- *   AWS_PROFILE: S3 credentials as restic reads them from its environment. With AWS_ACCESS_KEY_ID
- *   the plugin asks for the secret key; it is never read from the INI.
+ * - The S3 environment variables restic documents (doc/075_scripting.rst) except the secret ones:
+ *   AWS_ACCESS_KEY_ID, AWS_DEFAULT_REGION, AWS_PROFILE, AWS_SHARED_CREDENTIALS_FILE (a file,
+ *   resolved like PasswordFile) and RESTIC_AWS_ASSUME_ROLE_ARN, _SESSION_NAME, _EXTERNAL_ID,
+ *   _POLICY, _REGION, _STS_ENDPOINT, kept in `environment`. With AWS_ACCESS_KEY_ID the plugin asks
+ *   for AWS_SECRET_ACCESS_KEY; secrets (it and AWS_SESSION_TOKEN) are never read from the INI.
+ * - Any "<backend>.<option>" key (letters, digits and '-' around one dot, e.g. s3.region,
+ *   s3.bucket-lookup, sftp.command): an extended option, passed as restic -o <key>=<value> and
+ *   checked by restic itself. The key is lowercased, as restic does; quotes around the value are
+ *   removed unless the value has more of them inside (a command line).
  * PasswordFile and PasswordCommand may both be set: restic gets both and decides (it refuses the
  * combination). An unusable value sets the entry's settings_error; unknown keys, empty values and
  * sections for an alias that is not configured are ignored.
  */
+
+/* The value of variable `name` in a repository's `environment`, or NULL when it is not set */
+const WCHAR* config_repo_env_value(const ResticRepoEntry* repo, const WCHAR* name);
 
 /**
  * Finds a repository entry by its alias (case-insensitive).

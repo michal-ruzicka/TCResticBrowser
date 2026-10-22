@@ -1748,8 +1748,9 @@ static void test_live_repository_settings(void) {
         "[Settings]\r\nResticPath=%s\r\n"
         "[Logging]\r\nLogPath=%s\\settings.log\r\n"
         "[Repositories]\r\nFileRepo=%s\r\nCommandRepo=%s\r\nQuotedCommand=%s\r\nBothRepo=%s\r\nWrongFile=%s\r\n"
-        "BadSetting=%s\r\nS3Key=%s\r\nS3Typed=%s\r\n"
-        "[Repository: FileRepo]\r\nPasswordFile=pw.txt\r\n"
+        "BadSetting=%s\r\nS3Key=%s\r\nS3Typed=%s\r\nBadOption=%s\r\n"
+        "[Repository: FileRepo]\r\nPasswordFile=pw.txt\r\nlocal.connections=1\r\ns3.region=ignored-by-local\r\n"
+        "[Repository: BadOption]\r\nPasswordFile=pw.txt\r\nlocal.no-such-option=1\r\n"
         "[Repository: CommandRepo]\r\nPasswordCommand=%s\\tools dir\\get pw.cmd\r\n"
         "[Repository: QuotedCommand]\r\nPasswordCommand=\"%s\\tools dir\\get pw.cmd\" unused-argument\r\n"
         "[Repository: BothRepo]\r\nPasswordFile=pw.txt\r\nPasswordCommand=%s\\tools dir\\get pw.cmd\r\n"
@@ -1757,8 +1758,8 @@ static void test_live_repository_settings(void) {
         "[Repository: BadSetting]\r\nPasswordFile=missing.txt\r\n"
         "[Repository: S3Key]\r\nPasswordFile=pw.txt\r\nAWS_ACCESS_KEY_ID=AKIATESTKEY\r\nAWS_PROFILE=backup\r\n"
         "[Repository: S3Typed]\r\nAWS_ACCESS_KEY_ID=AKIATESTKEY\r\n",
-        restic_u8, dir_u8, repo_u8, repo_u8, repo_u8, repo_u8, repo_u8, repo_u8, repo_u8, repo_u8, dir_u8, dir_u8,
-        dir_u8);
+        restic_u8, dir_u8, repo_u8, repo_u8, repo_u8, repo_u8, repo_u8, repo_u8, repo_u8, repo_u8, repo_u8, dir_u8,
+        dir_u8, dir_u8);
     EXPECT_TRUE(ini_len > 0 && (size_t)ini_len < sizeof(ini_text), "Settings INI fits its buffer");
     swprintf_s(ini, MAX_PATH, L"%ls\\TCResticBrowser.ini", dir);
     EXPECT_TRUE(write_file(ini, ini_text), "Write settings INI");
@@ -1791,6 +1792,10 @@ static void test_live_repository_settings(void) {
     EXPECT_TRUE(!lists_snapshots(&p, L"BadSetting") && g_e2e_pwd_prompts == 0 && g_e2e_msg_dialogs == 1 &&
                     wcsstr(g_e2e_last_msg, L"PasswordFile=missing.txt") != NULL,
                 "An unusable setting is shown before anything runs");
+    g_e2e_msg_dialogs = 0;
+    EXPECT_TRUE(!lists_snapshots(&p, L"BadOption") && g_e2e_pwd_prompts == 0 && g_e2e_msg_dialogs == 1 &&
+                    wcsstr(g_e2e_last_msg, L"is not known") != NULL,
+                "An option restic does not know: restic's refusal shown (FileRepo's local.connections worked)");
 
     /* AWS_ACCESS_KEY_ID: the secret key is asked for once, then cached */
     g_e2e_pwd_mode    = 1;
@@ -1814,8 +1819,8 @@ static void test_live_repository_settings(void) {
     swprintf_s(log_file, MAX_PATH, L"%ls\\settings.log", dir);
     char* log_text = read_text_file(log_file);
     BOOL logged = log_text && strstr(log_text, "RESTIC_PASSWORD_FILE: ") && strstr(log_text, "RESTIC_PASSWORD_COMMAND: ") &&
-                  strstr(log_text, "AWS_ACCESS_KEY_ID: AKIATESTKEY; AWS_SECRET_ACCESS_KEY: ") &&
-                  strstr(log_text, "S3 secret key prompt for 'S3Key': ");
+                  strstr(log_text, "AWS_ACCESS_KEY_ID=AKIATESTKEY") && strstr(log_text, "AWS_SECRET_ACCESS_KEY: ") &&
+                  strstr(log_text, " -o \"local.connections=1\" ") && strstr(log_text, "S3 secret key prompt for 'S3Key': ");
     BOOL leaked = log_text && strstr(log_text, fixture_pwd_u8) != NULL;
     free(log_text);
     EXPECT_TRUE(logged, "The log shows where restic gets the password and the S3 settings");
