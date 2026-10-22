@@ -33,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`🗑 Forget N Passwords` cannot); the new `ConnectionLog=no` keeps it
   away.
 - **`snapshots.csv` in every repository folder.** A spreadsheet of all
-  snapshots - short ID, host, paths, time and tags, sorted by host, paths
+  snapshots - short ID, host, paths, time, tags and full ID, sorted by host, paths
   and time - made from the snapshot list already read, as UTF-8 with a
   byte-order mark for Excel. Columns are separated by the list separator of
   the Windows regional settings, which Excel expects, or by the new

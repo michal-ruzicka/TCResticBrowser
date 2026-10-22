@@ -1022,7 +1022,7 @@ static void test_snapshots_csv(const Plugin* p, const WCHAR* dir, const WCHAR* s
     text[got] = '\0';
     EXPECT_TRUE(got == ri.SizeLow, "The copy has exactly the listed size");
     EXPECT_TRUE(CompareFileTime(&mtime, &ri.LastWriteTime) == 0, "The copy carries the listed time");
-    const char* header = "\xEF\xBB\xBFsnapshot;host;paths;timestamp;tags\r\n";
+    const char* header = "\xEF\xBB\xBFshort ID;host;paths;timestamp;tags;full ID\r\n";
     EXPECT_TRUE(strncmp(text, header, strlen(header)) == 0, "UTF-8 BOM, then the header with CsvSeparator=;");
     char some_a[16] = {0}, latest_a[16] = {0};
     WideCharToMultiByte(CP_UTF8, 0, some_id, -1, some_a, sizeof(some_a), NULL, NULL);
@@ -1032,6 +1032,11 @@ static void test_snapshots_csv(const Plugin* p, const WCHAR* dir, const WCHAR* s
     EXPECT_TRUE(first && second && strncmp(second + 2, latest_a, 8) == 0 &&
                     strstr(second + 2, "\r\n") == text + got - 2,
                 "Two records sorted by time: the newer snapshot is the last line");
+    enum { FULL_ID_CHARS = 64 };
+    const char* last_id = text + got - 2 - FULL_ID_CHARS;
+    EXPECT_TRUE(got > FULL_ID_CHARS + 3 && last_id[-1] == ';' && strncmp(last_id, latest_a, 8) == 0 &&
+                    strspn(last_id, "0123456789abcdef") == FULL_ID_CHARS,
+                "Each record ends with the full ID, the last one the newer snapshot's");
     EXPECT_TRUE(strstr(text, some_a) != NULL && strstr(text, "\\test_fixture\\data") != NULL,
                 "The records hold the short IDs and the backed-up path");
 

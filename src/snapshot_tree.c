@@ -609,9 +609,9 @@ char* snapshot_tree_csv(const SnapshotTree* tree, char separator, size_t* out_le
 
     CsvText t = {NULL, 0, 0, 0};
     const char sep[2] = {separator, '\0'};
-    static const char* const header[] = {"snapshot", "host", "paths", "timestamp", "tags"};
+    static const char* const header[] = {"short ID", "host", "paths", "timestamp", "tags", "full ID"};
     csv_put(&t, "\xEF\xBB\xBF", 3); /* UTF-8 byte-order mark: spreadsheets then read the file as UTF-8 */
-    for (size_t c = 0; c < 5; ++c) {
+    for (size_t c = 0; c < sizeof(header) / sizeof(header[0]); ++c) {
         if (c) csv_put(&t, sep, 1);
         csv_put(&t, header[c], strlen(header[c]));
     }
@@ -631,6 +631,9 @@ char* snapshot_tree_csv(const SnapshotTree* tree, char separator, size_t* out_le
         csv_field(&t, when, separator);
         csv_put(&t, sep, 1);
         csv_field(&t, s->tags, separator);
+        csv_put(&t, sep, 1);
+        /* The full ID as well: a spreadsheet takes a short one like 01234567 or 123456e7 for a number */
+        csv_field(&t, s->id, separator);
         csv_put(&t, "\r\n", 2);
     }
     free(order);

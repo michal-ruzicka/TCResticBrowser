@@ -12,7 +12,7 @@
  * The first byte chooses what the rest is fed to: its low bit the parser, the next bits a time
  * format or a memory limit. Everything that parses is walked and the invariants the plugin relies
  * on are checked - every name is one Windows-safe path component, folders are sorted, unique and
- * found again by name, snapshot IDs are hexadecimal, snapshots.csv reads back as one record of five
+ * found again by name, snapshot IDs are hexadecimal, snapshots.csv reads back as one record of six
  * fields per snapshot with no cell that could start with a formula, whatever the separator - so a
  * violation aborts like a sanitizer finding.
  */
@@ -58,7 +58,7 @@ static void walk_tree(const SnapshotNode* dir, int depth) {
     }
 }
 
-/* Reads snapshots.csv back by RFC 4180: BOM, then `records` CRLF-terminated records of five fields */
+/* Reads snapshots.csv back by RFC 4180: BOM, then `records` CRLF-terminated records of six fields */
 static void check_csv(const char* csv, size_t len, char sep, size_t records) {
     CHECK(len >= 3 && memcmp(csv, "\xEF\xBB\xBF", 3) == 0 && strlen(csv) == len);
     size_t i = 3, fields = 1, seen = 0;
@@ -85,7 +85,7 @@ static void check_csv(const char* csv, size_t len, char sep, size_t records) {
             ++i;
             continue;
         }
-        CHECK(i + 1 < len && csv[i + 1] == '\n' && fields == 5);
+        CHECK(i + 1 < len && csv[i + 1] == '\n' && fields == 6);
         i += 2;
         fields = 1;
         ++seen;

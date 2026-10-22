@@ -90,10 +90,10 @@ SnapshotTreeStatus snapshot_tree_build(const char* json, size_t len, const char*
  * The snapshots as CSV text for spreadsheets (heap, NUL-terminated; `*out_len` bytes without the
  * NUL), or NULL when out of memory or for a separator that cannot separate (NUL, quote, line
  * break): a UTF-8 byte-order mark, then RFC 4180 records with CRLF line ends and `separator`
- * between the fields snapshot (short ID), host, paths, timestamp ("YYYY-MM-DD hh:mm:ss", the
- * snapshot's own clock time) and tags, after a header line; host, paths and tags as restic
- * reports them, not made Windows-safe, several paths or tags one per line in their field. Sorted
- * by host, then paths, then time. A field is quoted when it holds the separator, a quote or a line
+ * between the fields "short ID", host, paths, timestamp ("YYYY-MM-DD hh:mm:ss", the snapshot's
+ * own clock time), tags and "full ID", after a header line; host, paths and tags as restic reports
+ * them, not made Windows-safe, several paths or tags one per line in their field. Sorted by host,
+ * then paths, then time. A field is quoted when it holds the separator, a quote or a line
  * break (quotes doubled). A spreadsheet formula character (= + - @ tab CR) gets an apostrophe before
  * it at the start of a value and after any of , ; | tab LF CR " - wherever a reader, also one
  * splitting at another separator, could start a cell with it.

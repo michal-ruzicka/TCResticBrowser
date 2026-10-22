@@ -210,7 +210,7 @@ documentation.
 | **List Repositories** | Open **Network Neighborhood** (`\\\`) -> **`TCResticBrowser`**. Changes to `TCResticBrowser.ini` take effect immediately on panel refresh (`Ctrl+R` / `F2`). |
 | **Browse Snapshots** | Enter a repository folder (`\<Alias>`). Prompted once for the repository password; once restic accepts it, it is kept in RAM (encrypted) for that alias across both panels for 30 minutes (see [Password Timeout](#password-timeout)). Up to 3 password attempts are allowed. The dialog's title starts with the repository alias (`MyLocalBackup - Restic repository password`), so a password manager that picks an entry by the title of the active window, such as KeePassXC Auto-Type, can offer the right password. |
 | **Connection Log** | Total Commander's FTP connections toolbar (unless `ConnectionLog=no`), whose log window shows what the plugin is doing in the background - reading a whole snapshot (with progress every few seconds) or re-reading the snapshot list - and whose **Disconnect** forgets all passwords and everything read with them. See [Connection Log](#connection-log). |
-| **Snapshot List (`snapshots.csv`)** | Every repository folder also holds the file **`snapshots.csv`**: all snapshots with host, paths, time and tags, for Excel or another spreadsheet (`F3` to view, `F5` to copy, or open it). See [Snapshot List as a Spreadsheet](#snapshot-list-as-a-spreadsheet). |
+| **Snapshot List (`snapshots.csv`)** | Every repository folder also holds the file **`snapshots.csv`**: all snapshots with host, paths, time, tags and full ID, for Excel or another spreadsheet (`F3` to view, `F5` to copy, or open it). See [Snapshot List as a Spreadsheet](#snapshot-list-as-a-spreadsheet). |
 | **Forget Passwords** | While passwords are remembered, the plugin's root folder starts with **`🗑 Forget N Passwords`** (N is their number; `🗑 Forget 1 Password` for one). Press **Enter** on it to wipe them all at once; a message says how many were forgotten, the root folder is then re-read without the entry, and the next access asks again. The entry is not removed by itself when the passwords expire; it disappears the next time the root folder is read (`Ctrl+R`). |
 | **Explore Files** | Enter a snapshot through `snapshots`, `ids`, `hosts` or `tags` (or `latest`) and navigate the backed-up directory tree. The snapshot list is read once and then shown at once from memory; when it is older than a minute (`SnapshotListRefreshSeconds=`), as `restic mount` would re-read it, restic reads a new one in the background and the next listing (`Ctrl+R`) shows any new snapshots (see [Snapshot List Refresh](#snapshot-list-refresh)). |
 | **View File (`F3` / `Ctrl+Q`)** | Press **`F3`** (Lister) or **`Ctrl+Q`** (Quick View) on any file to stream it to a temporary location and view its contents. |
@@ -293,11 +293,12 @@ line, sorted by host, then paths, then time:
 
 | Column | Content |
 | --- | --- |
-| `snapshot` | Short ID, as `restic snapshots` prints it and as in `ids` |
+| `short ID` | The short ID, as `restic snapshots` prints it and as in `ids` |
 | `host` | Host name as restic recorded it |
 | `paths` | The backed-up paths, one per line within the cell when there are several |
 | `timestamp` | `YYYY-MM-DD hh:mm:ss`, the snapshot's own clock time (the time zone it was taken in), which spreadsheets read as a date and time |
 | `tags` | The tags, one per line within the cell; empty when there are none |
+| `full ID` | The full 64-character ID, which every restic command accepts and which spreadsheets never take for a number |
 
 The file is UTF-8 with a byte-order mark, so Excel shows non-ASCII host
 names and paths correctly, and follows RFC 4180: a cell that contains the
@@ -320,9 +321,12 @@ CsvSeparator=;
 
 Opened by a double click, Excel guesses the type of every cell: a short
 ID made only of digits (`01234567`) or looking like a number with an
-exponent (`123456e7`) is turned into a number, and a host name or tag
-such as `1-2` into a date. To keep every value as it is, import the file
-instead (*Data* -> *From Text/CSV*) and set those columns to *Text*.
+exponent (`123456e7`), about 3 % of them, is turned into a number, and a
+host name or tag such as `1-2` into a date. Quoting does not prevent it
+(Excel removes the quotes before it guesses), so the last column,
+`full ID`, holds the full ID, which Excel keeps as it is. To keep every
+value as it is, import the file instead (*Data* -> *From Text/CSV*) and
+set those columns to *Text*.
 
 The size and time Total Commander shows for the file are those of the
 snapshot list at the time of the listing; the file copied is made from

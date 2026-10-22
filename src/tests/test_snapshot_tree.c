@@ -341,20 +341,20 @@ static void test_csv(void) {
     size_t len = 0;
     char* csv = snapshot_tree_csv(tree, ',', &len);
     static const char expected[] =
-        "\xEF\xBB\xBF" "snapshot,host,paths,timestamp,tags\r\n"
-        "eeeeeeee,,,2026-10-16 00:00:00,\r\n"                                    /* No host sorts first */
-        "cccccccc,alpha,C:\\Users,2026-10-17 06:00:00,\"'-daily\n'@x\nplain\"\r\n"
-        "aaaaaaaa,\"pc,1\",/home,2026-10-18 07:00:00,\r\n"                        /* Same host and paths: by time */
-        "dddddddd,\"pc,1\",/home,2026-10-20 05:04:03,\r\n"
-        "bbbbbbbb,\"pc,1\",\"/home\n/etc\",2026-10-19 08:00:00,\"say \"\"hi\"\"\n'=1+2\"\r\n"; /* Paths after "/home" */
+        "\xEF\xBB\xBF" "short ID,host,paths,timestamp,tags,full ID\r\n"
+        "eeeeeeee,,,2026-10-16 00:00:00,," ID("e") "\r\n"                        /* No host sorts first */
+        "cccccccc,alpha,C:\\Users,2026-10-17 06:00:00,\"'-daily\n'@x\nplain\"," ID("c") "\r\n"
+        "aaaaaaaa,\"pc,1\",/home,2026-10-18 07:00:00,," ID("a") "\r\n"            /* Same host and paths: by time */
+        "dddddddd,\"pc,1\",/home,2026-10-20 05:04:03,," ID("d") "\r\n"
+        "bbbbbbbb,\"pc,1\",\"/home\n/etc\",2026-10-19 08:00:00,\"say \"\"hi\"\"\n'=1+2\"," ID("b") "\r\n"; /* Paths after "/home" */
     if (!csv || strcmp(csv, expected) != 0) printf("       got: %s\n", csv ? csv : "(null)");
     EXPECT_TRUE(csv && strcmp(csv, expected) == 0 && len == strlen(expected),
-                "BOM, header, CRLF; sorted by host, paths, time; quoting, doubled quotes, lines in a field, "
+                "BOM, header, CRLF; sorted by host, paths, time; quoting, doubled quotes, lines in a field, the full ID last, "
                 "a formula character at the start of a value or of a line in it defused");
     free(csv);
     csv = snapshot_tree_csv(tree, ';', &len);
-    EXPECT_TRUE(csv && strstr(csv, "snapshot;host;paths;timestamp;tags\r\n") && strstr(csv, ";pc,1;/home;") &&
-                strstr(csv, "eeeeeeee;;;2026-10-16 00:00:00;\r\n"), "Another separator; a comma then needs no quotes");
+    EXPECT_TRUE(csv && strstr(csv, "short ID;host;paths;timestamp;tags;full ID\r\n") && strstr(csv, ";pc,1;/home;") &&
+                strstr(csv, "eeeeeeee;;;2026-10-16 00:00:00;;" ID("e") "\r\n"), "Another separator; a comma then needs no quotes");
     free(csv);
     snapshot_tree_free(tree);
 
@@ -363,7 +363,7 @@ static void test_csv(void) {
                  "\"paths\":[\"/a|+b;-c\\t@d\"],\"tags\":[\"q\\\"=1\",\"a - b\"]}]");
     csv = snapshot_tree_csv(tree, ';', &len);
     EXPECT_TRUE(csv && strstr(csv, "\r\nffffffff;x,'=HYPERLINK(1);\"/a|'+b;'-c\t'@d\";2026-10-19 08:00:00;"
-                                   "\"q\"\"'=1\na - b\"\r\n"),
+                                   "\"q\"\"'=1\na - b\";" ID("f") "\r\n"),
                 "A formula character after , ; | tab or a quote defused too; one after a space is left alone");
     free(csv);
     snapshot_tree_free(tree);
@@ -375,7 +375,7 @@ static void test_csv(void) {
 
     tree = build("null");
     csv = snapshot_tree_csv(tree, ',', &len);
-    EXPECT_TRUE(csv && strcmp(csv, "\xEF\xBB\xBF" "snapshot,host,paths,timestamp,tags\r\n") == 0,
+    EXPECT_TRUE(csv && strcmp(csv, "\xEF\xBB\xBF" "short ID,host,paths,timestamp,tags,full ID\r\n") == 0,
                 "An empty repository has the header only");
     free(csv);
     snapshot_tree_free(tree);
