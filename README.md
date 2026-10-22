@@ -216,7 +216,7 @@ documentation.
 | **Explore Files** | Enter a snapshot through `snapshots`, `ids`, `hosts` or `tags` (or `latest`) and navigate the backed-up directory tree. The snapshot list is read once and then shown at once from memory; when it is older than a minute (`SnapshotListRefreshSeconds=`), as `restic mount` would re-read it, restic reads a new one in the background and the next listing (`Ctrl+R`) shows any new snapshots (see [Snapshot List Refresh](#snapshot-list-refresh)). |
 | **View File (`F3` / `Ctrl+Q`)** | Press **`F3`** (Lister) or **`Ctrl+Q`** (Quick View) on any file to stream it to a temporary location and view its contents. |
 | **Restore / Extract (`F5`)** | Select one or more files or directories and press **`F5`** to copy them to the target panel, preserving original `LastWriteTime` timestamps. Standard Total Commander overwrite prompts are supported. |
-| **Cancel Operation (`ESC`)** | Press **`ESC`** in Total Commander's progress dialog to terminate the underlying `restic.exe` child process and clean up any temporary file. |
+| **Cancel Operation (`ESC`)** | Press **`ESC`** in Total Commander's progress dialog to terminate the underlying `restic.exe` child process, together with any `rclone`, `ssh` or password command it started, and clean up any temporary file. Closing Total Commander ends restic runs still working in the background the same way. |
 
 ### What Is Instant and What Takes a While
 
@@ -788,11 +788,6 @@ Planned for later versions, in no particular order:
 - **Verified rclone backends.** Check (and add tests) that `rclone:`
   repositories work through the plugin; restic handles them itself, so no
   problems are expected.
-- **Stop restic's helper processes on `ESC`.** Cancelling terminates
-  `restic.exe`, but an `rclone` or `ssh` process it started lives on until
-  it notices the closed pipe; so does a `restic` still reading a snapshot in
-  the background when Total Commander exits. A job object with
-  `KILL_ON_JOB_CLOSE` would end the whole process tree at once.
 
 ## Contributing
 

@@ -714,20 +714,54 @@ static void log_restic_end(ResticResult result, BOOL exited, DWORD exit_code, UL
 }
 
 /*
+ * A job object that ends every process in it when its last handle is closed, with `process` in it,
+ * or NULL when that is not possible (Windows 7 inside another job that allows no nesting); the
+ * caller then has the process alone to terminate
+ */
+static HANDLE contain_in_job(HANDLE process) {
+    HANDLE job = CreateJobObjectW(NULL, NULL); /* Not inheritable */
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
+    memset(&limits, 0, sizeof(limits));
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (job && SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)) &&
+        AssignProcessToJobObject(job, process)) {
+        return job;
+    }
+    log_write(L"  restic runs outside a job object (Windows error %lu): processes it starts may outlive it",
+              GetLastError());
+    if (job) CloseHandle(job);
+    return NULL;
+}
+
+/* Ends restic and, with a job, every process it started (rclone, ssh, a password command) */
+static void terminate_tree(HANDLE job, HANDLE process) {
+    if (!job || !TerminateJobObject(job, 1)) TerminateProcess(process, 1);
+    WaitForSingleObject(process, 5000);
+}
+
+/*
  * Starts cmd_line hidden with stdin=NUL and stdout/stderr redirected to two anonymous pipes.
  * Restic inherits only these three handles (PROC_THREAD_ATTRIBUTE_HANDLE_LIST), never unrelated
  * inheritable handles of Total Commander. The list does not protect the other direction: a child
  * another thread of the host starts with bInheritHandles in the meantime can inherit the write
  * ends and keep them open. That is harmless only because collect_output() and the dump loop end
  * when Restic exits, not at EOF; keep it that way.
+ *
+ * Restic starts suspended and runs only once it is in its own job object (*out_job, NULL if that
+ * failed; see contain_in_job), so everything it starts is in the job too: terminate_tree() ends
+ * them all on ESC or a timeout, closing the job handle ends what is left once restic has exited,
+ * and Total Commander exiting closes the handle as well - an rclone or ssh started by restic never
+ * lives on alone. The suspended start leaves no moment in which restic could start a child outside.
  */
 static BOOL spawn_hidden(
     WCHAR* cmd_line,
     WCHAR* env_block,
     HANDLE* out_read,
     HANDLE* err_read,
-    PROCESS_INFORMATION* pi
+    PROCESS_INFORMATION* pi,
+    HANDLE* out_job
 ) {
+    *out_job = NULL;
     SECURITY_ATTRIBUTES sa;
     memset(&sa, 0, sizeof(sa));
     sa.nLength        = sizeof(sa);
@@ -772,8 +806,12 @@ static BOOL spawn_hidden(
 
     memset(pi, 0, sizeof(*pi));
     ok = CreateProcessW(NULL, cmd_line, NULL, NULL, TRUE,
-                        CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
+                        CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED,
                         env_block, NULL, &si.StartupInfo, pi);
+    if (ok) {
+        *out_job = contain_in_job(pi->hProcess);
+        ResumeThread(pi->hThread);
+    }
 
 done:
     if (attrs_ready) DeleteProcThreadAttributeList(attrs);
@@ -1012,11 +1050,11 @@ ResticResult restic_exec_command(
         return RESTIC_ERR_OUT_OF_MEMORY;
     }
 
-    HANDLE out_pipe = NULL, err_pipe = NULL;
+    HANDLE out_pipe = NULL, err_pipe = NULL, job = NULL;
     PROCESS_INFORMATION pi;
     ULONGLONG started = GetTickCount64();
     log_restic_start(cmd_line, repo);
-    BOOL spawned = spawn_hidden(cmd_line, env_block, &out_pipe, &err_pipe, &pi);
+    BOOL spawned = spawn_hidden(cmd_line, env_block, &out_pipe, &err_pipe, &pi, &job);
     DWORD spawn_error = spawned ? 0 : GetLastError();
 
     /* Credentials must not outlive the CreateProcess call in this process' memory */
@@ -1052,14 +1090,14 @@ ResticResult restic_exec_command(
             }
         }
     } else {
-        TerminateProcess(pi.hProcess, 1); /* Timeout, cancellation or memory failure */
-        WaitForSingleObject(pi.hProcess, 5000);
+        terminate_tree(job, pi.hProcess); /* Timeout, cancellation or memory failure */
     }
 
     log_restic_end(result, exited, out_result->exit_code, started, &err);
     CloseHandle(out_pipe);
     CloseHandle(err_pipe);
     CloseHandle(pi.hProcess);
+    if (job) CloseHandle(job); /* Ends whatever restic left running */
 
     out_result->output       = out.data;
     out_result->length       = out.len;
@@ -1557,11 +1595,11 @@ ResticResult restic_dump_file(
         return RESTIC_ERR_OUT_OF_MEMORY;
     }
 
-    HANDLE out_pipe = NULL, err_pipe = NULL;
+    HANDLE out_pipe = NULL, err_pipe = NULL, job = NULL;
     PROCESS_INFORMATION pi;
     ULONGLONG started = GetTickCount64();
     log_restic_start(cmd_line, repo);
-    BOOL spawned = spawn_hidden(cmd_line, env_block, &out_pipe, &err_pipe, &pi);
+    BOOL spawned = spawn_hidden(cmd_line, env_block, &out_pipe, &err_pipe, &pi, &job);
     DWORD spawn_error = spawned ? 0 : GetLastError();
     SecureZeroMemory(env_block, env_chars * sizeof(WCHAR));
     free(env_block);
@@ -1649,8 +1687,7 @@ ResticResult restic_dump_file(
             result = dump_commit(&st, mtime);
         }
     } else {
-        TerminateProcess(pi.hProcess, 1);
-        WaitForSingleObject(pi.hProcess, 5000);
+        terminate_tree(job, pi.hProcess);
     }
 
     /* Any failure: discard the partial data. A pre-existing target file stays untouched. */
@@ -1668,6 +1705,7 @@ ResticResult restic_dump_file(
     CloseHandle(out_pipe);
     CloseHandle(err_pipe);
     CloseHandle(pi.hProcess);
+    if (job) CloseHandle(job); /* Ends whatever restic left running */
     return result;
 }
 

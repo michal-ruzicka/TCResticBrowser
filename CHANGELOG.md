@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sftp.command=`...) and is passed as `-o`. A repository with S3
   variables no longer inherits `AWS_*`, `MINIO_*` and `RESTIC_AWS_*`
   variables from Total Commander's environment.
+- **`ESC` ends restic's helper processes too.** restic now runs in a job
+  object, so cancelling, a timeout or closing Total Commander ends the
+  `rclone`, `ssh` or password command it started as well, instead of
+  leaving them running until they notice the closed pipe.
 - **The restic version is checked.** A `restic.exe` older than 0.17.1,
   whose exit codes the plugin would misread, is refused with a message
   before a repository is opened, instead of failing in confusing ways.

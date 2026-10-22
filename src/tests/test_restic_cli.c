@@ -1392,6 +1392,50 @@ static void test_dump_with_fake_restic(void) {
     RemoveDirectoryW(dir);
 }
 
+/* TRUE when the process with the ID printed at the start of `text` has ended (or never existed) */
+static BOOL printed_process_ended(const char* text) {
+    unsigned long pid = text ? strtoul(text, NULL, 10) : 0;
+    if (pid == 0) return FALSE;
+    HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)pid);
+    if (!h) return TRUE;
+    BOOL ended = WaitForSingleObject(h, 5000) == WAIT_OBJECT_0;
+    CloseHandle(h);
+    return ended;
+}
+
+/*
+ * Processes restic starts (fake_restic's /child-* modes start a helper and print its ID) end with
+ * it: on a timeout or ESC together with restic, after a normal exit when restic leaves them behind
+ */
+static void test_process_tree_ends(void) {
+    WCHAR fake[MAX_PATH];
+    DWORD len = GetModuleFileNameW(NULL, fake, MAX_PATH);
+    WCHAR* slash = (len > 0 && len < MAX_PATH) ? wcsrchr(fake, L'\\') : NULL;
+    EXPECT_TRUE(slash != NULL, "Locate the test's own folder");
+    wcscpy_s(slash + 1, MAX_PATH - (size_t)(slash + 1 - fake), L"fake_restic.exe");
+
+    ResticExecOptions opts;
+    memset(&opts, 0, sizeof(opts));
+    opts.timeout_ms = 3000;
+    ResticCommandOutput out;
+    ResticResult res = restic_exec_command(fake, REPO(L"repo", L"pw"), L"/child-hang", &opts, &out);
+    EXPECT_TRUE(res == RESTIC_ERR_TIMEOUT && out.output && out.output[0] >= '1' && out.output[0] <= '9',
+                "A hanging restic that started a helper times out");
+    EXPECT_TRUE(printed_process_ended(out.output), "The helper is ended together with restic");
+    restic_free_command_output(&out);
+
+    memset(&opts, 0, sizeof(opts));
+    opts.cancel_proc = cancel_after_first_poll;
+    res = restic_exec_command(fake, REPO(L"repo", L"pw"), L"/child-hang", &opts, &out);
+    EXPECT_TRUE(res == RESTIC_ERR_CANCELLED, "ESC ends a restic that started a helper");
+    restic_free_command_output(&out);
+
+    res = restic_exec_command(fake, REPO(L"repo", L"pw"), L"/child-exit", NULL, &out);
+    EXPECT_TRUE(res == RESTIC_OK && printed_process_ended(out.output),
+                "A helper restic leaves behind is ended when restic has exited");
+    restic_free_command_output(&out);
+}
+
 /* restic_read_version against fake_restic.exe, which prints FAKE_RESTIC_VERSION as restic would */
 static void test_read_version(void) {
     WCHAR fake[MAX_PATH];
@@ -1457,6 +1501,7 @@ int main(void) {
     test_repo_cache_generations();
     test_dump_with_fake_restic();
     test_read_version();
+    test_process_tree_ends();
     test_live_restic_cli();
 
 #if defined(_DEBUG) && !defined(__SANITIZE_ADDRESS__)
