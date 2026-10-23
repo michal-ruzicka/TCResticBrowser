@@ -32,7 +32,7 @@ concurrency:
 env:
   RESTIC_VERSION: 0.19.1
   RESTIC_ZIP_SHA256: da948ad707ed690426473aaba2046cd61f8f90f6f0e7dab6be0d5796531de67d
-  # rclone for the live test of an rclone: repository (tmp\rclone.exe). Pinned
+  # rclone for the live tests of an rclone: and an S3 repository (tmp\rclone.exe). Pinned
   # the same way: the SHA-256 of the release ZIP from the release's
   # SHA256SUMS, whose clearsigned GPG signature was verified (key
   # FBF737ECE9F8AB18604BD2AC93935E02FF3B54FA, Nick Craig-Wood, from
@@ -98,7 +98,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path tmp | Out-Null
           Copy-Item (Join-Path $dir "restic_$($env:RESTIC_VERSION)_windows_amd64.exe") tmp\restic.exe
 
-      # Without tmp\rclone.exe the rclone: scenario reports [SKIP]. Pinned like
+      # Without tmp\rclone.exe the rclone: and S3 scenarios report [SKIP]. Pinned like
       # restic above.
       - name: Fetch rclone for the live tests
         shell: pwsh

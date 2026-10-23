@@ -252,9 +252,11 @@ buttons that matter here:
 
 - **The log window** shows what the plugin does and what takes time:
   passwords accepted, refused and forgotten (with the reason: timeout,
-  making room for another repository's), snapshot lists and folders read
-  by restic (with how long it took), files copied, and the work in the
-  background:
+  making room for another repository's), an S3 secret key the storage
+  refused, snapshot lists and folders read by restic (with how long it
+  took), what restic reports while it waits for its storage (`restic: ...
+  returned error, retrying after ...`, a server down, say), files copied,
+  and the work in the background:
 
   ```text
   [MyLocalBackup] Password accepted
@@ -574,7 +576,7 @@ CloudS3=s3:s3.amazonaws.com/my-backup-bucket/restic
 PasswordFile=C:\Users\me\restic\local-backup.txt
 
 [Repository: CloudS3]
-PasswordCommand="C:\Program Files\KeePassXC\keepassxc-cli.exe" show -a password "C:\Keys\backup.kdbx" restic
+PasswordCommand="C:\Program Files\KeePassXC\keepassxc-cli.exe" show --no-password -k "C:\Keys\backup.keyx" -a password "C:\Keys\backup.kdbx" restic
 AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
 s3.region=eu-central-1
 ```
@@ -582,13 +584,13 @@ s3.region=eu-central-1
 | Setting | Effect |
 | --- | --- |
 | `PasswordFile` | restic reads the password from this file (`--password-file`); no password dialog. A full path, or one relative to the plugin folder, without quotes. |
-| `PasswordCommand` | restic runs this program and uses what it prints as the password (`--password-command`), e.g. a password manager's command-line tool; no password dialog. Usually just the program's or script's path, written like `ResticPath` (full path, relative to the plugin folder, or a bare name found in `PATH`) without quotes. To pass arguments, write the command line the way restic splits it: the program's path in double quotes, then the arguments, quoting each one with spaces or backslashes, as in the example. Unquoted backslashes are refused, because restic would split the command there. |
+| `PasswordCommand` | restic runs this program and uses what it prints as the password (`--password-command`), e.g. a password manager's command-line tool; no password dialog. It runs without a console and gets no input, so it must not ask for anything: the example opens a KeePassXC database protected by a key file alone. Usually just the program's or script's path, written like `ResticPath` (full path, relative to the plugin folder, or a bare name looked up in the plugin folder, then in `PATH`) without quotes. To pass arguments, write the command line the way restic splits it: the program's path in double quotes, then the arguments, quoting each one with spaces or backslashes, as in the example. Unquoted backslashes are refused, because restic would split the command there. |
 | `AWS_ACCESS_KEY_ID` | The S3 access key ID. The plugin then asks for the **secret access key** in a dialog titled `<alias> - S3 secret access key` (before the password, if that is asked for too) and keeps it in memory only, encrypted, exactly like a password: it is forgotten together with the password. A secret key the storage refuses is asked for again at once (restic itself would retry for a quarter of an hour). The secret key is never read from the INI file. |
 | `AWS_SHARED_CREDENTIALS_FILE` | An AWS credentials file (full path or relative to the plugin folder) for restic to read the key from instead; temporary credentials with a session token belong here. |
 | `AWS_PROFILE` | The profile to use in that file (or in `%USERPROFILE%\.aws\credentials`). |
 | `AWS_DEFAULT_REGION` | The S3 region. |
 | `RESTIC_AWS_ASSUME_ROLE_ARN`, `..._SESSION_NAME`, `..._EXTERNAL_ID`, `..._POLICY`, `..._REGION`, `..._STS_ENDPOINT` | An IAM role for restic to assume with the credentials above. |
-| `<backend>.<option>` | Any restic extended option, passed as `-o <backend>.<option>=<value>`: `s3.region`, `s3.bucket-lookup`, `s3.connections`, `s3.retries`, `s3.list-objects-v1`, `s3.unsafe-anonymous-auth`, `s3.enable-restore`, `s3.restore-days`, `s3.restore-timeout`, `s3.restore-tier`, and those of the other backends (`sftp.command`, `rclone.program`, `rest.connections`...). restic checks names and values itself (`restic options` lists them); `s3.region` wins over `AWS_DEFAULT_REGION`. `rclone.program` and `sftp.command` are written like `PasswordCommand` (a plain path, or the program's path in double quotes followed by arguments), `rclone.args` and `sftp.args` with paths in double quotes, since restic splits all four into a command line itself. |
+| `<backend>.<option>` | Any restic extended option, passed as `-o <backend>.<option>=<value>`: `s3.region`, `s3.bucket-lookup`, `s3.connections`, `s3.retries`, `s3.list-objects-v1`, `s3.unsafe-anonymous-auth`, `s3.enable-restore`, `s3.restore-days`, `s3.restore-timeout`, `s3.restore-tier`, `s3.storage-class`, and those of the other backends (`sftp.command`, `rclone.program`, `rest.connections`...). restic checks names and values itself (`restic options` lists them); `s3.region` wins over `AWS_DEFAULT_REGION`. `rclone.program` and `sftp.command` are written like `PasswordCommand` (a plain path, or the program's path in double quotes followed by arguments), `rclone.args` and `sftp.args` with paths in double quotes, since restic splits all four into a command line itself. |
 
 The S3 variables are exactly those restic documents (except the secret
 ones: `AWS_SECRET_ACCESS_KEY` is asked for, `AWS_SESSION_TOKEN` comes from
@@ -686,8 +688,8 @@ RemoteRestTLS=rest:https://backup.example.com:8000/prod
 LinuxServerSftp=sftp:backupuser@192.168.1.20:/srv/restic/repo
 
 ; 5. Amazon S3 / S3-compatible storage (MinIO, Wasabi, Backblaze B2, Cloudflare R2)
-;    Credentials from a [Repository: <Alias>] section below, or else inherited
-;    from Total Commander's process environment (AWS_ACCESS_KEY_ID, ...).
+;    Credentials from a [Repository: <Alias>] section below; without S3 variables
+;    there, inherited from Total Commander's process environment (AWS_ACCESS_KEY_ID, ...).
 AwsS3=s3:s3.amazonaws.com/my-backup-bucket/restic
 LocalMinio=s3:http://192.168.1.60:9000/restic-backups
 
