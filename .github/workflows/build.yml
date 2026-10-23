@@ -37,8 +37,11 @@ env:
   # SHA256SUMS, whose clearsigned GPG signature was verified (key
   # FBF737ECE9F8AB18604BD2AC93935E02FF3B54FA, Nick Craig-Wood, from
   # https://rclone.org/KEYS). Bump both together, in a commit of their own.
-  RCLONE_VERSION: 1.75.1
-  RCLONE_ZIP_SHA256: 200eb602c126d82aa38b51e0f6b9ae837473ff99b51278d3f6f837574c494d6e
+  # Not named RCLONE_*: rclone reads every RCLONE_<FLAG> variable as its
+  # --<flag> option, and this environment reaches the rclone the tests start
+  # (RCLONE_VERSION=1.75.1 made it fail as --version=1.75.1).
+  PINNED_RCLONE_VERSION: 1.75.1
+  PINNED_RCLONE_ZIP_SHA256: 200eb602c126d82aa38b51e0f6b9ae837473ff99b51278d3f6f837574c494d6e
   # Visual Studio Build Tools, pinned to one release so that CI builds with
   # the same toolset libraries and Windows SDK as a local build of that
   # version (build.cmd EXPECTED_VS). The fixed-version bootstrapper comes from
@@ -101,14 +104,14 @@ jobs:
         shell: pwsh
         run: |
           $zip = Join-Path $env:RUNNER_TEMP 'rclone.zip'
-          $url = "https://github.com/rclone/rclone/releases/download/v$env:RCLONE_VERSION/rclone-v$($env:RCLONE_VERSION)-windows-amd64.zip"
+          $url = "https://github.com/rclone/rclone/releases/download/v$env:PINNED_RCLONE_VERSION/rclone-v$($env:PINNED_RCLONE_VERSION)-windows-amd64.zip"
           Invoke-WebRequest -Uri $url -OutFile $zip
           $actual = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
-          if ($actual -ne $env:RCLONE_ZIP_SHA256) { throw "rclone ZIP hash mismatch: $actual" }
+          if ($actual -ne $env:PINNED_RCLONE_ZIP_SHA256) { throw "rclone ZIP hash mismatch: $actual" }
           $dir = Join-Path $env:RUNNER_TEMP 'rclone'
           Expand-Archive -Path $zip -DestinationPath $dir
           New-Item -ItemType Directory -Force -Path tmp | Out-Null
-          Copy-Item (Join-Path $dir "rclone-v$($env:RCLONE_VERSION)-windows-amd64\rclone.exe") tmp\rclone.exe
+          Copy-Item (Join-Path $dir "rclone-v$($env:PINNED_RCLONE_VERSION)-windows-amd64\rclone.exe") tmp\rclone.exe
 
       # build.cmd locates Visual Studio Build Tools via vswhere, activates the
       # compiler environment for each target architecture via VsDevCmd.bat,

@@ -39,8 +39,8 @@ it up to date with every change.
   x86 tests too).
 - *(Optional, but CI has it)* `tmp\rclone.exe`: the live test of an `rclone:`
   repository (rclone's local backend over the test repository) needs it and
-  reports `[SKIP]` without it. Again the version CI pins, `RCLONE_VERSION`
-  and `RCLONE_ZIP_SHA256`, `rclone.exe` from
+  reports `[SKIP]` without it. Again the version CI pins, `PINNED_RCLONE_VERSION`
+  and `PINNED_RCLONE_ZIP_SHA256`, `rclone.exe` from
   `rclone-v<version>-windows-amd64.zip` of the rclone GitHub release.
 
 Nothing else: no Bash, no Python, no .NET. The plugin is pure C11 / Win32,
