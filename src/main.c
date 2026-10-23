@@ -712,14 +712,17 @@ static BOOL prompt_repository_password(
 
 /*
  * Asks for the AWS secret access key of a repository with [Repository: <alias>] AWS_ACCESS_KEY_ID,
- * like the password: the alias in the title for password managers, nothing logged but its length.
- * FALSE when the dialog is cancelled or nothing is entered.
+ * like the password: the alias in the title for password managers, nothing logged but its length;
+ * `is_retry` after the storage refused the key entered before. FALSE when the dialog is cancelled
+ * or nothing is entered.
  */
-static BOOL prompt_aws_secret(const ResticRepoEntry* repo, WCHAR* out_secret, size_t cap) {
+static BOOL prompt_aws_secret(const ResticRepoEntry* repo, BOOL is_retry, WCHAR* out_secret, size_t cap) {
     if (!g_RequestProc || cap == 0) return FALSE;
     WCHAR prompt_text[MAX_PATH + 512];
     const WCHAR* key_id = config_repo_env_value(repo, L"AWS_ACCESS_KEY_ID");
-    _snwprintf_s(prompt_text, _countof(prompt_text), _TRUNCATE, L"Enter the S3 secret access key of %ls for repository '%ls':",
+    _snwprintf_s(prompt_text, _countof(prompt_text), _TRUNCATE,
+                 is_retry ? L"The storage refused the key. Enter the S3 secret access key of %ls for repository '%ls':"
+                          : L"Enter the S3 secret access key of %ls for repository '%ls':",
                  key_id ? key_id : L"", repo->alias);
     WCHAR title[MAX_PATH + 64];
     _snwprintf_s(title, _countof(title), _TRUNCATE, L"%ls - S3 secret access key", repo->alias);
@@ -749,6 +752,18 @@ static BOOL wfx_cancel_callback(void* user_data) {
     WCHAR* src = (ctx && ctx->virtual_path) ? (WCHAR*)ctx->virtual_path : L"\\";
     WCHAR* dst = (ctx && ctx->repo_alias) ? (WCHAR*)ctx->repo_alias : L"";
     return g_ProgressProc(g_PluginNr, src, dst, 0) != 0;
+}
+
+/*
+ * ResticNoticeProc: what restic reports while it waits for its storage ("... returned error,
+ * retrying after ..."), in the connection log, so a listing that seems to hang says why
+ */
+static void wfx_notice_callback(const char* line, void* user_data) {
+    const WfxCancelContext* ctx = (const WfxCancelContext*)user_data;
+    WCHAR text[768];
+    if (MultiByteToWideChar(CP_UTF8, 0, line, -1, text, (int)_countof(text)) <= 0) return;
+    log_write(L"  restic: %ls", text);
+    conn_log(FALSE, ctx && ctx->repo_alias ? ctx->repo_alias : L"", L"restic: %ls", text);
 }
 
 /* Splits a WFX path into its hierarchy level, repository alias, snapshot ID, and subpath */
@@ -850,6 +865,10 @@ static void handle_restic_failure(
             break;
         case RESTIC_ERR_CANCELLED:
             SetLastError(ERROR_CANCELLED);
+            break;
+        case RESTIC_ERR_CREDENTIALS_REFUSED:
+            report_plugin_error(repo_alias, err_msg);
+            SetLastError(ERROR_ACCESS_DENIED);
             break;
         case RESTIC_ERR_WRONG_PASSWORD:
             report_plugin_error(
@@ -1053,7 +1072,7 @@ static ResticResult run_with_password(
         conn_log(FALSE, repo->alias, L"The remembered credentials were forgotten: the INI file changed how they are given");
     }
     if (!from_cache && need_secret &&
-        !prompt_aws_secret(repo, secrets.aws_secret_access_key, _countof(secrets.aws_secret_access_key))) {
+        !prompt_aws_secret(repo, FALSE, secrets.aws_secret_access_key, _countof(secrets.aws_secret_access_key))) {
         SecureZeroMemory(&secrets, sizeof(secrets));
         return RESTIC_ERR_CANCELLED;
     }
@@ -1090,6 +1109,24 @@ static ResticResult run_with_password(
             restic_describe_password(secrets.password, wrong_hint, _countof(wrong_hint));
             SecureZeroMemory(secrets.password, sizeof(secrets.password));
             have_password = FALSE;
+            continue;
+        }
+        if (res == RESTIC_ERR_CREDENTIALS_REFUSED && need_secret) {
+            /* The storage refused the access key or the secret key: the one typed in may be asked for again */
+            if (from_cache) {
+                session_forget(repo->alias, cached_generation);
+                cache_generation = repo_cache_generation();
+                from_cache       = FALSE;
+                conn_log(FALSE, repo->alias, L"The remembered S3 secret key was refused by the storage and forgotten");
+            } else {
+                conn_log(FALSE, repo->alias, L"S3 secret key refused by the storage: %ls", err_msg);
+            }
+            if (attempt + 1 >= MAX_PASSWORD_ATTEMPTS) break;
+            SecureZeroMemory(secrets.aws_secret_access_key, sizeof(secrets.aws_secret_access_key));
+            if (!prompt_aws_secret(repo, TRUE, secrets.aws_secret_access_key, _countof(secrets.aws_secret_access_key))) {
+                SecureZeroMemory(&secrets, sizeof(secrets));
+                return RESTIC_ERR_CANCELLED;
+            }
             continue;
         }
         break;
@@ -1373,6 +1410,8 @@ static HANDLE execute_repo_query(
 
     WfxCancelContext cancel_ctx = {virtual_path, repo->alias};
     ResticExecOptions exec_opts = {WFX_RESTIC_TIMEOUT_MS, wfx_cancel_callback, &cancel_ctx};
+    exec_opts.notice_proc = wfx_notice_callback;
+    exec_opts.notice_ctx  = &cancel_ctx;
     ListContext ctx;
     memset(&ctx, 0, sizeof(ctx));
     ctx.rest           = parsed->rest;
@@ -1894,6 +1933,8 @@ int __stdcall FsGetFileW(WCHAR* RemoteName, WCHAR* LocalName, int CopyFlags, Rem
     /* Resolving the path may list the snapshots: ESC and the timeout apply to that too */
     WfxCancelContext cancel_ctx = {RemoteName, repo->alias};
     ResticExecOptions exec_opts = {WFX_RESTIC_TIMEOUT_MS, wfx_cancel_callback, &cancel_ctx};
+    exec_opts.notice_proc = wfx_notice_callback;
+    exec_opts.notice_ctx  = &cancel_ctx;
     GetFileContext ctx = {parsed.rest, LocalName, overwrite, mtime, &prog_ctx};
     WCHAR err_msg[512] = {0};
     ResticResult res = run_with_password(&cfg, repo, &exec_opts, get_file_operation, &ctx, err_msg, _countof(err_msg));

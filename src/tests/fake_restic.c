@@ -93,6 +93,17 @@ int main(int argc, char** argv) {
         if (strcmp(mode, "/child-hang") == 0) Sleep(20000);
         return 0;
     }
+    if (strcmp(mode, "/retry-auth") == 0) { /* restic's retries after an S3 server refused the secret key */
+        put_err("Stat(<config/>) returned error, retrying after 757.01693ms: Stat: The request signature we calculated "
+                "does not match the signature you provided. Check your key and signing method.\n");
+        Sleep(20000);
+        return 1;
+    }
+    if (strcmp(mode, "/retry-net") == 0) { /* A retry for another reason, then success */
+        put_err("Load(<config/>, 0, 0) returned error, retrying after 1.2s: dial tcp 10.0.0.1:443: i/o timeout\n");
+        put_out("ok");
+        return 0;
+    }
     if (strcmp(mode, "/empty") == 0) return 0;
     if (strcmp(mode, "/partial") == 0) {
         put_out("partial-data");

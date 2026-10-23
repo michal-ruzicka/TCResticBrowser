@@ -38,6 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   object, so cancelling, a timeout or closing Total Commander ends the
   `rclone`, `ssh` or password command it started as well, instead of
   leaving them running until they notice the closed pipe.
+- **Refused S3 credentials are reported at once.** restic retries a
+  storage that refuses the credentials for 15 minutes, so a mistyped S3
+  secret key made Total Commander wait that long. The plugin now ends
+  restic on the first such retry, asks for the secret key again or shows
+  the storage's reason, and reports other retries (a network outage) in
+  the connection log while restic waits.
 - **The restic version is checked.** A `restic.exe` older than 0.17.1,
   whose exit codes the plugin would misread, is refused with a message
   before a repository is opened, instead of failing in confusing ways.

@@ -455,6 +455,10 @@ static int conn_log_count(const WCHAR* text) {
     return n;
 }
 
+/* Answers to the S3 secret key dialog, one per prompt (NULL or past the end: FIXTURE_PASSWORD) */
+static const WCHAR* g_e2e_s3_answers[4];
+static int          g_e2e_s3_prompts = 0;
+
 static BOOL __stdcall e2e_request_proc(
     int PluginNr,
     int RequestType,
@@ -469,6 +473,13 @@ static BOOL __stdcall e2e_request_proc(
         wcsncpy_s(g_e2e_last_title, _countof(g_e2e_last_title), CustomTitle ? CustomTitle : L"", _TRUNCATE);
         if (CustomText) {
             wcsncpy_s(g_e2e_last_prompt, _countof(g_e2e_last_prompt), CustomText, _TRUNCATE);
+        }
+        if (CustomTitle && wcsstr(CustomTitle, L"S3 secret access key")) {
+            int i = g_e2e_s3_prompts++;
+            const WCHAR* answer = i < (int)_countof(g_e2e_s3_answers) && g_e2e_s3_answers[i] ? g_e2e_s3_answers[i]
+                                                                                            : FIXTURE_PASSWORD;
+            wcsncpy_s(ReturnedText, (size_t)maxlen, answer, _TRUNCATE);
+            return TRUE;
         }
         if (g_e2e_pwd_mode == 3) {
             ReturnedText[0] = L'\0';
@@ -1906,6 +1917,31 @@ static void test_live_repository_settings(void) {
     delete_tree(dir);
 }
 
+/* After a failed check of a live scenario: the last message shown and the end of the plugin's log */
+static void print_failure_context(const WCHAR* log_file) {
+    printf("       prompts %d, dialogs %d, last message: %ls\n", g_e2e_pwd_prompts, g_e2e_msg_dialogs, g_e2e_last_msg);
+    char* text = read_text_file(log_file);
+    if (!text) return;
+    size_t len = strlen(text);
+    printf("       --- end of %ls ---\n%s\n       ---\n", log_file, text + (len > 6000 ? len - 6000 : 0));
+    free(text);
+}
+
+/* Runs `cmd` hidden with the test's environment; TRUE when it exits with 0 within `ms` */
+static BOOL run_and_wait(WCHAR* cmd, DWORD ms) {
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    if (!CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) return FALSE;
+    DWORD code = 1;
+    BOOL done  = WaitForSingleObject(pi.hProcess, ms) == WAIT_OBJECT_0 && GetExitCodeProcess(pi.hProcess, &code);
+    if (!done) TerminateProcess(pi.hProcess, 1);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return done && code == 0;
+}
+
 /* Number of running processes whose executable is named `exe_name` */
 static int count_processes(const WCHAR* exe_name) {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -1977,8 +2013,11 @@ static void test_live_rclone_repository(void) {
     g_e2e_pwd_mode    = 1;
     g_e2e_pwd_prompts = 0;
     g_e2e_msg_dialogs = 0;
-    EXPECT_TRUE(lists_snapshots(&p, L"Rclone") && g_e2e_pwd_prompts == 1 && g_e2e_msg_dialogs == 0,
-                "The snapshots of an rclone: repository are listed");
+    WCHAR log_file[MAX_PATH];
+    swprintf_s(log_file, MAX_PATH, L"%ls\\rclone.log", dir);
+    BOOL listed = lists_snapshots(&p, L"Rclone") && g_e2e_pwd_prompts == 1 && g_e2e_msg_dialogs == 0;
+    if (!listed) print_failure_context(log_file);
+    EXPECT_TRUE(listed, "The snapshots of an rclone: repository are listed");
     static WCHAR data_path[MAX_PATH * 2];
     EXPECT_TRUE(descend_to_fixture_data(&p, L"\\Rclone\\snapshots\\latest", 0, data_path, _countof(data_path)),
                 "... and a snapshot is browsed down to the fixture's data folder");
@@ -2007,6 +2046,135 @@ static void test_live_rclone_repository(void) {
     unload_plugin_copy(&p, dir);
     EXPECT_TRUE(rclones_before >= 0 && processes_back_to(L"rclone.exe", rclones_before, 30000),
                 "No rclone process outlives the restic that started it");
+    delete_tree(dir);
+}
+
+/*
+ * Scenario G: an S3 repository on a local S3 server (rclone serve s3, keys AKIATEST / goodsecret),
+ * with AWS_ACCESS_KEY_ID in its section. A wrong secret key, which restic would retry for 15
+ * minutes, is refused at once and asked for again, then the right one opens the repository and is
+ * cached; three wrong ones end with the storage's reason in one dialog.
+ */
+static void test_s3_repository_with(const WCHAR* dir, const char* target) {
+    WCHAR ini[MAX_PATH], log_file[MAX_PATH], restic_abs[MAX_PATH] = {0};
+    GetFullPathNameW(L"tmp\\restic.exe", MAX_PATH, restic_abs, NULL);
+    swprintf_s(ini, MAX_PATH, L"%ls\\TCResticBrowser.ini", dir);
+    swprintf_s(log_file, MAX_PATH, L"%ls\\s3.log", dir);
+    char restic_u8[MAX_PATH * 3] = {0}, log_u8[MAX_PATH * 3] = {0};
+    WideCharToMultiByte(CP_UTF8, 0, restic_abs, -1, restic_u8, sizeof(restic_u8), NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, log_file, -1, log_u8, sizeof(log_u8), NULL, NULL);
+    static char ini_text[4096];
+    int n = snprintf(ini_text, sizeof(ini_text),
+                     "[Settings]\r\nResticPath=%s\r\n[Logging]\r\nLogPath=%s\r\n"
+                     "[Repositories]\r\nS3=%s\r\nS3Wrong=%s\r\n"
+                     "[Repository: S3]\r\nAWS_ACCESS_KEY_ID=AKIATEST\r\n"
+                     "[Repository: S3Wrong]\r\nAWS_ACCESS_KEY_ID=AKIATEST\r\n",
+                     restic_u8, log_u8, target, target);
+    EXPECT_TRUE(n > 0 && (size_t)n < sizeof(ini_text) && write_file(ini, ini_text), "Write INI (S3)");
+
+    Plugin p;
+    EXPECT_TRUE(load_plugin_copy(dir, &p), "Load plugin copy (S3)");
+    EXPECT_TRUE(p.init_w(47, (void*)e2e_progress_proc, (void*)e2e_log_proc, (void*)e2e_request_proc) == 0,
+                "Register Total Commander callbacks (S3)");
+    g_e2e_pwd_mode      = 1; /* The repository password is the fixture's */
+    g_e2e_pwd_prompts   = 0;
+    g_e2e_msg_dialogs   = 0;
+    g_e2e_s3_prompts    = 0;
+    g_e2e_s3_answers[0] = L"wrongsecret";
+    g_e2e_s3_answers[1] = L"goodsecret";
+    ULONGLONG t0 = GetTickCount64();
+    BOOL listed  = lists_snapshots(&p, L"S3") && g_e2e_s3_prompts == 2 && g_e2e_pwd_prompts == 3 && g_e2e_msg_dialogs == 0;
+    if (!listed) print_failure_context(log_file);
+    EXPECT_TRUE(listed && GetTickCount64() - t0 < 120000,
+                "A refused S3 secret key is asked for again at once; the right one opens the repository");
+    EXPECT_TRUE(conn_log_count(L"[S3] S3 secret key refused by the storage") == 1, "... and the log says why");
+    EXPECT_TRUE(lists_snapshots(&p, L"S3") && g_e2e_pwd_prompts == 3, "The accepted secret key is cached");
+
+    g_e2e_pwd_prompts   = 0;
+    g_e2e_msg_dialogs   = 0;
+    g_e2e_s3_prompts    = 0;
+    g_e2e_s3_answers[1] = L"wrongsecret";
+    g_e2e_s3_answers[2] = L"wrongsecret";
+    t0                  = GetTickCount64();
+    BOOL refused = !lists_snapshots(&p, L"S3Wrong") && g_e2e_s3_prompts == 3 && g_e2e_pwd_prompts == 4 &&
+                   g_e2e_msg_dialogs == 1 && wcsstr(g_e2e_last_msg, L"refused the credentials") != NULL;
+    if (!refused) print_failure_context(log_file);
+    EXPECT_TRUE(refused && GetTickCount64() - t0 < 120000,
+                "Three refused secret keys end with the storage's reason, in minutes rather than a quarter of an hour");
+    unload_plugin_copy(&p, dir);
+}
+
+static void test_live_s3_repository(void) {
+    if (GetFileAttributesW(L"tmp\\restic.exe") == INVALID_FILE_ATTRIBUTES ||
+        GetFileAttributesW(L"tmp\\rclone.exe") == INVALID_FILE_ATTRIBUTES ||
+        GetFileAttributesW(L"tmp\\test_fixture\\data") == INVALID_FILE_ATTRIBUTES) {
+        printf("[SKIP] tmp\\restic.exe, tmp\\rclone.exe or tmp\\test_fixture\\data not found: S3 E2E test skipped.\n");
+        return;
+    }
+    WCHAR dir[MAX_PATH], data[MAX_PATH], bucket[MAX_PATH], serve_log[MAX_PATH];
+    EXPECT_TRUE(make_unique_dir(L"restic_dll_s3", dir, MAX_PATH), "Create plugin directory (S3)");
+    delete_tree(dir); /* Whatever a run with the same process ID left */
+    EXPECT_TRUE(CreateDirectoryW(dir, NULL), "Create a clean plugin directory (S3)");
+    swprintf_s(data, MAX_PATH, L"%ls\\s3data", dir);
+    swprintf_s(bucket, MAX_PATH, L"%ls\\bucket", data);
+    swprintf_s(serve_log, MAX_PATH, L"%ls\\serve.log", dir);
+    EXPECT_TRUE(CreateDirectoryW(data, NULL) && CreateDirectoryW(bucket, NULL), "Create the S3 server's bucket");
+
+    /* rclone serve s3 on a port of its own, its output in serve.log */
+    unsigned port = 39000u + (unsigned)(GetCurrentProcessId() % 900u);
+    SECURITY_ATTRIBUTES sa = {sizeof(sa), NULL, TRUE};
+    HANDLE out = CreateFileW(serve_log, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, CREATE_ALWAYS, 0, NULL);
+    WCHAR rclone_abs[MAX_PATH] = {0};
+    GetFullPathNameW(L"tmp\\rclone.exe", MAX_PATH, rclone_abs, NULL);
+    static WCHAR cmd[4 * MAX_PATH];
+    swprintf_s(cmd, _countof(cmd), L"\"%ls\" serve s3 --auth-key AKIATEST,goodsecret --addr 127.0.0.1:%u \"%ls\"",
+               rclone_abs, port, data);
+    STARTUPINFOW si;
+    PROCESS_INFORMATION server;
+    memset(&si, 0, sizeof(si));
+    si.cb         = sizeof(si);
+    si.dwFlags    = STARTF_USESTDHANDLES;
+    si.hStdOutput = out;
+    si.hStdError  = out;
+    BOOL started  = out != INVALID_HANDLE_VALUE &&
+                   CreateProcessW(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &server);
+    if (out != INVALID_HANDLE_VALUE) CloseHandle(out);
+    EXPECT_TRUE(started, "Start rclone serve s3");
+    BOOL ready = FALSE;
+    for (int i = 0; i < 120 && !ready; ++i) {
+        Sleep(250);
+        char* text = read_text_file(serve_log);
+        ready      = text && strstr(text, "Starting s3 server") != NULL;
+        free(text);
+    }
+
+    /* A repository there with one snapshot, made by restic itself */
+    static char target[128];
+    snprintf(target, sizeof(target), "s3:http://127.0.0.1:%u/bucket/repo", port);
+    WCHAR target_w[128], restic_abs[MAX_PATH] = {0}, data_abs[MAX_PATH] = {0};
+    MultiByteToWideChar(CP_UTF8, 0, target, -1, target_w, (int)_countof(target_w));
+    GetFullPathNameW(L"tmp\\restic.exe", MAX_PATH, restic_abs, NULL);
+    GetFullPathNameW(L"tmp\\test_fixture\\data", MAX_PATH, data_abs, NULL);
+    SetEnvironmentVariableW(L"AWS_ACCESS_KEY_ID", L"AKIATEST");
+    SetEnvironmentVariableW(L"AWS_SECRET_ACCESS_KEY", L"goodsecret");
+    SetEnvironmentVariableW(L"RESTIC_PASSWORD", FIXTURE_PASSWORD);
+    SetEnvironmentVariableW(L"RESTIC_REPOSITORY", target_w);
+    swprintf_s(cmd, _countof(cmd), L"\"%ls\" init", restic_abs);
+    BOOL made = ready && run_and_wait(cmd, 120000);
+    swprintf_s(cmd, _countof(cmd), L"\"%ls\" backup \"%ls\"", restic_abs, data_abs);
+    made = made && run_and_wait(cmd, 300000);
+    static const WCHAR* const vars[] = {L"AWS_ACCESS_KEY_ID", L"AWS_SECRET_ACCESS_KEY", L"RESTIC_PASSWORD", L"RESTIC_REPOSITORY"};
+    for (size_t i = 0; i < _countof(vars); ++i) SetEnvironmentVariableW(vars[i], NULL);
+
+    if (made) test_s3_repository_with(dir, target);
+    if (started) {
+        TerminateProcess(server.hProcess, 0);
+        WaitForSingleObject(server.hProcess, 10000);
+        CloseHandle(server.hThread);
+        CloseHandle(server.hProcess);
+    }
+    memset((void*)g_e2e_s3_answers, 0, sizeof(g_e2e_s3_answers));
+    EXPECT_TRUE(made, "rclone serve s3 started and restic made a repository there");
     delete_tree(dir);
 }
 
@@ -2253,6 +2421,7 @@ int main(void) {
     test_live_repository_settings();
     test_old_restic_refused();
     test_live_rclone_repository();
+    test_live_s3_repository();
 
     RemoveDirectoryW(g_user_dir);
     RemoveDirectoryW(appdata_dir);

@@ -1440,6 +1440,60 @@ static void test_process_tree_ends(void) {
     restic_free_command_output(&out);
 }
 
+/* ResticNoticeProc of test_refused_credentials: counts the lines and keeps the last */
+static int  g_notices = 0;
+static char g_last_notice[1024];
+static void count_notice(const char* line, void* ctx) {
+    (void)ctx;
+    g_notices++;
+    strncpy_s(g_last_notice, sizeof(g_last_notice), line, _TRUNCATE);
+}
+
+/*
+ * restic retries a storage that refuses the credentials for 15 minutes; its "retrying" line with
+ * such a reason ends it at once (fake_restic.exe /retry-auth), while other retries are only
+ * reported (/retry-net)
+ */
+static void test_refused_credentials(void) {
+    WCHAR fake[MAX_PATH];
+    DWORD len = GetModuleFileNameW(NULL, fake, MAX_PATH);
+    WCHAR* slash = (len > 0 && len < MAX_PATH) ? wcsrchr(fake, L'\\') : NULL;
+    EXPECT_TRUE(slash != NULL, "Locate the test's own folder");
+    wcscpy_s(slash + 1, MAX_PATH - (size_t)(slash + 1 - fake), L"fake_restic.exe");
+
+    ResticExecOptions opts;
+    memset(&opts, 0, sizeof(opts));
+    opts.timeout_ms  = 15000;
+    opts.notice_proc = count_notice;
+    g_notices        = 0;
+    ResticCommandOutput out;
+    ULONGLONG t0     = GetTickCount64();
+    ResticResult res = restic_exec_command(fake, REPO(L"repo", L"pw"), L"/retry-auth", &opts, &out);
+    EXPECT_TRUE(res == RESTIC_ERR_CREDENTIALS_REFUSED && GetTickCount64() - t0 < 10000,
+                "A refused secret key ends restic at once instead of after its 15 minutes of retries");
+    EXPECT_TRUE(wcsstr(out.error_message, L"refused the credentials: Stat: The request signature we calculated") != NULL,
+                "... with the storage's reason");
+    EXPECT_TRUE(g_notices == 1 && strstr(g_last_notice, "retrying after") != NULL, "... which was also reported");
+    restic_free_command_output(&out);
+
+    g_notices = 0;
+    res       = restic_exec_command(fake, REPO(L"repo", L"pw"), L"/retry-net", &opts, &out);
+    EXPECT_TRUE(res == RESTIC_OK && g_notices == 1 && strstr(g_last_notice, "i/o timeout") != NULL,
+                "Another retry is reported and restic left alone");
+    restic_free_command_output(&out);
+
+    WCHAR dest[MAX_PATH], err[512];
+    GetTempPathW(MAX_PATH, dest);
+    wcscat_s(dest, MAX_PATH, L"restic_refused_dump.bin");
+    DeleteFileW(dest);
+    t0  = GetTickCount64();
+    res = restic_dump_file(fake, REPO(L"repo", L"pw"), "abcd1234", L"\\retry-auth", dest, TRUE, NULL, 15000, NULL, NULL,
+                           err, _countof(err));
+    EXPECT_TRUE(res == RESTIC_ERR_CREDENTIALS_REFUSED && GetTickCount64() - t0 < 10000 &&
+                    wcsstr(err, L"refused the credentials") != NULL && GetFileAttributesW(dest) == INVALID_FILE_ATTRIBUTES,
+                "restic dump is ended the same way, writing nothing");
+}
+
 /* restic_read_version against fake_restic.exe, which prints FAKE_RESTIC_VERSION as restic would */
 static void test_read_version(void) {
     WCHAR fake[MAX_PATH];
@@ -1506,6 +1560,7 @@ int main(void) {
     test_dump_with_fake_restic();
     test_read_version();
     test_process_tree_ends();
+    test_refused_credentials();
     test_live_restic_cli();
 
 #if defined(_DEBUG) && !defined(__SANITIZE_ADDRESS__)

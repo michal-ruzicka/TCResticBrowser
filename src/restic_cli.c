@@ -499,6 +499,67 @@ static BOOL drain_pipe(HANDLE pipe, ByteBuf* buf, BOOL* eof, size_t keep_max, si
     return TRUE;
 }
 
+/*
+ * restic retries a failing storage request for 15 minutes (backend/retry, not configurable) and
+ * treats only a few S3 errors as permanent: a wrong secret key (SignatureDoesNotMatch) or an
+ * unknown access key (InvalidAccessKeyId) is retried all that time, printing only "... returned
+ * error, retrying after ...: <reason>" lines on stderr, so Total Commander would wait for a quarter
+ * of an hour for an answer that is already known. StderrWatch reads those lines while restic runs:
+ * every one goes to the notice callback, and one whose reason is a refusal of the credentials
+ * ends restic with RESTIC_ERR_CREDENTIALS_REFUSED and that reason.
+ */
+typedef struct {
+    size_t scanned;              /* Bytes of the kept stderr already looked at */
+    ResticNoticeProc notice_proc;
+    void* notice_ctx;
+    char refused[512];           /* The reason of the refusal, when one was seen */
+} StderrWatch;
+
+/* What S3 servers (AWS, MinIO, rclone serve s3, Ceph...) answer to credentials they refuse */
+static const char* const kRefusedCredentials[] = {
+    "The request signature we calculated does not match", /* SignatureDoesNotMatch: wrong secret key */
+    "Access Key Id you provided does not exist",           /* InvalidAccessKeyId */
+    "The provided token has expired",                      /* ExpiredToken */
+    "The provided token is malformed or otherwise invalid", /* InvalidToken */
+    "The security token included in the request is invalid",
+    "SignatureDoesNotMatch",
+    "InvalidAccessKeyId",
+};
+
+/* Looks at the complete stderr lines not seen yet; TRUE when one says the credentials were refused */
+static BOOL watch_stderr(const ByteBuf* err, StderrWatch* w) {
+    if (!w || !err->data) return FALSE;
+    for (;;) {
+        const char* start = err->data + w->scanned;
+        const char* nl    = (const char*)memchr(start, '\n', err->len - w->scanned);
+        if (!nl) return FALSE;
+        size_t len = (size_t)(nl - start);
+        w->scanned += len + 1;
+        char line[1024];
+        if (len >= sizeof(line)) len = sizeof(line) - 1;
+        memcpy(line, start, len);
+        line[len] = '\0';
+        if (len > 0 && line[len - 1] == '\r') line[len - 1] = '\0';
+        const char* retrying = strstr(line, " returned error, retrying after ");
+        if (!retrying) continue;
+        if (w->notice_proc) w->notice_proc(line, w->notice_ctx);
+        for (size_t i = 0; i < _countof(kRefusedCredentials); ++i) {
+            if (!strstr(retrying, kRefusedCredentials[i])) continue;
+            const char* reason = strstr(retrying, ": ");
+            strncpy_s(w->refused, sizeof(w->refused), reason ? reason + 2 : retrying, _TRUNCATE);
+            return TRUE;
+        }
+    }
+}
+
+/* The user-facing text of a refusal seen by watch_stderr() */
+static void describe_refusal(const StderrWatch* w, WCHAR* dst, size_t cap) {
+    if (!dst || cap == 0) return;
+    WCHAR reason[512];
+    utf8_to_wide_trunc(w->refused, reason, _countof(reason));
+    _snwprintf_s(dst, cap, _TRUNCATE, L"The storage refused the credentials: %ls", reason);
+}
+
 static BOOL starts_with_env_key(const WCHAR* entry, const WCHAR* prefix) {
     return _wcsnicmp(entry, prefix, wcslen(prefix)) == 0;
 }
@@ -682,6 +743,7 @@ static const WCHAR* result_name(ResticResult r) {
         case RESTIC_ERR_LOCAL_WRITE: return L"local write failed";
         case RESTIC_ERR_TIMEOUT: return L"timeout";
         case RESTIC_ERR_CANCELLED: return L"cancelled";
+        case RESTIC_ERR_CREDENTIALS_REFUSED: return L"credentials refused by the storage";
     }
     return L"unknown";
 }
@@ -892,7 +954,8 @@ static ResticResult collect_output(
     HANDLE err_pipe,
     const ResticExecOptions* options,
     ByteBuf* out,
-    ByteBuf* err
+    ByteBuf* err,
+    StderrWatch* watch
 ) {
     ULONGLONG start = GetTickCount64();
     ULONGLONG last_poll = start;
@@ -907,6 +970,7 @@ static ResticResult collect_output(
             return RESTIC_ERR_OUT_OF_MEMORY;
         }
         BOOL got_data = got != 0;
+        if (watch_stderr(err, watch)) return RESTIC_ERR_CREDENTIALS_REFUSED;
         if (line_proc) {
             ResticResult r = deliver_lines(out, line_proc, options->line_ctx, FALSE, &delivered);
             if (r != RESTIC_OK) return r;
@@ -1093,9 +1157,15 @@ ResticResult restic_exec_command(
     CloseHandle(pi.hThread);
 
     ByteBuf out = {0}, err = {0};
+    StderrWatch watch;
+    memset(&watch, 0, sizeof(watch));
+    if (options) {
+        watch.notice_proc = options->notice_proc;
+        watch.notice_ctx  = options->notice_ctx;
+    }
     ResticResult result = RESTIC_ERR_OUT_OF_MEMORY;
     if (bytebuf_append(&out, "", 0) && bytebuf_append(&err, "", 0)) {
-        result = collect_output(pi.hProcess, out_pipe, err_pipe, options, &out, &err);
+        result = collect_output(pi.hProcess, out_pipe, err_pipe, options, &out, &err, &watch);
     }
 
     BOOL exited = FALSE;
@@ -1114,7 +1184,10 @@ ResticResult restic_exec_command(
             }
         }
     } else {
-        terminate_tree(job, pi.hProcess); /* Timeout, cancellation or memory failure */
+        terminate_tree(job, pi.hProcess); /* Timeout, cancellation, refused credentials or memory failure */
+        if (result == RESTIC_ERR_CREDENTIALS_REFUSED) {
+            describe_refusal(&watch, out_result->error_message, _countof(out_result->error_message));
+        }
     }
 
     log_restic_end(result, exited, out_result->exit_code, started, &err);
@@ -1640,6 +1713,8 @@ ResticResult restic_dump_file(
     BOOL out_eof        = FALSE;
     BOOL err_eof        = FALSE;
     ResticResult result = RESTIC_ERR_OUT_OF_MEMORY;
+    StderrWatch watch;
+    memset(&watch, 0, sizeof(watch));
 
     if (bytebuf_append(&err, "", 0)) {
         ULONGLONG start  = GetTickCount64();
@@ -1655,6 +1730,10 @@ ResticResult restic_dump_file(
             if (result != RESTIC_OK) break;
             if (!drain_pipe(err_pipe, &err, &err_eof, STDERR_KEEP_BYTES, &err_got)) {
                 result = RESTIC_ERR_OUT_OF_MEMORY;
+                break;
+            }
+            if (watch_stderr(&err, &watch)) {
+                result = RESTIC_ERR_CREDENTIALS_REFUSED;
                 break;
             }
 
@@ -1712,6 +1791,7 @@ ResticResult restic_dump_file(
         }
     } else {
         terminate_tree(job, pi.hProcess);
+        if (result == RESTIC_ERR_CREDENTIALS_REFUSED) describe_refusal(&watch, out_error_msg, err_capacity);
     }
 
     /* Any failure: discard the partial data. A pre-existing target file stays untouched. */

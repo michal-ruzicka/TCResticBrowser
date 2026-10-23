@@ -21,7 +21,8 @@ typedef enum {
     RESTIC_ERR_PATH_NOT_FOUND,   /* Requested snapshot path does not exist or is not a directory */
     RESTIC_ERR_LOCAL_WRITE,      /* Failed to create or write the local destination file */
     RESTIC_ERR_TIMEOUT,          /* Child process exceeded ResticExecOptions.timeout_ms */
-    RESTIC_ERR_CANCELLED         /* ResticExecOptions.cancel_proc requested abort */
+    RESTIC_ERR_CANCELLED,        /* ResticExecOptions.cancel_proc requested abort */
+    RESTIC_ERR_CREDENTIALS_REFUSED /* The storage refused the S3 credentials (restic would retry for 15 min) */
 } ResticResult;
 
 /**
@@ -44,6 +45,13 @@ typedef BOOL (*ResticDumpProgressProc)(ULONGLONG bytes_written, void* user_data)
  * exited. Anything but RESTIC_OK stops the child and becomes the command's result.
  */
 typedef ResticResult (*ResticLineProc)(const char* line, size_t len, void* user_data);
+
+/*
+ * Optional receiver of what restic reports on stderr while it waits for its storage: each "...
+ * returned error, retrying after ...: <reason>" line (UTF-8, NUL-terminated, without its line
+ * break), as it arrives.
+ */
+typedef void (*ResticNoticeProc)(const char* line, void* user_data);
 
 /*
  * A repository and the credentials and settings restic gets for it. Credentials go into the
@@ -87,6 +95,8 @@ typedef struct {
     void* cancel_ctx;            /* Opaque pointer forwarded to cancel_proc */
     ResticLineProc line_proc;    /* Optional: stdout goes here line by line and is not kept */
     void* line_ctx;              /* Opaque pointer forwarded to line_proc */
+    ResticNoticeProc notice_proc;/* Optional: restic's retry messages, as they arrive */
+    void* notice_ctx;            /* Opaque pointer forwarded to notice_proc */
 } ResticExecOptions;
 
 /**
