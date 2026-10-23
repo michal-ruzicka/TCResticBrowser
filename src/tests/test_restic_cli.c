@@ -1391,6 +1391,11 @@ static void test_dump_with_fake_restic(void) {
     res = restic_exec_command(fake, REPO(L"repo-url", L"pw"), L"snapshots /args", NULL, &out);
     EXPECT_TRUE(res == RESTIC_OK && strcmp(out.output, "snapshots|/args|") == 0, "No options: nothing added");
     restic_free_command_output(&out);
+    ResticRepo empty_option = {.target = L"repo-url", .password = L"pw", .options = L"rest.connections=\0s3.region=x\0"};
+    res = restic_exec_command(fake, &empty_option, L"snapshots /args", NULL, &out);
+    EXPECT_TRUE(res == RESTIC_OK && strcmp(out.output, "-o|s3.region=x|snapshots|/args|") == 0,
+                "An option written empty in the INI is not passed");
+    restic_free_command_output(&out);
 
     DeleteFileW(dest);
     RemoveDirectoryW(dir);

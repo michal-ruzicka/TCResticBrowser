@@ -297,10 +297,15 @@ static void session_expire_locked(void) {
         if (!slot->used || g_PasswordTimeoutMs == 0) continue;
         ULONGLONG age = now - slot->cached_at;
         if (age >= g_PasswordTimeoutMs) {
-            log_write(L"Cached password for '%ls' forgotten: PasswordTimeoutSeconds (%llu s) elapsed",
+            BOOL typed = slot->has_password || slot->has_aws_secret; /* Else a password file or command restic accepted */
+            log_write(typed ? L"Cached password for '%ls' forgotten: PasswordTimeoutSeconds (%llu s) elapsed"
+                            : L"Accepted password file or command of '%ls' forgotten: PasswordTimeoutSeconds (%llu s) elapsed",
                       slot->alias, g_PasswordTimeoutMs / 1000);
-            conn_log(TRUE, slot->alias, L"Password forgotten after PasswordTimeoutSeconds (%llu s), and what was read "
-                                        L"with it", g_PasswordTimeoutMs / 1000);
+            conn_log(TRUE, slot->alias, typed ? L"Password forgotten after PasswordTimeoutSeconds (%llu s), and what was read "
+                                                L"with it"
+                                              : L"What was read with the password file or command forgotten after "
+                                                L"PasswordTimeoutSeconds (%llu s)",
+                     g_PasswordTimeoutMs / 1000);
             session_wipe_slot_locked(slot);
             continue;
         }
@@ -760,7 +765,7 @@ static BOOL wfx_cancel_callback(void* user_data) {
  */
 static void wfx_notice_callback(const char* line, void* user_data) {
     const WfxCancelContext* ctx = (const WfxCancelContext*)user_data;
-    WCHAR text[768];
+    WCHAR text[1024]; /* watch_stderr() hands over lines of at most 1023 bytes */
     if (MultiByteToWideChar(CP_UTF8, 0, line, -1, text, (int)_countof(text)) <= 0) return;
     log_write(L"  restic: %ls", text);
     conn_log(FALSE, ctx && ctx->repo_alias ? ctx->repo_alias : L"", L"restic: %ls", text);
@@ -1557,7 +1562,9 @@ static void log_configuration(const ResticConfig* cfg) {
         if (r->password_command[0] != L'\0') log_write(L"      PasswordCommand: %ls", r->password_command);
         for (const WCHAR* e = r->environment; *e != L'\0'; e += wcslen(e) + 1) log_write(L"      %ls", e);
         if (config_repo_env_value(r, L"AWS_ACCESS_KEY_ID")) log_write(L"      (AWS_SECRET_ACCESS_KEY is asked for)");
-        for (const WCHAR* o = r->options; *o != L'\0'; o += wcslen(o) + 1) log_write(L"      -o %ls", o);
+        for (const WCHAR* o = r->options; *o != L'\0'; o += wcslen(o) + 1) {
+            if (wcschr(o, L'=')[1] != L'\0') log_write(L"      -o %ls", o);
+        }
     }
 }
 

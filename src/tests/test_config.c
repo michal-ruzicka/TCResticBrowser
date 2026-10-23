@@ -1183,7 +1183,6 @@ static void test_logging(void) {
     SetEnvironmentVariableW(L"TCRB_TEST_LOG_ROOT", NULL);
 }
 
-/* Target file names: only names Windows stores exactly as given are accepted */
 /* Loads `ini` (UTF-8) from plugin_dir and returns the repository `alias` in *cfg (NULL when missing) */
 static const ResticRepoEntry* load_repo(const WCHAR* plugin_dir, const char* ini, const WCHAR* alias, ResticConfig* cfg) {
     WCHAR ini_path[CONFIG_MAX_PATH];
@@ -1250,8 +1249,10 @@ static void test_repository_sections(void) {
              "s3.storage-class=\"STANDARD\"\r\n"         /* Quotes around the whole value removed */
              "sftp.command=\"%s\\dir with space\\get pass.cmd\" -s sftp\r\n" /* Quotes kept: restic splits it */
              "rclone.program=%s\\get-pass.cmd\r\n"     /* A plain path, quoted for restic */
-             "rclone.args=serve restic --stdio\r\n"     /* Arguments only, as written */
-             "sftp.args='-i C:\\key'\r\n"
+             "rclone.args=\"serve restic --stdio --b2-hard-delete\"\r\n" /* Quotes around the whole value removed */
+             "sftp.args=-i \"C:\\key\"\r\n"            /* Arguments only, as written */
+             "rest.connections=\r\n"                   /* Empty: not set, and the first occurrence */
+             "rest.connections=4\r\n"
              "s3.region=ignored\r\n"                     /* Not the first occurrence */
              "PasswordFile=missing.txt\r\n" /* Not the first occurrence: ignored */
              "Unknown=1\r\n"
@@ -1302,9 +1303,11 @@ static void test_repository_sections(void) {
     EXPECT_WSTR_EQ(option_of(r, L"sftp.command"), path, "A command line option keeps its quotes (restic splits it)");
     swprintf_s(path, CONFIG_MAX_PATH, L"\"%ls\\get-pass.cmd\"", plugin_dir);
     EXPECT_WSTR_EQ(option_of(r, L"rclone.program"), path, "rclone.program as a plain path is quoted for restic");
-    EXPECT_WSTR_EQ(option_of(r, L"rclone.args"), L"serve restic --stdio", "rclone.args as written");
-    EXPECT_WSTR_EQ(option_of(r, L"sftp.args"), L"'-i C:\\key'", "sftp.args keeps the quotes around its whole value");
-    EXPECT_TRUE(block_count(r->options) == 7, "Seven options; malformed keys are not options");
+    EXPECT_WSTR_EQ(option_of(r, L"rclone.args"), L"serve restic --stdio --b2-hard-delete",
+                   "rclone.args in quotes, as restic's documentation writes it: the INI's quotes, removed");
+    EXPECT_WSTR_EQ(option_of(r, L"sftp.args"), L"-i \"C:\\key\"", "sftp.args with a quoted path, as written");
+    EXPECT_WSTR_EQ(option_of(r, L"rest.connections"), L"", "An empty first occurrence counts, as for the other keys");
+    EXPECT_TRUE(block_count(r->options) == 8, "Eight options; malformed keys are not options");
     EXPECT_TRUE(r->settings_error[0] == L'\0' && r->password_command[0] == L'\0', "No error, no command");
 
     r = config_find_repo(&cfg, L"First");
@@ -1336,6 +1339,8 @@ static void test_repository_sections(void) {
         {"\"kp\" --x", L"\"kp\" --x"},                                  /* A bare name: restic finds it in PATH */
         {"cmd /c \"type C:\\pw.txt\"", L"cmd /c \"type C:\\pw.txt\""}, /* Backslashes inside quotes */
         {"'pass.exe' show", L"'pass.exe' show"},
+        {"pass show restic", L"pass show restic"},                        /* No such file, but a command line */
+        {"\"pass show restic\"", L"pass show restic"},                  /* The INI's quotes, removed */
         {"", L""},                                                      /* Empty: not set */
     };
     for (size_t i = 0; i < _countof(good); ++i) {
@@ -1365,6 +1370,8 @@ static void test_repository_sections(void) {
         {"s3.region=a\x01" "b", L"control character"},
         {"rclone.program=C:\\no\\such\\rclone.exe", L"does not exist"},
         {"rclone.args=serve restic --stdio C:\\x", L"backslash outside quotes"},
+        {"sftp.args='-i C:\\key'", L"backslash outside quotes"},          /* The INI's quotes: one argument no more */
+        {"PasswordCommand=C:\\Program Files\\no-such-tool.exe", L"neither an existing file nor a command line"},
         {"sftp.command=\"C:\\no\\such\\ssh.exe\" -s sftp", L"does not exist"},
         {"AWS_SHARED_CREDENTIALS_FILE=C:creds", L"depends on the current drive"},
     };
@@ -1373,7 +1380,7 @@ static void test_repository_sections(void) {
         r = load_repo(plugin_dir, ini, L"R", &cfg);
         if (r && !wcsstr(r->settings_error, bad[i].reason)) printf("       %s: '%ls'\n", bad[i].line, r->settings_error);
         EXPECT_TRUE(r && wcsstr(r->settings_error, bad[i].reason) != NULL, "Unusable setting reported");
-        EXPECT_TRUE(wcsstr(r->settings_error, L"[Repository: R]") != NULL, "... naming the section");
+        EXPECT_TRUE(r && wcsstr(r->settings_error, L"[Repository: R]") != NULL, "... naming the section");
         config_free(&cfg);
     }
 
@@ -1387,6 +1394,7 @@ static void test_repository_sections(void) {
     RemoveDirectoryW(plugin_dir);
 }
 
+/* Target file names: only names Windows stores exactly as given are accepted */
 static void test_plain_file_names(void) {
     static const WCHAR* const plain[] = {
         L"C:\\t\\readme.txt", L"C:/t/.bashrc", L"a.b.c", L"..x", L"CONSOLE.log", L"COM10", L"LPT", L"x CON",

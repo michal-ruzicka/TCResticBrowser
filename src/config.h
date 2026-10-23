@@ -32,7 +32,8 @@ typedef struct {
     WCHAR password_command[CONFIG_MAX_PATH];  /* PasswordCommand: RESTIC_PASSWORD_COMMAND */
     /* The S3 environment variables of the section, "NAME=value\0...\0\0" (empty: "\0") */
     WCHAR environment[CONFIG_MAX_REPO_ENV];
-    /* The section's restic options (-o), "backend.option=value\0...\0\0" (empty: "\0") */
+    /* The section's restic options (-o), "backend.option=value\0...\0\0" (empty: "\0"); an
+       option written with an empty value is kept as "backend.option=" and not passed */
     WCHAR options[CONFIG_MAX_REPO_OPTIONS];
     WCHAR settings_error[CONFIG_ERROR_CHARS]; /* Why a setting of the section cannot be used; the
                                                  repository is then not opened. Empty when fine */
@@ -164,13 +165,14 @@ BOOL config_load(ResticConfig* out_config);
  * sections. Every key is named as restic names it. Keys:
  * - PasswordFile: a file restic reads the password from (RESTIC_PASSWORD_FILE); like ResticPath a
  *   full path or one relative to the plugin folder, unquoted, and it must exist.
- * - PasswordCommand: a program restic runs to get the password (RESTIC_PASSWORD_COMMAND). Without
- *   quote characters the whole value is the program's path, resolved like ResticPath (a bare name
- *   in the plugin folder, then in PATH) and passed in double quotes. A value with quotes is a
- *   command line as restic splits it (backend.SplitShellStrings): arguments separated by spaces,
- *   "..." or '...' grouping, and a backslash outside quotes also separating, which would cut a
- *   Windows path apart; such a value is refused, as are unbalanced quotes and a program that is
- *   neither a full path nor a bare name.
+ * - PasswordCommand: a program restic runs to get the password (RESTIC_PASSWORD_COMMAND). Quotes
+ *   around the whole value are removed like any value's, unless the value holds that quote inside.
+ *   A value without quote characters is the program's path when that file exists, resolved like
+ *   ResticPath (a bare name in the plugin folder, then in PATH) and passed in double quotes; else,
+ *   or with quotes, a command line as restic splits it (backend.SplitShellStrings): arguments
+ *   separated by spaces, "..." or '...' grouping, and a backslash outside quotes also separating,
+ *   which would cut a Windows path apart; such a value is refused, as are unbalanced quotes and a
+ *   program that is neither a full path nor a bare name.
  * - The S3 environment variables restic documents (doc/075_scripting.rst) except the secret ones:
  *   AWS_ACCESS_KEY_ID, AWS_DEFAULT_REGION, AWS_PROFILE, AWS_SHARED_CREDENTIALS_FILE (a file,
  *   resolved like PasswordFile) and RESTIC_AWS_ASSUME_ROLE_ARN, _SESSION_NAME, _EXTERNAL_ID,
@@ -181,8 +183,8 @@ BOOL config_load(ResticConfig* out_config);
  *   checked by restic itself. The key is lowercased, as restic does; quotes around the value are
  *   removed unless the value has more of them inside. The four options restic splits into a
  *   command line itself follow the PasswordCommand rules instead: rclone.program and sftp.command
- *   (a plain path, or a command line with quotes, kept as written), rclone.args and sftp.args
- *   (arguments only, kept as written, refused with a backslash outside quotes).
+ *   start with a program, rclone.args and sftp.args are arguments only. An option written with an
+ *   empty value is not passed, and counts as the first occurrence like any other key.
  * PasswordFile and PasswordCommand may both be set: restic gets both and decides (it refuses the
  * combination). An unusable value sets the entry's settings_error; unknown keys, empty values and
  * sections for an alias that is not configured are ignored.

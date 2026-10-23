@@ -652,8 +652,12 @@ static void repo_setting_error(ResticRepoEntry* s, const WCHAR* key, const WCHAR
 static BOOL resolve_setting_file(ResticRepoEntry* s, const WCHAR* key, const WCHAR* value, const WCHAR* ini_path,
                                  WCHAR* out, size_t cap) {
     WCHAR candidate[CONFIG_MAX_PATH] = {0};
+    if (wcslen(value) >= CONFIG_MAX_PATH) { /* Never cut into another, existing path */
+        repo_setting_error(s, key, value, ini_path, L"is too long.");
+        return FALSE;
+    }
     if (config_is_absolute_path(value)) {
-        wcsncpy_s(candidate, CONFIG_MAX_PATH, value, _TRUNCATE);
+        wcscpy_s(candidate, CONFIG_MAX_PATH, value);
     } else if (!is_relative_path(value)) {
         repo_setting_error(s, key, value, ini_path,
                            L"depends on the current drive or folder. Use a full path or a path relative to the "
@@ -736,42 +740,60 @@ static int split_restic_command(const WCHAR* cmd, WCHAR* first, size_t cap, BOOL
 /*
  * A setting restic splits into a command line itself (backend.SplitShellStrings) as restic gets it,
  * into `out` (CONFIG_MAX_PATH): PasswordCommand, rclone.program, sftp.command, which start with a
- * program (`program`), and rclone.args, sftp.args, which are only arguments. See config.h for the
- * rules; FALSE with the entry's settings_error set.
+ * program (`program_first`), and rclone.args, sftp.args, which are only arguments.
+ *
+ * Quotes around the whole value are the INI file's, as for every other key, and stay removed -
+ * rclone.args="serve restic --stdio" is three arguments - unless the value still holds that quote
+ * inside, when they belonged to its first and last argument ("C:\x\kp.exe" show "C:\db") and are
+ * put back. A value starting with a program and without quote characters is the program's path
+ * when such a file exists (resolved like ResticPath and passed in double quotes, so restic does not
+ * split it at its spaces and backslashes), and otherwise, if it has a space, a command line such as
+ * `ssh user@host -s sftp`. A command line is checked with restic's own splitting: balanced quotes,
+ * no backslash outside quotes (restic would cut a Windows path apart there), and a program that is a
+ * full path that exists or a bare name. FALSE with the entry's settings_error set.
  */
 static BOOL resolve_command(ResticRepoEntry* s, const WCHAR* key, const WCHAR* value, WCHAR unquoted,
                             const WCHAR* ini_path, BOOL program_first, WCHAR* out) {
-    if (program_first && unquoted == 0 && !wcschr(value, L'"') && !wcschr(value, L'\'')) {
-        /* A plain path, as ResticPath: a bare name in the plugin folder, then in PATH */
-        WCHAR program[CONFIG_MAX_PATH] = {0};
-        if (!has_path_component(value)) {
-            if (!find_in_plugin_dir_or_path(value, program, CONFIG_MAX_PATH)) {
-                repo_setting_error(s, key, value, ini_path, L"was found neither in the plugin folder nor in PATH.");
-                return FALSE;
-            }
-        } else if (!resolve_setting_file(s, key, value, ini_path, program, CONFIG_MAX_PATH)) {
-            return FALSE;
-        }
-        /* In double quotes, or restic would split the path at its backslashes and spaces */
-        if (wcslen(program) + 2 >= CONFIG_MAX_PATH) {
-            repo_setting_error(s, key, value, ini_path, L"is too long.");
-            return FALSE;
-        }
-        _snwprintf_s(out, CONFIG_MAX_PATH, _TRUNCATE, L"\"%ls\"", program);
-        return TRUE;
-    }
-
-    /* A command line for restic to split, with the quotes the INI reader took off put back */
     WCHAR command[CONFIG_MAX_PATH];
     if (wcslen(value) + 2 >= CONFIG_MAX_PATH) {
         repo_setting_error(s, key, value, ini_path, L"is too long.");
         return FALSE;
     }
-    if (unquoted != 0) {
+    if (unquoted != 0 && wcschr(value, unquoted)) {
         _snwprintf_s(command, CONFIG_MAX_PATH, _TRUNCATE, L"%lc%ls%lc", unquoted, value, unquoted);
     } else {
         wcscpy_s(command, CONFIG_MAX_PATH, value);
     }
+    BOOL has_quotes = wcschr(command, L'"') || wcschr(command, L'\'');
+    BOOL has_space  = FALSE;
+    for (const WCHAR* p = command; *p; ++p) has_space = has_space || is_go_space(*p);
+
+    if (program_first && !has_quotes) {
+        /* A plain path, as ResticPath: a bare name in the plugin folder, then in PATH */
+        WCHAR program[CONFIG_MAX_PATH] = {0};
+        BOOL earlier_error = s->settings_error[0] != L'\0';
+        BOOL found;
+        if (!has_path_component(command)) {
+            found = find_in_plugin_dir_or_path(command, program, CONFIG_MAX_PATH);
+            if (!found && !has_space) {
+                repo_setting_error(s, key, value, ini_path, L"was found neither in the plugin folder nor in PATH.");
+            }
+        } else {
+            found = resolve_setting_file(s, key, command, ini_path, program, CONFIG_MAX_PATH);
+            if (!found && has_space && !earlier_error) s->settings_error[0] = L'\0'; /* Tried as a command line next */
+        }
+        if (found) {
+            /* In double quotes, or restic would split the path at its backslashes and spaces */
+            if (wcslen(program) + 2 >= CONFIG_MAX_PATH) {
+                repo_setting_error(s, key, value, ini_path, L"is too long.");
+                return FALSE;
+            }
+            _snwprintf_s(out, CONFIG_MAX_PATH, _TRUNCATE, L"\"%ls\"", program);
+            return TRUE;
+        }
+        if (!has_space) return FALSE;
+    }
+
     WCHAR program[CONFIG_MAX_PATH];
     BOOL backslash_splits = FALSE;
     int args = split_restic_command(command, program, CONFIG_MAX_PATH, &backslash_splits);
@@ -785,8 +807,12 @@ static BOOL resolve_command(ResticRepoEntry* s, const WCHAR* key, const WCHAR* v
     }
     if (backslash_splits) {
         repo_setting_error(s, key, command, ini_path,
-                           L"has a backslash outside quotes, where restic splits the command. Put paths in "
-                           L"double quotes: \"C:\\Tools\\get-password.exe\" --name backup");
+                           program_first && !has_quotes
+                               ? L"is neither an existing file nor a command line restic can split: it has a "
+                                 L"backslash outside quotes, where restic splits. Put paths in double quotes: "
+                                 L"\"C:\\Tools\\get-password.exe\" --name backup"
+                               : L"has a backslash outside quotes, where restic splits the command. Put paths in "
+                                 L"double quotes: \"C:\\Tools\\get-password.exe\" --name backup");
         return FALSE;
     }
     if (!program_first) {
@@ -869,7 +895,11 @@ static void read_repo_option(ResticRepoEntry* s, const WCHAR* key, const WCHAR* 
     if (wcslen(key) >= MAX_PATH) return;
     wcscpy_s(name, MAX_PATH, key);
     _wcslwr_s(name, MAX_PATH); /* restic lowercases option names */
-    if (block_find(s->options, name) || value[0] == L'\0') return;
+    if (block_find(s->options, name)) return; /* Not the first occurrence */
+    if (value[0] == L'\0') { /* Not set, but the first occurrence all the same, as for the other keys */
+        block_append(s->options, CONFIG_MAX_REPO_OPTIONS, name, L"");
+        return;
+    }
     if (!setting_value_plain(s, key, value, ini_path)) return;
     WCHAR raw[CONFIG_MAX_PATH];
     if (wcslen(value) + 2 >= CONFIG_MAX_PATH) {

@@ -619,6 +619,7 @@ static WCHAR* option_arguments(const ResticRepo* repo) {
         return NULL;
     }
     FOR_EACH_BLOCK_ENTRY(p, repo->options) {
+        if (wcschr(p, L'=')[1] == L'\0') continue; /* Written empty in the INI: not set */
         if (wcspbrk(p, L"\",\r\n")) {
             size_t f = 0;
             field[f++] = L'"';
