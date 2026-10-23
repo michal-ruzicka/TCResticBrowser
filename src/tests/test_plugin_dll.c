@@ -2132,6 +2132,7 @@ static void test_live_s3_repository(void) {
     STARTUPINFOW si;
     PROCESS_INFORMATION server;
     memset(&si, 0, sizeof(si));
+    memset(&server, 0, sizeof(server));
     si.cb         = sizeof(si);
     si.dwFlags    = STARTF_USESTDHANDLES;
     si.hStdOutput = out;
