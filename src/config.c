@@ -354,8 +354,8 @@ static BOOL ini_next_entry(IniReader* r, WCHAR** key, WCHAR** value) {
             WCHAR* name  = line + 1;
             while (is_space_char(*name)) name++;
             if (close && starts_with_icase(name, CONFIG_REPOSITORY_SECTION_PREFIX)) {
-                WCHAR* last = wcsrchr(line, L']');
-                const WCHAR* after = last + 1;
+                WCHAR* last = wcsrchr(line, L']'); /* Not NULL: the line has a ']' (close) */
+                const WCHAR* after = last ? last + 1 : L"x";
                 while (is_space_char(*after)) after++;
                 if (*after == L'\0') close = last;
             }

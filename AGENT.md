@@ -322,6 +322,7 @@ Because the plugin runs in-process inside `TOTALCMD64.EXE` and handles dynamic m
 - Warnings from the SDK's own annotations are disabled where they hit, never globally: `main.c` disables C6553 because SDK 10.0.26100 annotates a `DWORD` parameter of `SetThreadpoolTimer` `_In_opt_`. Functions keep their stack below the 16 KB C6262 limit (large test buffers are `static`); `-Wstack-usage=13000` under MinGW approximates it.
 - `/analyze` does not take `calloc` as initialising the members of an array of structures: freeing pointer members of such an array in a loop is C6001 ("using uninitialized memory"), while an array of plain pointers from `calloc` is fine. Keep per-item heap data in one allocation reached through an array of pointers (`SnapshotInfo` in `snapshot_tree.c`). gcc/clang do not warn; only `build.cmd check` shows it.
 - `/W4` C4701 ("potentially uninitialized local variable", an error with `/WX`, in every build, not only `check`) fires where gcc and clang stay silent: a structure filled only by a successful call (`PROCESS_INFORMATION` after `CreateProcessW`) and used later under the same condition (`if (started)`). Initialize such structures where they are declared.
+- `/analyze` C6011 takes the result of `wcschr`/`strchr`/`wcsrchr` as possibly NULL even where the string is known to hold the character (`wcschr(entry, L'=')[1]` on a `key=value` entry); the clang static analyzer does not report it. Check the pointer before using it.
 
 ### 8.5 Binary Security Hardening
 - **Compiler:** `/GS` (Buffer Security Check / stack cookie protection).

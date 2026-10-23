@@ -1563,7 +1563,8 @@ static void log_configuration(const ResticConfig* cfg) {
         for (const WCHAR* e = r->environment; *e != L'\0'; e += wcslen(e) + 1) log_write(L"      %ls", e);
         if (config_repo_env_value(r, L"AWS_ACCESS_KEY_ID")) log_write(L"      (AWS_SECRET_ACCESS_KEY is asked for)");
         for (const WCHAR* o = r->options; *o != L'\0'; o += wcslen(o) + 1) {
-            if (wcschr(o, L'=')[1] != L'\0') log_write(L"      -o %ls", o);
+            const WCHAR* eq = wcschr(o, L'=');
+            if (eq && eq[1] != L'\0') log_write(L"      -o %ls", o);
         }
     }
 }
