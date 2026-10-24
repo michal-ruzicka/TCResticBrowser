@@ -1,4 +1,5 @@
 #include "snapshot_tree.h"
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,6 +30,7 @@ typedef struct {
     const JsonValue* paths;           /* JSON array or NULL */
     int has_size;                     /* The snapshot has a summary (restic 0.17 and later) */
     uint64_t size;                    /* summary.total_bytes_processed, what restic shows as Size */
+    const JsonValue* object;          /* The whole entry, for the details (new_info) */
 } SnapshotRecord;
 
 /*
@@ -44,6 +46,15 @@ typedef struct {
     const char* tags;  /* The tags, one per line */
     int has_size;      /* 0: no summary, the size is not known */
     uint64_t size;     /* Bytes the backup processed */
+    /* The rest for snapshot_tree_describe(); strings "" when restic did not record them */
+    const char* username;
+    const char* program_version;
+    const char* parent; /* The parent snapshot's ID */
+    int has_counts;     /* The summary's file and folder counts and data added are known */
+    uint64_t files_new, files_changed, files_unmodified, dirs_new, dirs_changed, dirs_unmodified;
+    uint64_t data_added, data_added_packed, total_files;
+    int has_backup_times;
+    Timestamp backup_start, backup_end;
 } SnapshotInfo;
 
 /* Open-addressing hash set of (parent, name) -> node, so inserting N snapshots stays O(N) */
@@ -282,6 +293,7 @@ static size_t collect_records(const JsonValue* array, SnapshotRecord* records) {
         unsigned long long size  = 0;
         r->has_size = summary && summary->type == JSON_OBJECT && (!bytes || json_u64(bytes, &size));
         r->size     = r->has_size ? (uint64_t)size : 0;
+        r->object   = v;
         n++;
     }
     qsort(records, n, sizeof(SnapshotRecord), compare_records);
@@ -309,24 +321,66 @@ static size_t join_lines(const JsonValue* array, char* out) {
 }
 
 /* The snapshot's SnapshotInfo, its strings in the same allocation; NULL when out of memory */
+/* A string member of a snapshot's JSON object, "" when it is missing or not a string */
+static const char* member_text(const JsonValue* object, const char* key) {
+    const char* text = json_string(json_object_get(object, key));
+    return text ? text : "";
+}
+
+/* The summary counts of a snapshot; 0 when any is missing (an older restic recorded fewer) */
+static int read_counts(const JsonValue* summary, SnapshotInfo* info) {
+    static const char* const keys[] = {"files_new", "files_changed", "files_unmodified", "dirs_new", "dirs_changed",
+                                       "dirs_unmodified", "data_added", "data_added_packed", "total_files_processed"};
+    uint64_t* fields[] = {&info->files_new, &info->files_changed, &info->files_unmodified, &info->dirs_new,
+                          &info->dirs_changed, &info->dirs_unmodified, &info->data_added, &info->data_added_packed,
+                          &info->total_files};
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
+        unsigned long long value = 0;
+        if (!json_u64(json_object_get(summary, keys[i]), &value)) return 0;
+        *fields[i] = (uint64_t)value;
+    }
+    return 1;
+}
+
+/* The snapshot's SnapshotInfo, its strings in the same allocation; NULL when out of memory */
 static SnapshotInfo* new_info(const SnapshotRecord* rec, const char* id) {
-    const char* host = rec->hostname ? rec->hostname : "";
-    size_t host_len  = strlen(host) + 1;
-    size_t paths_len = join_lines(rec->paths, NULL);
-    size_t tags_len  = join_lines(rec->tags, NULL);
-    SnapshotInfo* info = (SnapshotInfo*)malloc(sizeof(SnapshotInfo) + host_len + paths_len + tags_len);
+    const char* host    = rec->hostname ? rec->hostname : "";
+    const char* user    = member_text(rec->object, "username");
+    const char* program = member_text(rec->object, "program_version");
+    const char* parent  = member_text(rec->object, "parent");
+    size_t host_len     = strlen(host) + 1;
+    size_t paths_len    = join_lines(rec->paths, NULL);
+    size_t tags_len     = join_lines(rec->tags, NULL);
+    size_t user_len = strlen(user) + 1, program_len = strlen(program) + 1, parent_len = strlen(parent) + 1;
+    SnapshotInfo* info = (SnapshotInfo*)calloc(1, sizeof(SnapshotInfo) + host_len + paths_len + tags_len + user_len +
+                                                      program_len + parent_len);
     if (!info) return NULL;
     char* text = (char*)(info + 1);
     memcpy(text, host, host_len);
     join_lines(rec->paths, text + host_len);
     join_lines(rec->tags, text + host_len + paths_len);
+    char* more = text + host_len + paths_len + tags_len;
+    memcpy(more, user, user_len);
+    memcpy(more + user_len, program, program_len);
+    memcpy(more + user_len + program_len, parent, parent_len);
     info->id    = id;
     info->time  = rec->time;
     info->host  = text;
     info->paths = text + host_len;
     info->tags  = text + host_len + paths_len;
-    info->has_size = rec->has_size;
-    info->size     = rec->size;
+    info->has_size        = rec->has_size;
+    info->size            = rec->size;
+    info->username        = more;
+    info->program_version = more + user_len;
+    info->parent          = more + user_len + program_len;
+    const JsonValue* summary = json_object_get(rec->object, "summary");
+    if (summary && summary->type == JSON_OBJECT) {
+        info->has_counts       = read_counts(summary, info);
+        info->has_backup_times = timestamp_parse(json_string(json_object_get(summary, "backup_start")),
+                                                 &info->backup_start) &&
+                                 timestamp_parse(json_string(json_object_get(summary, "backup_end")),
+                                                 &info->backup_end);
+    }
     return info;
 }
 
@@ -693,6 +747,107 @@ char* snapshot_tree_csv(const SnapshotTree* tree, char separator, size_t* out_le
         return NULL;
     }
     if (out_len) *out_len = t.len;
+    return t.data;
+}
+
+void snapshot_tree_format_time(const Timestamp* t, const char* format, char* out) {
+    time_name(t, format, out);
+}
+
+void snapshot_tree_format_size(uint64_t bytes, char* out, size_t cap) {
+    size_text(bytes, out, cap);
+}
+
+/* The SnapshotInfo of the snapshot with this full ID, or NULL */
+static const SnapshotInfo* find_info(const SnapshotTree* tree, const char* id) {
+    for (size_t i = 0; tree && id && i < tree->snapshot_count; ++i) {
+        if (strcmp(tree->info[i]->id, id) == 0) return tree->info[i];
+    }
+    return NULL;
+}
+
+int snapshot_tree_snapshot_time(const SnapshotTree* tree, const char* id, Timestamp* out) {
+    const SnapshotInfo* info = find_info(tree, id);
+    if (info && out) *out = info->time;
+    return info != NULL;
+}
+
+const char* snapshot_tree_snapshot_host(const SnapshotTree* tree, const char* id) {
+    const SnapshotInfo* info = find_info(tree, id);
+    return info ? info->host : NULL;
+}
+
+/* printf into a CsvText, one line of at most 1023 bytes */
+static void text_printf(CsvText* t, const char* format, ...) {
+    char line[1024];
+    va_list args;
+    va_start(args, format);
+    int n = vsnprintf(line, sizeof(line), format, args);
+    va_end(args);
+    if (n > 0) csv_put(t, line, (size_t)n < sizeof(line) ? (size_t)n : sizeof(line) - 1);
+}
+
+/* "Label: " and a text of several lines, each further line indented below the first */
+static void text_lines(CsvText* t, const char* label, const char* lines) {
+    csv_put(t, label, strlen(label));
+    for (const char* p = lines; *p; ++p) {
+        csv_put(t, p, 1);
+        if (*p == '\n') csv_put(t, "    ", 4);
+    }
+    csv_put(t, "\n", 1);
+}
+
+/* A duration in 100 ns ticks as "0.7 s", "2 min 5 s" or "1 h 2 min" */
+static void duration_text(uint64_t ticks, char* out, size_t cap) {
+    uint64_t tenths = ticks / 1000000u, seconds = ticks / 10000000u;
+    if (seconds < 60) {
+        snprintf(out, cap, "%u.%u s", (unsigned)(tenths / 10u), (unsigned)(tenths % 10u));
+    } else if (seconds < 3600) {
+        snprintf(out, cap, "%u min %u s", (unsigned)(seconds / 60u), (unsigned)(seconds % 60u));
+    } else {
+        snprintf(out, cap, "%llu h %u min", (unsigned long long)(seconds / 3600u), (unsigned)(seconds / 60u % 60u));
+    }
+}
+
+char* snapshot_tree_describe(const SnapshotTree* tree, const char* id) {
+    const SnapshotInfo* s = find_info(tree, id);
+    if (!s) return NULL;
+    CsvText t = {NULL, 0, 0, 0};
+    char when[SNAPSHOT_TREE_TIME_FORMAT_MAX * 2 + 1], size[32], packed[32], took[32];
+    time_name(&s->time, "YYYY-MM-DD hh:mm:ss zzzz", when);
+    text_printf(&t, "Snapshot %.8s of %s\n", s->id, s->host[0] ? s->host : "(no host)");
+    text_printf(&t, "ID: %s\n", s->id);
+    text_printf(&t, "Time: %s\n", when);
+    if (s->username[0]) text_printf(&t, "User: %s\n", s->username);
+    text_lines(&t, "Paths: ", s->paths);
+    if (s->tags[0]) text_lines(&t, "Tags: ", s->tags);
+    if (s->has_size) {
+        size_text(s->size, size, sizeof(size));
+        if (s->has_counts) {
+            text_printf(&t, "Size: %s in %llu files\n", size, (unsigned long long)s->total_files);
+        } else {
+            text_printf(&t, "Size: %s\n", size);
+        }
+    }
+    if (s->has_counts) {
+        text_printf(&t, "Files: %llu new, %llu changed, %llu unmodified\n", (unsigned long long)s->files_new,
+                    (unsigned long long)s->files_changed, (unsigned long long)s->files_unmodified);
+        text_printf(&t, "Folders: %llu new, %llu changed, %llu unmodified\n", (unsigned long long)s->dirs_new,
+                    (unsigned long long)s->dirs_changed, (unsigned long long)s->dirs_unmodified);
+        size_text(s->data_added, size, sizeof(size));
+        size_text(s->data_added_packed, packed, sizeof(packed));
+        text_printf(&t, "Added to the repository: %s (%s stored)\n", size, packed);
+    }
+    if (s->has_backup_times && s->backup_end.utc_ticks >= s->backup_start.utc_ticks) {
+        duration_text(s->backup_end.utc_ticks - s->backup_start.utc_ticks, took, sizeof(took));
+        text_printf(&t, "Backup took: %s\n", took);
+    }
+    if (s->parent[0]) text_printf(&t, "Parent: %.8s\n", s->parent);
+    if (s->program_version[0]) text_printf(&t, "Program: %s\n", s->program_version);
+    if (t.failed) {
+        free(t.data);
+        return NULL;
+    }
     return t.data;
 }
 

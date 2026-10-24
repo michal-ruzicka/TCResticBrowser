@@ -1,6 +1,7 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
+#include "timestamp.h"
 
 /*
  * The folder tree `restic mount` presents above the snapshots, built from the output of
@@ -100,6 +101,29 @@ SnapshotTreeStatus snapshot_tree_build(const char* json, size_t len, const char*
  * reader, also one splitting at another separator, could start a cell with it.
  */
 char* snapshot_tree_csv(const SnapshotTree* tree, char separator, size_t* out_len);
+
+/* The time of the snapshot with this full ID into *out; 0 when the tree has no such snapshot */
+int snapshot_tree_snapshot_time(const SnapshotTree* tree, const char* id, Timestamp* out);
+
+/* The host name of the snapshot with this full ID, as restic recorded it; NULL when there is none */
+const char* snapshot_tree_snapshot_host(const SnapshotTree* tree, const char* id);
+
+/*
+ * The details of the snapshot with this full ID as UTF-8 text for a properties dialog, a line
+ * each ("ID: ...", "Time: ...", "Paths: ...", the summary's size, counts and duration, parent,
+ * program), lines missing what restic did not record; several paths or tags one per indented line.
+ * Heap, NUL-terminated; NULL when the tree has no such snapshot or when out of memory.
+ */
+char* snapshot_tree_describe(const SnapshotTree* tree, const char* id);
+
+/*
+ * `t` written by a time format (snapshot_tree_time_format_valid() or any text of placeholders and
+ * literals) into `out`, which holds SNAPSHOT_TREE_TIME_FORMAT_MAX * 2 + 1 bytes
+ */
+void snapshot_tree_format_time(const Timestamp* t, const char* format, char* out);
+
+/* A size as restic writes it ("1023 B", "1.062 KiB"), as in snapshots.csv */
+void snapshot_tree_format_size(uint64_t bytes, char* out, size_t cap);
 
 /* Releases a tree and every node obtained from it. NULL is accepted. */
 void snapshot_tree_free(SnapshotTree* tree);
