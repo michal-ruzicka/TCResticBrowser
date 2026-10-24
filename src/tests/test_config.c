@@ -1183,6 +1183,217 @@ static void test_logging(void) {
     SetEnvironmentVariableW(L"TCRB_TEST_LOG_ROOT", NULL);
 }
 
+/* Loads `ini` (UTF-8) from plugin_dir and returns the repository `alias` in *cfg (NULL when missing) */
+static const ResticRepoEntry* load_repo(const WCHAR* plugin_dir, const char* ini, const WCHAR* alias, ResticConfig* cfg) {
+    WCHAR ini_path[CONFIG_MAX_PATH];
+    swprintf_s(ini_path, CONFIG_MAX_PATH, L"%ls\\%ls", plugin_dir, CONFIG_INI_FILENAME);
+    write_text_file(ini_path, ini);
+    config_set_plugin_dir(plugin_dir);
+    config_load(cfg);
+    return config_find_repo(cfg, alias);
+}
+
+/* A variable of a repository's environment block, "<unset>" when it is not there */
+static const WCHAR* env_of(const ResticRepoEntry* r, const WCHAR* name) {
+    const WCHAR* v = config_repo_env_value(r, name);
+    return v ? v : L"<unset>";
+}
+
+/* The value of entry "<key>=..." of a "a=1\0b=2\0\0" block, key compared exactly; "<unset>" when missing */
+static const WCHAR* block_value(const WCHAR* block, const WCHAR* key) {
+    size_t len = wcslen(key);
+    for (const WCHAR* p = block; *p != L'\0'; p += wcslen(p) + 1) {
+        if (wcsncmp(p, key, len) == 0 && p[len] == L'=') return p + len + 1;
+    }
+    return L"<unset>";
+}
+
+static const WCHAR* option_of(const ResticRepoEntry* r, const WCHAR* key) {
+    return block_value(r->options, key);
+}
+
+/* Number of entries of a "a=1\0b=2\0\0" block */
+static int block_count(const WCHAR* block) {
+    int n = 0;
+    for (const WCHAR* p = block; *p != L'\0'; p += wcslen(p) + 1) n++;
+    return n;
+}
+
+/* [Repository: <alias>] sections: password file and command, S3 variables, restic options */
+static void test_repository_sections(void) {
+    /* Static: /analyze (C6262) caps a frame at 16 KB, and a ResticConfig alone takes half of it */
+    static WCHAR plugin_dir[CONFIG_MAX_PATH], spaced_dir[CONFIG_MAX_PATH], path[CONFIG_MAX_PATH];
+    make_temp_dir(L"restic_repo_sections", plugin_dir, CONFIG_MAX_PATH);
+    swprintf_s(spaced_dir, CONFIG_MAX_PATH, L"%ls\\dir with space", plugin_dir);
+    CreateDirectoryW(spaced_dir, NULL);
+    static const WCHAR* const files[] = {L"pw.txt", L"creds", L"get-pass.cmd", L"dir with space\\get pass.cmd"};
+    for (size_t i = 0; i < _countof(files); ++i) {
+        swprintf_s(path, CONFIG_MAX_PATH, L"%ls\\%ls", plugin_dir, files[i]);
+        write_text_file(path, "x\r\n");
+    }
+    static char dir[CONFIG_MAX_PATH * 3];
+    WideCharToMultiByte(CP_UTF8, 0, plugin_dir, -1, dir, (int)sizeof(dir), NULL, NULL);
+
+    static char ini[16384];
+    snprintf(ini, sizeof(ini),
+             "[Repository: Second]\r\n" /* Before [Repositories] */
+             "PasswordFile=pw.txt\r\n"
+             "AWS_ACCESS_KEY_ID=AKIAEXAMPLE\r\n"
+             "aws_shared_credentials_file=%s\\creds\r\n"
+             "AWS_PROFILE = backup \r\n"
+             "AWS_DEFAULT_REGION=eu-central-1\r\n"
+             "RESTIC_AWS_ASSUME_ROLE_ARN=arn:aws:iam::123456789012:role/backup\r\n"
+             "restic_aws_assume_role_policy={\"Version\":\"2012-10-17\"}\r\n"
+             "s3.region = eu-west-1\r\n"
+             "S3.Bucket-Lookup=dns\r\n"                 /* Lowercased as restic does */
+             "s3.storage-class=\"STANDARD\"\r\n"         /* Quotes around the whole value removed */
+             "sftp.command=\"%s\\dir with space\\get pass.cmd\" -s sftp\r\n" /* Quotes kept: restic splits it */
+             "rclone.program=%s\\get-pass.cmd\r\n"     /* A plain path, quoted for restic */
+             "rclone.args=\"serve restic --stdio --b2-hard-delete\"\r\n" /* Quotes around the whole value removed */
+             "sftp.args=-i \"C:\\key\"\r\n"            /* Arguments only, as written */
+             "rest.connections=\r\n"                   /* Empty: not set, and the first occurrence */
+             "rest.connections=4\r\n"
+             "s3.region=ignored\r\n"                     /* Not the first occurrence */
+             "PasswordFile=missing.txt\r\n" /* Not the first occurrence: ignored */
+             "Unknown=1\r\n"
+             "bad..key=1\r\n"                            /* Neither a known key nor an option: ignored */
+             ".region=1\r\n"
+             "[Repositories]\r\n"
+             "First=C:\\r1\r\n"
+             "Second=s3:s3.example.com/bucket\r\n"
+             "Third=C:\\r3\r\n"
+             "Odd]Name=C:\\r4\r\n"
+             "Plain=C:\\r5\r\n"
+             "[repository:first]\r\n"
+             "PasswordCommand=%s\\dir with space\\get pass.cmd\r\n"
+             "[Repository: Third]\r\n"
+             "PasswordCommand=\"%s\\get-pass.cmd\" --name 'my repo'\r\n"
+             "PasswordFile=%s\\pw.txt\r\n"
+             "[Repository: Odd]Name] \r\n"
+             "AWS_PROFILE=odd\r\n"
+             "[Repository: Unknown]\r\n"
+             "PasswordFile=pw.txt\r\n"
+             "[Repository: Second]\r\n"
+             "AWS_PROFILE=other\r\n", /* Repeated section: the first occurrence still wins */
+             dir, dir, dir, dir, dir, dir);
+    static ResticConfig cfg;
+    const ResticRepoEntry* r = load_repo(plugin_dir, ini, L"Second", &cfg);
+    EXPECT_TRUE(cfg.repo_count == 5 && r != NULL, "Repository sections add no repository");
+    swprintf_s(path, CONFIG_MAX_PATH, L"%ls\\pw.txt", plugin_dir);
+    EXPECT_WSTR_EQ(r->password_file, path, "PasswordFile relative to the plugin folder, first occurrence");
+    EXPECT_WSTR_EQ(env_of(r, L"AWS_ACCESS_KEY_ID"), L"AKIAEXAMPLE", "AWS_ACCESS_KEY_ID");
+    swprintf_s(path, CONFIG_MAX_PATH, L"%ls\\creds", plugin_dir);
+    EXPECT_WSTR_EQ(env_of(r, L"AWS_SHARED_CREDENTIALS_FILE"), path,
+                   "AWS_SHARED_CREDENTIALS_FILE resolved, key compared ignoring case");
+    EXPECT_WSTR_EQ(env_of(r, L"AWS_PROFILE"), L"backup", "AWS_PROFILE trimmed, first occurrence across sections");
+    EXPECT_WSTR_EQ(env_of(r, L"AWS_DEFAULT_REGION"), L"eu-central-1", "AWS_DEFAULT_REGION");
+    EXPECT_WSTR_EQ(env_of(r, L"RESTIC_AWS_ASSUME_ROLE_ARN"), L"arn:aws:iam::123456789012:role/backup",
+                   "RESTIC_AWS_ASSUME_ROLE_ARN");
+    EXPECT_WSTR_EQ(env_of(r, L"RESTIC_AWS_ASSUME_ROLE_POLICY"), L"{\"Version\":\"2012-10-17\"}",
+                   "RESTIC_AWS_ASSUME_ROLE_POLICY, a JSON value as written");
+    EXPECT_TRUE(wcscmp(block_value(r->environment, L"RESTIC_AWS_ASSUME_ROLE_POLICY"), L"{\"Version\":\"2012-10-17\"}") == 0,
+                "Each variable under restic's own name, whatever case the INI used");
+    EXPECT_TRUE(block_count(r->environment) == 6 && config_repo_env_value(r, L"PasswordFile") == NULL &&
+                    config_repo_env_value(r, L"AWS_SECRET_ACCESS_KEY") == NULL,
+                "Only the S3 variables in the environment block");
+    EXPECT_WSTR_EQ(option_of(r, L"s3.region"), L"eu-west-1", "Option s3.region, first occurrence");
+    EXPECT_WSTR_EQ(option_of(r, L"s3.bucket-lookup"), L"dns", "Option name lowercased");
+    EXPECT_WSTR_EQ(option_of(r, L"s3.storage-class"), L"STANDARD", "Quotes around a whole option value removed");
+    swprintf_s(path, CONFIG_MAX_PATH, L"\"%ls\\dir with space\\get pass.cmd\" -s sftp", plugin_dir);
+    EXPECT_WSTR_EQ(option_of(r, L"sftp.command"), path, "A command line option keeps its quotes (restic splits it)");
+    swprintf_s(path, CONFIG_MAX_PATH, L"\"%ls\\get-pass.cmd\"", plugin_dir);
+    EXPECT_WSTR_EQ(option_of(r, L"rclone.program"), path, "rclone.program as a plain path is quoted for restic");
+    EXPECT_WSTR_EQ(option_of(r, L"rclone.args"), L"serve restic --stdio --b2-hard-delete",
+                   "rclone.args in quotes, as restic's documentation writes it: the INI's quotes, removed");
+    EXPECT_WSTR_EQ(option_of(r, L"sftp.args"), L"-i \"C:\\key\"", "sftp.args with a quoted path, as written");
+    EXPECT_WSTR_EQ(option_of(r, L"rest.connections"), L"", "An empty first occurrence counts, as for the other keys");
+    EXPECT_TRUE(block_count(r->options) == 8, "Eight options; malformed keys are not options");
+    EXPECT_TRUE(r->settings_error[0] == L'\0' && r->password_command[0] == L'\0', "No error, no command");
+
+    r = config_find_repo(&cfg, L"First");
+    swprintf_s(path, CONFIG_MAX_PATH, L"\"%ls\\dir with space\\get pass.cmd\"", plugin_dir);
+    EXPECT_TRUE(r && r->settings_error[0] == L'\0', "A plain PasswordCommand path is fine");
+    EXPECT_WSTR_EQ(r->password_command, path, "... and handed to restic in double quotes");
+
+    r = config_find_repo(&cfg, L"Third");
+    swprintf_s(path, CONFIG_MAX_PATH, L"\"%ls\\get-pass.cmd\" --name 'my repo'", plugin_dir);
+    EXPECT_TRUE(r && r->settings_error[0] == L'\0', "A quoted command line is fine");
+    EXPECT_WSTR_EQ(r->password_command, path, "... and passed as written");
+    swprintf_s(path, CONFIG_MAX_PATH, L"%ls\\pw.txt", plugin_dir);
+    EXPECT_WSTR_EQ(r->password_file, path, "PasswordFile and PasswordCommand together: both kept for restic");
+
+    r = config_find_repo(&cfg, L"Odd]Name");
+    EXPECT_TRUE(r != NULL, "An alias with ']'");
+    EXPECT_WSTR_EQ(env_of(r, L"AWS_PROFILE"), L"odd", "... has its section, closed by the last ']'");
+    r = config_find_repo(&cfg, L"Plain");
+    EXPECT_TRUE(r && r->password_file[0] == L'\0' && r->password_command[0] == L'\0' && r->environment[0] == L'\0' &&
+                    r->options[0] == L'\0' && r->settings_error[0] == L'\0',
+                "A repository without a section has no settings");
+    config_free(&cfg);
+
+    /* Accepted command lines */
+    static const struct {
+        const char* value;
+        const WCHAR* command;
+    } good[] = {
+        {"\"kp\" --x", L"\"kp\" --x"},                                  /* A bare name: restic finds it in PATH */
+        {"cmd /c \"type C:\\pw.txt\"", L"cmd /c \"type C:\\pw.txt\""}, /* Backslashes inside quotes */
+        {"'pass.exe' show", L"'pass.exe' show"},
+        {"pass show restic", L"pass show restic"},                        /* No such file, but a command line */
+        {"\"pass show restic\"", L"pass show restic"},                  /* The INI's quotes, removed */
+        {"", L""},                                                      /* Empty: not set */
+    };
+    for (size_t i = 0; i < _countof(good); ++i) {
+        snprintf(ini, sizeof(ini), "[Repositories]\r\nR=C:\\r\r\n[Repository: R]\r\nPasswordCommand=%s\r\n", good[i].value);
+        r = load_repo(plugin_dir, ini, L"R", &cfg);
+        EXPECT_TRUE(r && r->settings_error[0] == L'\0', "Usable PasswordCommand");
+        EXPECT_WSTR_EQ(r->password_command, good[i].command, "PasswordCommand as restic gets it");
+        config_free(&cfg);
+    }
+
+    /* Unusable values: the repository carries the reason, naming the setting */
+    static const struct {
+        const char* line;
+        const WCHAR* reason;
+    } bad[] = {
+        {"PasswordFile=missing.txt", L"does not exist"},
+        {"PasswordFile=C:pw.txt", L"depends on the current drive"},
+        {"PasswordFile=\\pw.txt", L"depends on the current drive"},
+        {"AWS_SHARED_CREDENTIALS_FILE=no-such-creds", L"does not exist"},
+        {"PasswordCommand=C:\\x\\kp.exe \"a b\"", L"backslash outside quotes"},
+        {"PasswordCommand=\"C:\\x\\kp.exe", L"not closed"},
+        {"PasswordCommand=\"relative\\kp.exe\" arg", L"depends on the current drive"},
+        {"PasswordCommand=\"C:\\no\\such\\kp.exe\" arg", L"does not exist"},
+        {"PasswordCommand=no-such-password-tool-xyz", L"neither in the plugin folder nor in PATH"},
+        {"PasswordCommand=\"\" \"\"", L"names no program"},
+        {"AWS_PROFILE=a\x01" "b", L"control character"},
+        {"s3.region=a\x01" "b", L"control character"},
+        {"rclone.program=C:\\no\\such\\rclone.exe", L"does not exist"},
+        {"rclone.args=serve restic --stdio C:\\x", L"backslash outside quotes"},
+        {"sftp.args='-i C:\\key'", L"backslash outside quotes"},          /* The INI's quotes: one argument no more */
+        {"PasswordCommand=C:\\Program Files\\no-such-tool.exe", L"neither an existing file nor a command line"},
+        {"sftp.command=\"C:\\no\\such\\ssh.exe\" -s sftp", L"does not exist"},
+        {"AWS_SHARED_CREDENTIALS_FILE=C:creds", L"depends on the current drive"},
+    };
+    for (size_t i = 0; i < _countof(bad); ++i) {
+        snprintf(ini, sizeof(ini), "[Repositories]\r\nR=C:\\r\r\n[Repository: R]\r\n%s\r\n", bad[i].line);
+        r = load_repo(plugin_dir, ini, L"R", &cfg);
+        if (r && !wcsstr(r->settings_error, bad[i].reason)) printf("       %s: '%ls'\n", bad[i].line, r->settings_error);
+        EXPECT_TRUE(r && wcsstr(r->settings_error, bad[i].reason) != NULL, "Unusable setting reported");
+        EXPECT_TRUE(r && wcsstr(r->settings_error, L"[Repository: R]") != NULL, "... naming the section");
+        config_free(&cfg);
+    }
+
+    for (size_t i = 0; i < _countof(files); ++i) {
+        swprintf_s(path, CONFIG_MAX_PATH, L"%ls\\%ls", plugin_dir, files[i]);
+        DeleteFileW(path);
+    }
+    swprintf_s(path, CONFIG_MAX_PATH, L"%ls\\%ls", plugin_dir, CONFIG_INI_FILENAME);
+    DeleteFileW(path);
+    RemoveDirectoryW(spaced_dir);
+    RemoveDirectoryW(plugin_dir);
+}
+
 /* Target file names: only names Windows stores exactly as given are accepted */
 static void test_plain_file_names(void) {
     static const WCHAR* const plain[] = {
@@ -1236,6 +1447,7 @@ int main(void) {
     test_logging();
     test_password_timeout_setting();
     test_plain_file_names();
+    test_repository_sections();
 
     RemoveDirectoryW(user_dir);
     RemoveDirectoryW(appdata_dir);

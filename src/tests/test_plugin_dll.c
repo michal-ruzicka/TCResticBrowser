@@ -13,6 +13,7 @@
 #define _UNICODE
 #endif
 #include <windows.h>
+#include <tlhelp32.h>
 #include <stdio.h>
 #include <stdlib.h>
 #if defined(_DEBUG) && !defined(__SANITIZE_ADDRESS__)
@@ -406,7 +407,7 @@ static int   g_e2e_pwd_mode         = 0; /* 0 = wrong once then correct, 1 = alw
                                            5 = correct password with a trailing space once, then correct */
 static WCHAR g_e2e_last_prompt[256] = {0};
 static WCHAR g_e2e_last_title[512] = {0};
-static WCHAR g_e2e_last_msg[256]    = {0};
+static WCHAR g_e2e_last_msg[1024]   = {0}; /* report_plugin_error() writes up to 1024 */
 static WCHAR g_e2e_progress_target[512] = {0};
 static int   g_e2e_progress_percent = -1;
 static volatile LONG g_e2e_mt_failures = 0;
@@ -454,6 +455,10 @@ static int conn_log_count(const WCHAR* text) {
     return n;
 }
 
+/* Answers to the S3 secret key dialog, one per prompt (NULL or past the end: FIXTURE_PASSWORD) */
+static const WCHAR* g_e2e_s3_answers[4];
+static int          g_e2e_s3_prompts = 0;
+
 static BOOL __stdcall e2e_request_proc(
     int PluginNr,
     int RequestType,
@@ -468,6 +473,13 @@ static BOOL __stdcall e2e_request_proc(
         wcsncpy_s(g_e2e_last_title, _countof(g_e2e_last_title), CustomTitle ? CustomTitle : L"", _TRUNCATE);
         if (CustomText) {
             wcsncpy_s(g_e2e_last_prompt, _countof(g_e2e_last_prompt), CustomText, _TRUNCATE);
+        }
+        if (CustomTitle && wcsstr(CustomTitle, L"S3 secret access key")) {
+            int i = g_e2e_s3_prompts++;
+            const WCHAR* answer = i < (int)_countof(g_e2e_s3_answers) && g_e2e_s3_answers[i] ? g_e2e_s3_answers[i]
+                                                                                            : FIXTURE_PASSWORD;
+            wcsncpy_s(ReturnedText, (size_t)maxlen, answer, _TRUNCATE);
+            return TRUE;
         }
         if (g_e2e_pwd_mode == 3) {
             ReturnedText[0] = L'\0';
@@ -1077,7 +1089,7 @@ static void test_snapshots_csv(const Plugin* p, const WCHAR* dir, const WCHAR* s
     text[got] = '\0';
     EXPECT_TRUE(got == ri.SizeLow, "The copy has exactly the listed size");
     EXPECT_TRUE(CompareFileTime(&mtime, &ri.LastWriteTime) == 0, "The copy carries the listed time");
-    const char* header = "\xEF\xBB\xBFshort ID;host;paths;timestamp;tags;full ID\r\n";
+    const char* header = "\xEF\xBB\xBFshort ID;host;paths;size;timestamp;tags;full ID\r\n";
     EXPECT_TRUE(strncmp(text, header, strlen(header)) == 0, "UTF-8 BOM, then the header with CsvSeparator=;");
     char some_a[16] = {0}, latest_a[16] = {0};
     WideCharToMultiByte(CP_UTF8, 0, some_id, -1, some_a, sizeof(some_a), NULL, NULL);
@@ -1094,6 +1106,15 @@ static void test_snapshots_csv(const Plugin* p, const WCHAR* dir, const WCHAR* s
                 "Each record ends with the full ID, the last one the newer snapshot's");
     EXPECT_TRUE(strstr(text, some_a) != NULL && strstr(text, "\\test_fixture\\data") != NULL,
                 "The records hold the short IDs and the backed-up path");
+    /* restic 0.17 and later record a summary, so the size follows the path as restic snapshots prints it */
+    const char* size  = second ? strstr(second + 2, "\\test_fixture\\data;") : NULL;
+    size              = size ? size + strlen("\\test_fixture\\data;") : NULL;
+    const char* end   = size ? strchr(size, ';') : NULL;
+    size_t size_len   = end ? (size_t)(end - size) : 0;
+    int size_has_unit = size_len >= 9 && (strncmp(end - 4, " KiB", 4) == 0 || strncmp(end - 4, " MiB", 4) == 0);
+    EXPECT_TRUE(size_has_unit && size[0] >= '1' && size[0] <= '9' && end[-8] == '.' &&
+                    strspn(end - 7, "0123456789") == 3,
+                "The newer snapshot's size, as \"<n>.<3 decimals> KiB\" or MiB, after its path");
 
     EXPECT_TRUE(p->get_file_w(L"\\MainRepo\\snapshots.csv", local, 0, &ri) == FS_FILE_EXISTS,
                 "An existing copy is reported first (overwrite protocol)");
@@ -1691,6 +1712,474 @@ static void delete_tree(const WCHAR* path) {
 }
 
 /*
+ * A restic older than 0.17.1 (fake_restic.exe, built next to this test, printing the version
+ * FAKE_RESTIC_VERSION names, as text with FAKE_RESTIC_VERSION_TEXT like restic before 0.17.0) is
+ * refused with a message before any prompt, and asked for its version once, not before every
+ * listing; 0.17.0, the first to answer in JSON, is still too old
+ */
+static void test_old_restic_refused(void) {
+    WCHAR fake[MAX_PATH], dir[MAX_PATH], ini[MAX_PATH], log_file[MAX_PATH];
+    DWORD len = GetModuleFileNameW(NULL, fake, MAX_PATH);
+    WCHAR* slash = (len > 0 && len < MAX_PATH) ? wcsrchr(fake, L'\\') : NULL;
+    EXPECT_TRUE(slash != NULL, "Locate the test's own folder");
+    wcscpy_s(slash + 1, MAX_PATH - (size_t)(slash + 1 - fake), L"fake_restic.exe");
+    if (GetFileAttributesW(fake) == INVALID_FILE_ATTRIBUTES) {
+        printf("[SKIP] fake_restic.exe not found next to the test: old restic test skipped.\n");
+        return;
+    }
+    EXPECT_TRUE(make_unique_dir(L"restic_dll_old", dir, MAX_PATH), "Create plugin directory (old restic)");
+    swprintf_s(ini, MAX_PATH, L"%ls\\TCResticBrowser.ini", dir);
+    swprintf_s(log_file, MAX_PATH, L"%ls\\old.log", dir);
+    DeleteFileW(log_file); /* Left by a run that stopped early: the directory is named after the process ID */
+    char fake_u8[MAX_PATH * 3] = {0}, log_u8[MAX_PATH * 3] = {0};
+    WideCharToMultiByte(CP_UTF8, 0, fake, -1, fake_u8, sizeof(fake_u8), NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, log_file, -1, log_u8, sizeof(log_u8), NULL, NULL);
+    static char ini_text[2048];
+    int n = snprintf(ini_text, sizeof(ini_text),
+                     "[Settings]\r\nResticPath=%s\r\nConnectionLog=off\r\n[Logging]\r\nLogPath=%s\r\n"
+                     "[Repositories]\r\nOld=C:\\no_such_restic_repo_999\r\n",
+                     fake_u8, log_u8);
+    EXPECT_TRUE(n > 0 && (size_t)n < sizeof(ini_text) && write_file(ini, ini_text), "Write INI (old restic)");
+
+    Plugin p;
+    EXPECT_TRUE(load_plugin_copy(dir, &p), "Load plugin copy (old restic)");
+    EXPECT_TRUE(p.init_w(45, (void*)e2e_progress_proc, (void*)e2e_log_proc, (void*)e2e_request_proc) == 0,
+                "Register Total Commander callbacks (old restic)");
+    SetEnvironmentVariableW(L"FAKE_RESTIC_VERSION", L"0.16.4");
+    SetEnvironmentVariableW(L"FAKE_RESTIC_VERSION_TEXT", L"1");
+    g_e2e_pwd_mode    = 1;
+    g_e2e_pwd_prompts = 0;
+    g_e2e_msg_dialogs = 0;
+    WIN32_FIND_DATAW fd;
+    for (int i = 0; i < 2; ++i) {
+        EXPECT_TRUE(p.find_first_w(L"\\Old\\snapshots", &fd) == INVALID_HANDLE_VALUE, "An old restic is not used");
+    }
+    SetEnvironmentVariableW(L"FAKE_RESTIC_VERSION_TEXT", NULL);
+    EXPECT_TRUE(g_e2e_pwd_prompts == 0 && g_e2e_msg_dialogs == 2 && wcsstr(g_e2e_last_msg, L"older than restic 0.17.0") &&
+                    wcsstr(g_e2e_last_msg, L"0.17.1 or newer"),
+                "... and each attempt says why, before any password prompt");
+
+    /* Another restic.exe (another file: checked anew) that answers in JSON, but is 0.17.0 */
+    WCHAR fake2[MAX_PATH];
+    swprintf_s(fake2, MAX_PATH, L"%ls\\restic-0.17.0.exe", dir);
+    char fake2_u8[MAX_PATH * 3] = {0};
+    WideCharToMultiByte(CP_UTF8, 0, fake2, -1, fake2_u8, sizeof(fake2_u8), NULL, NULL);
+    n = snprintf(ini_text, sizeof(ini_text),
+                 "[Settings]\r\nResticPath=%s\r\nConnectionLog=off\r\n[Logging]\r\nLogPath=%s\r\n"
+                 "[Repositories]\r\nOld=C:\\no_such_restic_repo_999\r\n",
+                 fake2_u8, log_u8);
+    EXPECT_TRUE(CopyFileW(fake, fake2, FALSE) && n > 0 && (size_t)n < sizeof(ini_text) && write_file(ini, ini_text),
+                "Point ResticPath at a restic 0.17.0");
+    SetEnvironmentVariableW(L"FAKE_RESTIC_VERSION", L"0.17.0");
+    g_e2e_msg_dialogs = 0;
+    EXPECT_TRUE(p.find_first_w(L"\\Old\\snapshots", &fd) == INVALID_HANDLE_VALUE && g_e2e_msg_dialogs == 1 &&
+                    wcsstr(g_e2e_last_msg, L"is restic 0.17.0") && g_e2e_pwd_prompts == 0,
+                "restic 0.17.0 is refused too, naming its version");
+    SetEnvironmentVariableW(L"FAKE_RESTIC_VERSION", NULL);
+    char* log_text = read_text_file(log_file);
+    int version_runs = 0;
+    for (const char* q = log_text; q && (q = strstr(q, " --json version")) != NULL; ++q) version_runs++;
+    free(log_text);
+    EXPECT_TRUE(version_runs == 2, "restic is asked for its version once per file");
+
+    unload_plugin_copy(&p, dir);
+    delete_tree(dir);
+}
+
+/* Lists \<alias>\snapshots; TRUE when it worked and has a latest folder */
+static BOOL lists_snapshots(const Plugin* p, const WCHAR* alias) {
+    WCHAR path[MAX_PATH];
+    static WCHAR names[2048];
+    swprintf_s(path, MAX_PATH, L"\\%ls\\snapshots", alias);
+    return list_names(p, path, names, _countof(names)) && wcsstr(names, L"latest") != NULL;
+}
+
+/*
+ * Scenario E: [Repository: <alias>] settings. A password from PasswordFile or PasswordCommand opens
+ * the repository without a prompt, also from a .cmd in a folder with spaces; both together are
+ * passed to restic, which refuses them; a wrong one is reported, not asked for again; an unusable
+ * setting stops the repository before restic runs. AWS_ACCESS_KEY_ID makes the plugin ask for the
+ * S3 secret key (restic ignores it for a local repository), before the password if that is asked
+ * for too, and caches it like a password.
+ */
+static void test_live_repository_settings(void) {
+    if (GetFileAttributesW(L"tmp\\restic.exe") == INVALID_FILE_ATTRIBUTES ||
+        GetFileAttributesW(L"tmp\\test_fixture\\repo\\config") == INVALID_FILE_ATTRIBUTES) {
+        printf("[SKIP] tmp\\restic.exe or tmp\\test_fixture\\repo not found: repository settings E2E test skipped.\n");
+        return;
+    }
+    WCHAR restic_abs[MAX_PATH] = {0}, repo_abs[MAX_PATH] = {0};
+    GetFullPathNameW(L"tmp\\restic.exe", MAX_PATH, restic_abs, NULL);
+    GetFullPathNameW(L"tmp\\test_fixture\\repo", MAX_PATH, repo_abs, NULL);
+
+    WCHAR dir[MAX_PATH], tools[MAX_PATH], path[MAX_PATH], ini[MAX_PATH];
+    EXPECT_TRUE(make_unique_dir(L"restic_dll_settings", dir, MAX_PATH), "Create plugin directory");
+    swprintf_s(tools, MAX_PATH, L"%ls\\tools dir", dir);
+    EXPECT_TRUE(CreateDirectoryW(tools, NULL) || GetLastError() == ERROR_ALREADY_EXISTS, "Create a folder with spaces");
+    char fixture_pwd_u8[128] = {0};
+    WideCharToMultiByte(CP_UTF8, 0, FIXTURE_PASSWORD, -1, fixture_pwd_u8, sizeof(fixture_pwd_u8), NULL, NULL);
+    swprintf_s(path, MAX_PATH, L"%ls\\pw.txt", dir);
+    EXPECT_TRUE(write_file(path, fixture_pwd_u8), "Write the password file");
+    swprintf_s(path, MAX_PATH, L"%ls\\wrong.txt", dir);
+    EXPECT_TRUE(write_file(path, "not the password\r\n"), "Write a wrong password file");
+    swprintf_s(path, MAX_PATH, L"%ls\\get pw.cmd", tools);
+    EXPECT_TRUE(write_file(path, "@type \"%~dp0..\\pw.txt\"\r\n"), "Write a password script in a folder with spaces");
+
+    char restic_u8[MAX_PATH * 3] = {0}, repo_u8[MAX_PATH * 3] = {0}, dir_u8[MAX_PATH * 3] = {0};
+    WideCharToMultiByte(CP_UTF8, 0, restic_abs, -1, restic_u8, sizeof(restic_u8), NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, repo_abs, -1, repo_u8, sizeof(repo_u8), NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, dir, -1, dir_u8, sizeof(dir_u8), NULL, NULL);
+    static char ini_text[8192]; /* Static: /analyze (C6262) caps a frame at 16 KB */
+    int ini_len = snprintf(
+        ini_text, sizeof(ini_text),
+        "[Settings]\r\nResticPath=%s\r\n"
+        "[Logging]\r\nLogPath=%s\\settings.log\r\n"
+        "[Repositories]\r\nFileRepo=%s\r\nCommandRepo=%s\r\nQuotedCommand=%s\r\nBothRepo=%s\r\nWrongFile=%s\r\n"
+        "BadSetting=%s\r\nS3Key=%s\r\nS3Typed=%s\r\nBadOption=%s\r\n"
+        "[Repository: FileRepo]\r\nPasswordFile=pw.txt\r\nlocal.connections=1\r\ns3.region=ignored-by-local\r\n"
+        "[Repository: BadOption]\r\nPasswordFile=pw.txt\r\nlocal.no-such-option=1\r\n"
+        "[Repository: CommandRepo]\r\nPasswordCommand=%s\\tools dir\\get pw.cmd\r\n"
+        "[Repository: QuotedCommand]\r\nPasswordCommand=\"%s\\tools dir\\get pw.cmd\" unused-argument\r\n"
+        "[Repository: BothRepo]\r\nPasswordFile=pw.txt\r\nPasswordCommand=%s\\tools dir\\get pw.cmd\r\n"
+        "[Repository: WrongFile]\r\nPasswordFile=wrong.txt\r\n"
+        "[Repository: BadSetting]\r\nPasswordFile=missing.txt\r\n"
+        "[Repository: S3Key]\r\nPasswordFile=pw.txt\r\nAWS_ACCESS_KEY_ID=AKIATESTKEY\r\nAWS_PROFILE=backup\r\n"
+        "[Repository: S3Typed]\r\nAWS_ACCESS_KEY_ID=AKIATESTKEY\r\n",
+        restic_u8, dir_u8, repo_u8, repo_u8, repo_u8, repo_u8, repo_u8, repo_u8, repo_u8, repo_u8, repo_u8, dir_u8,
+        dir_u8, dir_u8);
+    EXPECT_TRUE(ini_len > 0 && (size_t)ini_len < sizeof(ini_text), "Settings INI fits its buffer");
+    swprintf_s(ini, MAX_PATH, L"%ls\\TCResticBrowser.ini", dir);
+    EXPECT_TRUE(write_file(ini, ini_text), "Write settings INI");
+
+    Plugin p;
+    EXPECT_TRUE(load_plugin_copy(dir, &p), "Load plugin copy (settings)");
+    EXPECT_TRUE(p.init_w(44, (void*)e2e_progress_proc, (void*)e2e_log_proc, (void*)e2e_request_proc) == 0,
+                "Register Total Commander callbacks (settings)");
+
+    /* A prompt would be answered wrongly: none may come */
+    g_e2e_pwd_mode = 2;
+    static const WCHAR* const opened[] = {L"FileRepo", L"CommandRepo", L"QuotedCommand"};
+    for (size_t i = 0; i < _countof(opened); ++i) {
+        g_e2e_pwd_prompts = 0;
+        g_e2e_msg_dialogs = 0;
+        EXPECT_TRUE(lists_snapshots(&p, opened[i]) && g_e2e_pwd_prompts == 0 && g_e2e_msg_dialogs == 0,
+                    "PasswordFile / PasswordCommand: the repository opens without a prompt");
+        EXPECT_TRUE(lists_snapshots(&p, opened[i]) && g_e2e_pwd_prompts == 0, "... and again from the cache");
+    }
+
+    g_e2e_pwd_prompts = 0;
+    g_e2e_msg_dialogs = 0;
+    EXPECT_TRUE(!lists_snapshots(&p, L"BothRepo") && g_e2e_pwd_prompts == 0 && g_e2e_msg_dialogs == 1 &&
+                    wcsstr(g_e2e_last_msg, L"mutually exclusive") != NULL,
+                "PasswordFile and PasswordCommand together: restic's refusal shown, no prompt");
+    g_e2e_msg_dialogs = 0;
+    EXPECT_TRUE(!lists_snapshots(&p, L"WrongFile") && g_e2e_pwd_prompts == 0 && g_e2e_msg_dialogs == 1,
+                "A wrong password from a file is reported once and not asked for");
+    g_e2e_msg_dialogs = 0;
+    EXPECT_TRUE(!lists_snapshots(&p, L"BadSetting") && g_e2e_pwd_prompts == 0 && g_e2e_msg_dialogs == 1 &&
+                    wcsstr(g_e2e_last_msg, L"PasswordFile=missing.txt") != NULL,
+                "An unusable setting is shown before anything runs");
+    g_e2e_msg_dialogs = 0;
+    EXPECT_TRUE(!lists_snapshots(&p, L"BadOption") && g_e2e_pwd_prompts == 0 && g_e2e_msg_dialogs == 1 &&
+                    wcsstr(g_e2e_last_msg, L"is not known") != NULL,
+                "An option restic does not know: restic's refusal shown (FileRepo's local.connections worked)");
+
+    /* AWS_ACCESS_KEY_ID: the secret key is asked for once, then cached */
+    g_e2e_pwd_mode    = 1;
+    g_e2e_pwd_prompts = 0;
+    g_e2e_msg_dialogs = 0;
+    EXPECT_TRUE(lists_snapshots(&p, L"S3Key") && g_e2e_pwd_prompts == 1 &&
+                    wcscmp(g_e2e_last_title, L"S3Key - S3 secret access key") == 0 &&
+                    wcsstr(g_e2e_last_prompt, L"AKIATESTKEY") != NULL,
+                "AWS_ACCESS_KEY_ID: the S3 secret key is asked for, naming the repository and the key");
+    EXPECT_TRUE(lists_snapshots(&p, L"S3Key") && g_e2e_pwd_prompts == 1, "The secret key is cached");
+    g_e2e_pwd_prompts = 0;
+    EXPECT_TRUE(lists_snapshots(&p, L"S3Typed") && g_e2e_pwd_prompts == 2 &&
+                    wcscmp(g_e2e_last_title, L"S3Typed - Restic repository password") == 0 && g_e2e_msg_dialogs == 0,
+                "With a typed password too: the secret key first, then the password");
+    static WCHAR root[1024];
+    static const WCHAR forget_two[] = L"\U0001F5D1 Forget 2 Passwords|";
+    EXPECT_TRUE(list_names(&p, L"\\", root, _countof(root)) && wcsncmp(root, forget_two, wcslen(forget_two)) == 0,
+                "The forget entry counts the repositories with something typed in, not those using a file or command");
+
+    WCHAR log_file[MAX_PATH];
+    swprintf_s(log_file, MAX_PATH, L"%ls\\settings.log", dir);
+    char* log_text = read_text_file(log_file);
+    BOOL logged = log_text && strstr(log_text, "RESTIC_PASSWORD_FILE: ") && strstr(log_text, "RESTIC_PASSWORD_COMMAND: ") &&
+                  strstr(log_text, "AWS_ACCESS_KEY_ID=AKIATESTKEY") && strstr(log_text, "AWS_SECRET_ACCESS_KEY: ") &&
+                  strstr(log_text, " -o \"local.connections=1\" ") && strstr(log_text, "S3 secret key prompt for 'S3Key': ");
+    BOOL leaked = log_text && strstr(log_text, fixture_pwd_u8) != NULL;
+    free(log_text);
+    EXPECT_TRUE(logged, "The log shows where restic gets the password and the S3 settings");
+    EXPECT_TRUE(!leaked, "Neither the password nor the secret key appears in the log");
+
+    unload_plugin_copy(&p, dir);
+    delete_tree(dir);
+}
+
+/* After a failed check of a live scenario: the last message shown and the end of the plugin's log */
+static void print_failure_context(const WCHAR* log_file) {
+    printf("       prompts %d, dialogs %d, last message: %ls\n", g_e2e_pwd_prompts, g_e2e_msg_dialogs, g_e2e_last_msg);
+    char* text = read_text_file(log_file);
+    if (!text) return;
+    size_t len = strlen(text);
+    printf("       --- end of %ls ---\n%s\n       ---\n", log_file, text + (len > 6000 ? len - 6000 : 0));
+    free(text);
+}
+
+/* Runs `cmd` hidden with the test's environment; TRUE when it exits with 0 within `ms` */
+static BOOL run_and_wait(WCHAR* cmd, DWORD ms) {
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    if (!CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) return FALSE;
+    DWORD code = 1;
+    BOOL done  = WaitForSingleObject(pi.hProcess, ms) == WAIT_OBJECT_0 && GetExitCodeProcess(pi.hProcess, &code);
+    if (!done) TerminateProcess(pi.hProcess, 1);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return done && code == 0;
+}
+
+/* Number of running processes whose executable is named `exe_name` */
+static int count_processes(const WCHAR* exe_name) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return -1;
+    PROCESSENTRY32W pe;
+    pe.dwSize = sizeof(pe);
+    int n = 0;
+    for (BOOL more = Process32FirstW(snap, &pe); more; more = Process32NextW(snap, &pe)) {
+        if (_wcsicmp(pe.szExeFile, exe_name) == 0) n++;
+    }
+    CloseHandle(snap);
+    return n;
+}
+
+/* Waits up to `ms` for the number of `exe_name` processes to drop to `count`; TRUE when it did */
+static BOOL processes_back_to(const WCHAR* exe_name, int count, DWORD ms) {
+    for (DWORD waited = 0;; waited += 250) {
+        int n = count_processes(exe_name);
+        if (n >= 0 && n <= count) return TRUE;
+        if (waited >= ms) return FALSE;
+        Sleep(250);
+    }
+}
+
+/*
+ * Scenario F: an rclone: repository (rclone's on-the-fly local backend over the fixture repository,
+ * tmp\rclone.exe named by rclone.program as a plain path) lists, opens a snapshot, copies a file,
+ * reports a wrong password as wrong (exit code 12 through rclone) and can be cancelled; no rclone
+ * process outlives the restic that started it.
+ */
+static void test_live_rclone_repository(void) {
+    if (GetFileAttributesW(L"tmp\\restic.exe") == INVALID_FILE_ATTRIBUTES ||
+        GetFileAttributesW(L"tmp\\rclone.exe") == INVALID_FILE_ATTRIBUTES ||
+        GetFileAttributesW(L"tmp\\test_fixture\\repo\\config") == INVALID_FILE_ATTRIBUTES) {
+        printf("[SKIP] tmp\\restic.exe, tmp\\rclone.exe or tmp\\test_fixture\\repo not found: rclone E2E test skipped.\n");
+        return;
+    }
+    WCHAR restic_abs[MAX_PATH] = {0}, rclone_abs[MAX_PATH] = {0}, repo_abs[MAX_PATH] = {0};
+    GetFullPathNameW(L"tmp\\restic.exe", MAX_PATH, restic_abs, NULL);
+    GetFullPathNameW(L"tmp\\rclone.exe", MAX_PATH, rclone_abs, NULL);
+    GetFullPathNameW(L"tmp\\test_fixture\\repo", MAX_PATH, repo_abs, NULL);
+    WCHAR dir[MAX_PATH], ini[MAX_PATH];
+    EXPECT_TRUE(make_unique_dir(L"restic_dll_rclone", dir, MAX_PATH), "Create plugin directory (rclone)");
+    swprintf_s(ini, MAX_PATH, L"%ls\\TCResticBrowser.ini", dir);
+
+    char restic_u8[MAX_PATH * 3] = {0}, rclone_u8[MAX_PATH * 3] = {0}, repo_u8[MAX_PATH * 3] = {0},
+         dir_u8[MAX_PATH * 3] = {0};
+    WideCharToMultiByte(CP_UTF8, 0, restic_abs, -1, restic_u8, sizeof(restic_u8), NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, rclone_abs, -1, rclone_u8, sizeof(rclone_u8), NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, repo_abs, -1, repo_u8, sizeof(repo_u8), NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, dir, -1, dir_u8, sizeof(dir_u8), NULL, NULL);
+    static char ini_text[8192]; /* Static: /analyze (C6262) caps a frame at 16 KB */
+    int n = snprintf(ini_text, sizeof(ini_text),
+                     "[Settings]\r\nResticPath=%s\r\n[Logging]\r\nLogPath=%s\\rclone.log\r\n"
+                     "[Repositories]\r\nRclone=rclone::local:%s\r\nRcloneWrong=rclone::local:%s\r\n"
+                     "RcloneCancel=rclone::local:%s\r\n"
+                     "[Repository: Rclone]\r\nrclone.program=%s\r\n"
+                     "[Repository: RcloneWrong]\r\nrclone.program=%s\r\n"
+                     "[Repository: RcloneCancel]\r\nrclone.program=\"%s\"\r\nrclone.args=serve restic --stdio\r\n",
+                     restic_u8, dir_u8, repo_u8, repo_u8, repo_u8, rclone_u8, rclone_u8, rclone_u8);
+    EXPECT_TRUE(n > 0 && (size_t)n < sizeof(ini_text) && write_file(ini, ini_text), "Write INI (rclone)");
+
+    int rclones_before = count_processes(L"rclone.exe");
+    Plugin p;
+    EXPECT_TRUE(load_plugin_copy(dir, &p), "Load plugin copy (rclone)");
+    EXPECT_TRUE(p.init_w(46, (void*)e2e_progress_proc, (void*)e2e_log_proc, (void*)e2e_request_proc) == 0,
+                "Register Total Commander callbacks (rclone)");
+
+    g_e2e_pwd_mode    = 1;
+    g_e2e_pwd_prompts = 0;
+    g_e2e_msg_dialogs = 0;
+    WCHAR log_file[MAX_PATH];
+    swprintf_s(log_file, MAX_PATH, L"%ls\\rclone.log", dir);
+    BOOL listed = lists_snapshots(&p, L"Rclone") && g_e2e_pwd_prompts == 1 && g_e2e_msg_dialogs == 0;
+    if (!listed) print_failure_context(log_file);
+    EXPECT_TRUE(listed, "The snapshots of an rclone: repository are listed");
+    static WCHAR data_path[MAX_PATH * 2];
+    EXPECT_TRUE(descend_to_fixture_data(&p, L"\\Rclone\\snapshots\\latest", 0, data_path, _countof(data_path)),
+                "... and a snapshot is browsed down to the fixture's data folder");
+    WCHAR remote[MAX_PATH * 3], local[MAX_PATH];
+    swprintf_s(remote, _countof(remote), L"%ls\\readme.txt", data_path);
+    swprintf_s(local, MAX_PATH, L"%ls\\readme.txt", dir);
+    DeleteFileW(local); /* Left by an earlier run that stopped early */
+    RemoteInfo ri = {5, 0, {0x802D2000, 0x01D5EF01}, FILE_ATTRIBUTE_READONLY};
+    EXPECT_TRUE(p.get_file_w(remote, local, 0, &ri) == FS_FILE_OK && GetFileAttributesW(local) != INVALID_FILE_ATTRIBUTES &&
+                    g_e2e_msg_dialogs == 0,
+                "A file is copied out of it");
+
+    g_e2e_pwd_mode    = 2; /* Always wrong */
+    g_e2e_pwd_prompts = 0;
+    g_e2e_msg_dialogs = 0;
+    EXPECT_TRUE(!lists_snapshots(&p, L"RcloneWrong") && g_e2e_pwd_prompts == 3 && g_e2e_msg_dialogs == 1,
+                "A wrong password is recognised as one through rclone (asked three times)");
+
+    g_e2e_pwd_mode    = 1;
+    g_e2e_force_abort = TRUE;
+    EXPECT_TRUE(!lists_snapshots(&p, L"RcloneCancel"), "ESC cancels a listing of an rclone: repository");
+    g_e2e_force_abort = FALSE;
+    EXPECT_TRUE(lists_snapshots(&p, L"RcloneCancel"),
+                "rclone.program quoted, with rclone.args of its own, works too");
+
+    unload_plugin_copy(&p, dir);
+    EXPECT_TRUE(rclones_before >= 0 && processes_back_to(L"rclone.exe", rclones_before, 30000),
+                "No rclone process outlives the restic that started it");
+    delete_tree(dir);
+}
+
+/*
+ * Scenario G: an S3 repository on a local S3 server (rclone serve s3, keys AKIATEST / goodsecret),
+ * with AWS_ACCESS_KEY_ID in its section. A wrong secret key, which restic would retry for 15
+ * minutes, is refused at once and asked for again, then the right one opens the repository and is
+ * cached; three wrong ones end with the storage's reason in one dialog.
+ */
+static void test_s3_repository_with(const WCHAR* dir, const char* target) {
+    WCHAR ini[MAX_PATH], log_file[MAX_PATH], restic_abs[MAX_PATH] = {0};
+    GetFullPathNameW(L"tmp\\restic.exe", MAX_PATH, restic_abs, NULL);
+    swprintf_s(ini, MAX_PATH, L"%ls\\TCResticBrowser.ini", dir);
+    swprintf_s(log_file, MAX_PATH, L"%ls\\s3.log", dir);
+    char restic_u8[MAX_PATH * 3] = {0}, log_u8[MAX_PATH * 3] = {0};
+    WideCharToMultiByte(CP_UTF8, 0, restic_abs, -1, restic_u8, sizeof(restic_u8), NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, log_file, -1, log_u8, sizeof(log_u8), NULL, NULL);
+    static char ini_text[4096];
+    int n = snprintf(ini_text, sizeof(ini_text),
+                     "[Settings]\r\nResticPath=%s\r\n[Logging]\r\nLogPath=%s\r\n"
+                     "[Repositories]\r\nS3=%s\r\nS3Wrong=%s\r\n"
+                     "[Repository: S3]\r\nAWS_ACCESS_KEY_ID=AKIATEST\r\n"
+                     "[Repository: S3Wrong]\r\nAWS_ACCESS_KEY_ID=AKIATEST\r\n",
+                     restic_u8, log_u8, target, target);
+    EXPECT_TRUE(n > 0 && (size_t)n < sizeof(ini_text) && write_file(ini, ini_text), "Write INI (S3)");
+
+    Plugin p;
+    EXPECT_TRUE(load_plugin_copy(dir, &p), "Load plugin copy (S3)");
+    EXPECT_TRUE(p.init_w(47, (void*)e2e_progress_proc, (void*)e2e_log_proc, (void*)e2e_request_proc) == 0,
+                "Register Total Commander callbacks (S3)");
+    g_e2e_pwd_mode      = 1; /* The repository password is the fixture's */
+    g_e2e_pwd_prompts   = 0;
+    g_e2e_msg_dialogs   = 0;
+    g_e2e_s3_prompts    = 0;
+    g_e2e_s3_answers[0] = L"wrongsecret";
+    g_e2e_s3_answers[1] = L"goodsecret";
+    ULONGLONG t0 = GetTickCount64();
+    BOOL listed  = lists_snapshots(&p, L"S3") && g_e2e_s3_prompts == 2 && g_e2e_pwd_prompts == 3 && g_e2e_msg_dialogs == 0;
+    if (!listed) print_failure_context(log_file);
+    EXPECT_TRUE(listed && GetTickCount64() - t0 < 120000,
+                "A refused S3 secret key is asked for again at once; the right one opens the repository");
+    EXPECT_TRUE(conn_log_count(L"[S3] S3 secret key refused by the storage") == 1, "... and the log says why");
+    EXPECT_TRUE(lists_snapshots(&p, L"S3") && g_e2e_pwd_prompts == 3, "The accepted secret key is cached");
+
+    g_e2e_pwd_prompts   = 0;
+    g_e2e_msg_dialogs   = 0;
+    g_e2e_s3_prompts    = 0;
+    g_e2e_s3_answers[1] = L"wrongsecret";
+    g_e2e_s3_answers[2] = L"wrongsecret";
+    t0                  = GetTickCount64();
+    BOOL refused = !lists_snapshots(&p, L"S3Wrong") && g_e2e_s3_prompts == 3 && g_e2e_pwd_prompts == 4 &&
+                   g_e2e_msg_dialogs == 1 && wcsstr(g_e2e_last_msg, L"refused the credentials") != NULL;
+    if (!refused) print_failure_context(log_file);
+    EXPECT_TRUE(refused && GetTickCount64() - t0 < 120000,
+                "Three refused secret keys end with the storage's reason, in minutes rather than a quarter of an hour");
+    unload_plugin_copy(&p, dir);
+}
+
+static void test_live_s3_repository(void) {
+    if (GetFileAttributesW(L"tmp\\restic.exe") == INVALID_FILE_ATTRIBUTES ||
+        GetFileAttributesW(L"tmp\\rclone.exe") == INVALID_FILE_ATTRIBUTES ||
+        GetFileAttributesW(L"tmp\\test_fixture\\data") == INVALID_FILE_ATTRIBUTES) {
+        printf("[SKIP] tmp\\restic.exe, tmp\\rclone.exe or tmp\\test_fixture\\data not found: S3 E2E test skipped.\n");
+        return;
+    }
+    WCHAR dir[MAX_PATH], data[MAX_PATH], bucket[MAX_PATH], serve_log[MAX_PATH];
+    EXPECT_TRUE(make_unique_dir(L"restic_dll_s3", dir, MAX_PATH), "Create plugin directory (S3)");
+    delete_tree(dir); /* Whatever a run with the same process ID left */
+    EXPECT_TRUE(CreateDirectoryW(dir, NULL), "Create a clean plugin directory (S3)");
+    swprintf_s(data, MAX_PATH, L"%ls\\s3data", dir);
+    swprintf_s(bucket, MAX_PATH, L"%ls\\bucket", data);
+    swprintf_s(serve_log, MAX_PATH, L"%ls\\serve.log", dir);
+    EXPECT_TRUE(CreateDirectoryW(data, NULL) && CreateDirectoryW(bucket, NULL), "Create the S3 server's bucket");
+
+    /* rclone serve s3 on a port of its own, its output in serve.log */
+    unsigned port = 39000u + (unsigned)(GetCurrentProcessId() % 900u);
+    SECURITY_ATTRIBUTES sa = {sizeof(sa), NULL, TRUE};
+    HANDLE out = CreateFileW(serve_log, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, CREATE_ALWAYS, 0, NULL);
+    WCHAR rclone_abs[MAX_PATH] = {0};
+    GetFullPathNameW(L"tmp\\rclone.exe", MAX_PATH, rclone_abs, NULL);
+    static WCHAR cmd[4 * MAX_PATH];
+    swprintf_s(cmd, _countof(cmd), L"\"%ls\" serve s3 --auth-key AKIATEST,goodsecret --addr 127.0.0.1:%u \"%ls\"",
+               rclone_abs, port, data);
+    STARTUPINFOW si;
+    PROCESS_INFORMATION server;
+    memset(&si, 0, sizeof(si));
+    memset(&server, 0, sizeof(server));
+    si.cb         = sizeof(si);
+    si.dwFlags    = STARTF_USESTDHANDLES;
+    si.hStdOutput = out;
+    si.hStdError  = out;
+    BOOL started  = out != INVALID_HANDLE_VALUE &&
+                   CreateProcessW(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &server);
+    if (out != INVALID_HANDLE_VALUE) CloseHandle(out);
+    EXPECT_TRUE(started, "Start rclone serve s3");
+    BOOL ready = FALSE;
+    for (int i = 0; i < 120 && !ready; ++i) {
+        Sleep(250);
+        char* text = read_text_file(serve_log);
+        ready      = text && strstr(text, "Starting s3 server") != NULL;
+        free(text);
+    }
+
+    /* A repository there with one snapshot, made by restic itself */
+    static char target[128];
+    snprintf(target, sizeof(target), "s3:http://127.0.0.1:%u/bucket/repo", port);
+    WCHAR target_w[128], restic_abs[MAX_PATH] = {0}, data_abs[MAX_PATH] = {0};
+    MultiByteToWideChar(CP_UTF8, 0, target, -1, target_w, (int)_countof(target_w));
+    GetFullPathNameW(L"tmp\\restic.exe", MAX_PATH, restic_abs, NULL);
+    GetFullPathNameW(L"tmp\\test_fixture\\data", MAX_PATH, data_abs, NULL);
+    SetEnvironmentVariableW(L"AWS_ACCESS_KEY_ID", L"AKIATEST");
+    SetEnvironmentVariableW(L"AWS_SECRET_ACCESS_KEY", L"goodsecret");
+    SetEnvironmentVariableW(L"RESTIC_PASSWORD", FIXTURE_PASSWORD);
+    SetEnvironmentVariableW(L"RESTIC_REPOSITORY", target_w);
+    swprintf_s(cmd, _countof(cmd), L"\"%ls\" init", restic_abs);
+    BOOL made = ready && run_and_wait(cmd, 120000);
+    swprintf_s(cmd, _countof(cmd), L"\"%ls\" backup \"%ls\"", restic_abs, data_abs);
+    made = made && run_and_wait(cmd, 300000);
+    static const WCHAR* const vars[] = {L"AWS_ACCESS_KEY_ID", L"AWS_SECRET_ACCESS_KEY", L"RESTIC_PASSWORD", L"RESTIC_REPOSITORY"};
+    for (size_t i = 0; i < _countof(vars); ++i) SetEnvironmentVariableW(vars[i], NULL);
+
+    if (made) test_s3_repository_with(dir, target);
+    if (started) {
+        TerminateProcess(server.hProcess, 0);
+        WaitForSingleObject(server.hProcess, 10000);
+        CloseHandle(server.hThread);
+        CloseHandle(server.hProcess);
+    }
+    memset((void*)g_e2e_s3_answers, 0, sizeof(g_e2e_s3_answers));
+    EXPECT_TRUE(made, "rclone serve s3 started and restic made a repository there");
+    delete_tree(dir);
+}
+
+/*
  * Scenario D: paths with spaces, written the ways a user would write them in TCResticBrowser.ini -
  * ResticPath and repository paths with spaces, unquoted and quoted, with and without a trailing
  * backslash. restic.exe and the repository live in folders with spaces, like "C:\Program Files".
@@ -1930,6 +2419,10 @@ int main(void) {
     test_user_ini_overrides_plugin_ini();
     test_live_end_to_end_navigation();
     test_live_paths_with_spaces();
+    test_live_repository_settings();
+    test_old_restic_refused();
+    test_live_rclone_repository();
+    test_live_s3_repository();
 
     RemoveDirectoryW(g_user_dir);
     RemoveDirectoryW(appdata_dir);

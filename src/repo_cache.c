@@ -29,7 +29,6 @@
    snapshot listing when no new entry arrived for so long, a snapshot list re-read in total */
 #define BACKGROUND_TIMEOUT_MS (30u * 60u * 1000u)
 #define LOAD_RETRY_MS (60u * 1000u)   /* A listing that failed is not tried again sooner */
-#define SESSION_PASSWORD_CHARS 512    /* main.c SESSION_MAX_PASSWORD */
 
 typedef enum {
     INDEX_LOADING = 0,
@@ -68,10 +67,11 @@ struct RepoEntry {
 typedef struct {
     WCHAR alias[MAX_PATH];
     WCHAR target[CONFIG_MAX_PATH];
+    ResticRepoEntry settings; /* The repository's [Repository: <alias>] settings */
     WCHAR restic_exe[CONFIG_MAX_PATH];
     char snapshot_id[SNAPSHOT_TREE_ID_CHARS + 1];
     ULONGLONG generation;
-    RepoPasswordSource password_source;
+    RepoSecretSource secret_source;
 } LoadJob;
 
 static SRWLOCK    g_CacheLock       = SRWLOCK_INIT;
@@ -354,7 +354,7 @@ static VOID CALLBACK load_index_worker(PTP_CALLBACK_INSTANCE instance, PVOID con
         release_worker_module(instance);
         return;
     }
-    WCHAR password[SESSION_PASSWORD_CHARS];
+    RepoSecrets secrets;
     WCHAR err[512] = {0};
     ULONGLONG started = GetTickCount64();
 
@@ -367,14 +367,14 @@ static VOID CALLBACK load_index_worker(PTP_CALLBACK_INSTANCE instance, PVOID con
     ReleaseSRWLockShared(&g_CacheLock);
 
     BOOL crowded = FALSE;
-    if (job->password_source(job->alias, password, _countof(password)) &&
-        (index = snapshot_index_new(limit)) != NULL) {
+    if (job->secret_source(job->alias, &secrets) && (index = snapshot_index_new(limit)) != NULL) {
         LoadCancel cancel = {job->generation, job->alias, job, index, started, started, 0, started, 0, FALSE};
+        ResticRepo access = restic_repo_of(&job->settings, secrets.password, secrets.aws_secret_access_key);
         ResticExecOptions opts;
         memset(&opts, 0, sizeof(opts));
         opts.cancel_proc = load_cancelled;
         opts.cancel_ctx  = &cancel;
-        res = restic_list_snapshot_index(job->restic_exe, job->target, password, job->snapshot_id, &opts, index,
+        res = restic_list_snapshot_index(job->restic_exe, &access, job->snapshot_id, &opts, index,
                                          &index_status, err, _countof(err));
         AcquireSRWLockExclusive(&g_CacheLock);
         g_LoadingBytes -= cancel.accounted; /* From now on counted as kept, or not at all */
@@ -386,7 +386,7 @@ static VOID CALLBACK load_index_worker(PTP_CALLBACK_INSTANCE instance, PVOID con
             state = INDEX_TOO_LARGE;
         }
     }
-    SecureZeroMemory(password, sizeof(password));
+    SecureZeroMemory(&secrets, sizeof(secrets));
 
     unsigned entries = index ? (unsigned)snapshot_index_entry_count(index) : 0;
     unsigned kib     = index ? (unsigned)(snapshot_index_memory(index) / 1024) : 0;
@@ -432,16 +432,17 @@ static VOID CALLBACK load_index_worker(PTP_CALLBACK_INSTANCE instance, PVOID con
 }
 
 void repo_cache_load_index(
-    const WCHAR* alias,
-    const WCHAR* target,
+    const ResticRepoEntry* repo,
     const WCHAR* restic_exe,
     const char* snapshot_id,
-    RepoPasswordSource password_source
+    RepoSecretSource secret_source
 ) {
-    if (!alias || !target || !restic_exe || !snapshot_id || !password_source ||
+    if (!repo || !restic_exe || !snapshot_id || !secret_source ||
         strlen(snapshot_id) > SNAPSHOT_TREE_ID_CHARS || wcslen(restic_exe) >= CONFIG_MAX_PATH) {
         return;
     }
+    const WCHAR* alias  = repo->alias;
+    const WCHAR* target = repo->target;
     LoadJob* job = (LoadJob*)calloc(1, sizeof(LoadJob));
     if (!job) return;
 
@@ -467,10 +468,11 @@ void repo_cache_load_index(
             InterlockedIncrement(&g_LoadsRunning);
             wcscpy_s(job->alias, MAX_PATH, r->alias);
             wcscpy_s(job->target, CONFIG_MAX_PATH, r->target);
+            job->settings = *repo;
             wcscpy_s(job->restic_exe, CONFIG_MAX_PATH, restic_exe);
             strcpy_s(job->snapshot_id, sizeof(job->snapshot_id), snapshot_id);
-            job->generation      = g_CacheGeneration;
-            job->password_source = password_source;
+            job->generation    = g_CacheGeneration;
+            job->secret_source = secret_source;
         }
     }
     ReleaseSRWLockExclusive(&g_CacheLock);
@@ -500,10 +502,11 @@ void repo_cache_load_index(
 typedef struct {
     WCHAR alias[MAX_PATH];
     WCHAR target[CONFIG_MAX_PATH];
+    ResticRepoEntry settings; /* The repository's [Repository: <alias>] settings */
     WCHAR restic_exe[CONFIG_MAX_PATH];
     char time_format[SNAPSHOT_TREE_TIME_FORMAT_MAX + 1];
     ULONGLONG generation;
-    RepoPasswordSource password_source;
+    RepoSecretSource secret_source;
 } RefreshJob;
 
 static VOID CALLBACK refresh_tree_worker(PTP_CALLBACK_INSTANCE instance, PVOID context) {
@@ -512,23 +515,24 @@ static VOID CALLBACK refresh_tree_worker(PTP_CALLBACK_INSTANCE instance, PVOID c
         release_worker_module(instance);
         return;
     }
-    WCHAR password[SESSION_PASSWORD_CHARS];
+    RepoSecrets secrets;
     WCHAR err[512] = {0};
     SnapshotTree* tree = NULL;
     ResticResult res = RESTIC_ERR_INVALID_ARG;
     ULONGLONG started = GetTickCount64();
 
-    if (job->password_source(job->alias, password, _countof(password))) {
+    if (job->secret_source(job->alias, &secrets)) {
         LoadCancel cancel = {job->generation, job->alias, NULL, NULL, started, started, 0, started, 0, FALSE};
+        ResticRepo access = restic_repo_of(&job->settings, secrets.password, secrets.aws_secret_access_key);
         ResticExecOptions opts;
         memset(&opts, 0, sizeof(opts));
         opts.timeout_ms  = BACKGROUND_TIMEOUT_MS;
         opts.cancel_proc = load_cancelled;
         opts.cancel_ctx  = &cancel;
-        res = restic_list_snapshots(job->restic_exe, job->target, password, job->time_format, &opts, &tree, err,
+        res = restic_list_snapshots(job->restic_exe, &access, job->time_format, &opts, &tree, err,
                                     _countof(err));
     }
-    SecureZeroMemory(password, sizeof(password));
+    SecureZeroMemory(&secrets, sizeof(secrets));
     if (res == RESTIC_OK) {
         log_write(L"Snapshots of '%ls' re-read in the background: %u, %llu ms", job->alias,
                   (unsigned)snapshot_tree_snapshot_count(tree), GetTickCount64() - started);
@@ -551,17 +555,18 @@ static VOID CALLBACK refresh_tree_worker(PTP_CALLBACK_INSTANCE instance, PVOID c
 }
 
 void repo_cache_refresh_tree(
-    const WCHAR* alias,
-    const WCHAR* target,
+    const ResticRepoEntry* repo,
     const WCHAR* restic_exe,
     const char* time_format,
     ULONGLONG min_interval_ms,
-    RepoPasswordSource password_source
+    RepoSecretSource secret_source
 ) {
-    if (!alias || !target || !restic_exe || !time_format || !password_source ||
+    if (!repo || !restic_exe || !time_format || !secret_source ||
         wcslen(restic_exe) >= CONFIG_MAX_PATH || strlen(time_format) > SNAPSHOT_TREE_TIME_FORMAT_MAX) {
         return;
     }
+    const WCHAR* alias  = repo->alias;
+    const WCHAR* target = repo->target;
     RefreshJob* job = (RefreshJob*)calloc(1, sizeof(RefreshJob));
     if (!job) return;
 
@@ -575,10 +580,11 @@ void repo_cache_refresh_tree(
         r->refresh_tried_at = now;
         wcscpy_s(job->alias, MAX_PATH, r->alias);
         wcscpy_s(job->target, CONFIG_MAX_PATH, r->target);
+        job->settings = *repo;
         wcscpy_s(job->restic_exe, CONFIG_MAX_PATH, restic_exe);
         strcpy_s(job->time_format, sizeof(job->time_format), time_format);
-        job->generation      = g_CacheGeneration;
-        job->password_source = password_source;
+        job->generation    = g_CacheGeneration;
+        job->secret_source = secret_source;
     }
     ReleaseSRWLockExclusive(&g_CacheLock);
     if (!start) {

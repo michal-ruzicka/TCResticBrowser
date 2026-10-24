@@ -324,12 +324,20 @@ static WCHAR* read_ini_text(const WCHAR* path) {
 /*
  * Walks "key=value" lines of INI text in place (the text is modified). Lines starting with ';'
  * or '#' and lines without '=' are skipped; "[name]" lines change the current section. Key and
- * value are trimmed, the value is also unquoted. Section names compare case-insensitively.
+ * value are trimmed, the value is also unquoted (`unquoted` tells which quote was removed). Section
+ * names compare case-insensitively. A section name ends at the first ']', except that of a
+ * [Repository: <alias>] section, which ends at the last one when only whitespace follows it: an
+ * alias may contain ']'.
  */
 typedef struct {
     WCHAR*       cursor;
     const WCHAR* section;
+    WCHAR        unquoted; /* The quote character removed around the last value, or 0 */
 } IniReader;
+
+static BOOL starts_with_icase(const WCHAR* text, const WCHAR* prefix) {
+    return _wcsnicmp(text, prefix, wcslen(prefix)) == 0;
+}
 
 static BOOL ini_next_entry(IniReader* r, WCHAR** key, WCHAR** value) {
     while (r->cursor && *r->cursor != L'\0') {
@@ -343,6 +351,14 @@ static BOOL ini_next_entry(IniReader* r, WCHAR** key, WCHAR** value) {
 
         if (*line == L'[') {
             WCHAR* close = wcschr(line, L']');
+            WCHAR* name  = line + 1;
+            while (is_space_char(*name)) name++;
+            if (close && starts_with_icase(name, CONFIG_REPOSITORY_SECTION_PREFIX)) {
+                WCHAR* last = wcsrchr(line, L']'); /* Not NULL: the line has a ']' (close) */
+                const WCHAR* after = last ? last + 1 : L"x";
+                while (is_space_char(*after)) after++;
+                if (*after == L'\0') close = last;
+            }
             if (close) {
                 *close = L'\0';
                 trim_whitespace(line + 1);
@@ -357,6 +373,8 @@ static BOOL ini_next_entry(IniReader* r, WCHAR** key, WCHAR** value) {
         trim_whitespace(line);
         WCHAR* val = eq + 1;
         trim_whitespace(val);
+        size_t val_len = wcslen(val);
+        r->unquoted = (val_len >= 2 && (val[0] == L'"' || val[0] == L'\'') && val[val_len - 1] == val[0]) ? val[0] : 0;
         strip_quotes(val);
         trim_whitespace(val);
         *key   = line;
@@ -450,7 +468,7 @@ BOOL config_resolve_restic_path(
     BOOL configured = FALSE, too_long = FALSE;
     WCHAR* ini_text = (ini_path && file_exists(ini_path)) ? read_ini_text(ini_path) : NULL;
     if (ini_text) {
-        IniReader reader = {ini_text, NULL};
+        IniReader reader = {ini_text, NULL, 0};
         WCHAR *key = NULL, *value = NULL;
         while (ini_next_entry(&reader, &key, &value)) {
             if (ini_in_section(&reader, L"Settings") && _wcsicmp(key, L"ResticPath") == 0) {
@@ -582,6 +600,402 @@ static BOOL parse_no(const WCHAR* text) {
                     wcscmp(text, L"0") == 0);
 }
 
+/* ------------------------------------------------------------------------------------------ */
+/* [Repository: <alias>] sections                                                             */
+/* ------------------------------------------------------------------------------------------ */
+
+/* The settings of one [Repository: <alias>] section until they are applied to the repository */
+typedef struct {
+    ResticRepoEntry settings; /* alias and the settings; target unused */
+    unsigned seen;            /* Bits of the REPO_KEYS already read: the first occurrence wins */
+} RepoSettings;
+
+typedef enum { REPO_KEY_PASSWORD_FILE, REPO_KEY_PASSWORD_COMMAND, REPO_KEY_ENV_VALUE, REPO_KEY_ENV_FILE } RepoKeyKind;
+
+/* The keys of a [Repository: <alias>] section other than restic options, as restic names them */
+static const struct {
+    const WCHAR* key;
+    RepoKeyKind kind;
+} REPO_KEYS[] = {
+    {L"PasswordFile", REPO_KEY_PASSWORD_FILE},
+    {L"PasswordCommand", REPO_KEY_PASSWORD_COMMAND},
+    {L"AWS_ACCESS_KEY_ID", REPO_KEY_ENV_VALUE},
+    {L"AWS_DEFAULT_REGION", REPO_KEY_ENV_VALUE},
+    {L"AWS_PROFILE", REPO_KEY_ENV_VALUE},
+    {L"AWS_SHARED_CREDENTIALS_FILE", REPO_KEY_ENV_FILE},
+    {L"RESTIC_AWS_ASSUME_ROLE_ARN", REPO_KEY_ENV_VALUE},
+    {L"RESTIC_AWS_ASSUME_ROLE_SESSION_NAME", REPO_KEY_ENV_VALUE},
+    {L"RESTIC_AWS_ASSUME_ROLE_EXTERNAL_ID", REPO_KEY_ENV_VALUE},
+    {L"RESTIC_AWS_ASSUME_ROLE_POLICY", REPO_KEY_ENV_VALUE},
+    {L"RESTIC_AWS_ASSUME_ROLE_REGION", REPO_KEY_ENV_VALUE},
+    {L"RESTIC_AWS_ASSUME_ROLE_STS_ENDPOINT", REPO_KEY_ENV_VALUE},
+};
+_Static_assert(sizeof(REPO_KEYS) / sizeof(REPO_KEYS[0]) <= sizeof(unsigned) * 8, "RepoSettings.seen has a bit per key");
+
+/* Sets the entry's settings_error, unless an earlier setting already did: "<key>=<value> (set in ...) <reason>" */
+static void repo_setting_error(ResticRepoEntry* s, const WCHAR* key, const WCHAR* value, const WCHAR* ini_path,
+                               const WCHAR* fmt, ...) {
+    if (s->settings_error[0] != L'\0') return;
+    int n = _snwprintf_s(s->settings_error, CONFIG_ERROR_CHARS, _TRUNCATE, L"%ls=%ls (set in [Repository: %ls] of %ls) ",
+                         key, value, s->alias, ini_path);
+    if (n < 0) return;
+    va_list args;
+    va_start(args, fmt);
+    _vsnwprintf_s(s->settings_error + n, CONFIG_ERROR_CHARS - (size_t)n, _TRUNCATE, fmt, args);
+    va_end(args);
+}
+
+/*
+ * A file named by a setting, like ResticPath: a full path, or one relative to the plugin folder; it
+ * must exist. FALSE with the entry's settings_error set otherwise.
+ */
+static BOOL resolve_setting_file(ResticRepoEntry* s, const WCHAR* key, const WCHAR* value, const WCHAR* ini_path,
+                                 WCHAR* out, size_t cap) {
+    WCHAR candidate[CONFIG_MAX_PATH] = {0};
+    if (wcslen(value) >= CONFIG_MAX_PATH) { /* Never cut into another, existing path */
+        repo_setting_error(s, key, value, ini_path, L"is too long.");
+        return FALSE;
+    }
+    if (config_is_absolute_path(value)) {
+        wcscpy_s(candidate, CONFIG_MAX_PATH, value);
+    } else if (!is_relative_path(value)) {
+        repo_setting_error(s, key, value, ini_path,
+                           L"depends on the current drive or folder. Use a full path or a path relative to the "
+                           L"plugin folder.");
+        return FALSE;
+    } else if (g_plugin_dir[0] == L'\0' || !join_path(g_plugin_dir, value, candidate, CONFIG_MAX_PATH)) {
+        repo_setting_error(s, key, value, ini_path, L"cannot be resolved against the plugin folder.");
+        return FALSE;
+    }
+    if (!file_exists(candidate)) {
+        repo_setting_error(s, key, value, ini_path, L"does not exist or is not a file: %ls", candidate);
+        return FALSE;
+    }
+    if (wcslen(candidate) >= cap) {
+        repo_setting_error(s, key, value, ini_path, L"is too long.");
+        return FALSE;
+    }
+    wcscpy_s(out, cap, candidate);
+    return TRUE;
+}
+
+/* Go's unicode.IsSpace, which restic's command splitter uses */
+static BOOL is_go_space(WCHAR c) {
+    return c == L' ' || (c >= 0x09 && c <= 0x0D) || c == 0x85 || c == 0xA0 || c == 0x1680 ||
+           (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 || c == 0x202F || c == 0x205F ||
+           c == 0x3000;
+}
+
+/*
+ * Splits `cmd` the way restic splits a password command (backend.SplitShellStrings): " and '
+ * group, and outside quotes whitespace and a backslash separate arguments; a quote right after a
+ * backslash is an ordinary character. Copies the first argument into `first` (cut to `cap`) and
+ * returns the number of arguments, or -1 for an unterminated quote. *backslash_splits is set when a
+ * backslash outside quotes separated anything.
+ */
+static int split_restic_command(const WCHAR* cmd, WCHAR* first, size_t cap, BOOL* backslash_splits) {
+    WCHAR quote = 0, last = 0;
+    int count = 0;
+    const WCHAR* start = NULL;
+    *backslash_splits = FALSE;
+    first[0] = L'\0';
+    for (const WCHAR* p = cmd;; ++p) {
+        WCHAR c = *p;
+        BOOL split = TRUE; /* The end of the text ends the last argument */
+        if (c != L'\0') {
+            split = FALSE;
+            if (last != L'\\' && quote != 0 && c == quote) {
+                quote = 0;
+                split = TRUE;
+            } else if (last != L'\\' && quote == 0 && (c == L'"' || c == L'\'')) {
+                quote = c;
+                split = TRUE;
+            } else {
+                last = c;
+                if (quote == 0 && (c == L'\\' || is_go_space(c))) {
+                    split = TRUE;
+                    if (c == L'\\') *backslash_splits = TRUE;
+                }
+            }
+        }
+        if (split) {
+            if (start) {
+                if (count == 0) {
+                    size_t len = (size_t)(p - start);
+                    if (len >= cap) len = cap - 1;
+                    wmemcpy(first, start, len);
+                    first[len] = L'\0';
+                }
+                count++;
+                start = NULL;
+            }
+        } else if (!start) {
+            start = p;
+        }
+        if (c == L'\0') break;
+    }
+    return quote != 0 ? -1 : count;
+}
+
+/*
+ * A setting restic splits into a command line itself (backend.SplitShellStrings) as restic gets it,
+ * into `out` (CONFIG_MAX_PATH): PasswordCommand, rclone.program, sftp.command, which start with a
+ * program (`program_first`), and rclone.args, sftp.args, which are only arguments.
+ *
+ * Quotes around the whole value are the INI file's, as for every other key, and stay removed -
+ * rclone.args="serve restic --stdio" is three arguments - unless the value still holds that quote
+ * inside, when they belonged to its first and last argument ("C:\x\kp.exe" show "C:\db") and are
+ * put back. A value starting with a program and without quote characters is the program's path
+ * when such a file exists (resolved like ResticPath and passed in double quotes, so restic does not
+ * split it at its spaces and backslashes), and otherwise, if it has a space, a command line such as
+ * `ssh user@host -s sftp`. A command line is checked with restic's own splitting: balanced quotes,
+ * no backslash outside quotes (restic would cut a Windows path apart there), and a program that is a
+ * full path that exists or a bare name. FALSE with the entry's settings_error set.
+ */
+static BOOL resolve_command(ResticRepoEntry* s, const WCHAR* key, const WCHAR* value, WCHAR unquoted,
+                            const WCHAR* ini_path, BOOL program_first, WCHAR* out) {
+    WCHAR command[CONFIG_MAX_PATH];
+    if (wcslen(value) + 2 >= CONFIG_MAX_PATH) {
+        repo_setting_error(s, key, value, ini_path, L"is too long.");
+        return FALSE;
+    }
+    if (unquoted != 0 && wcschr(value, unquoted)) {
+        _snwprintf_s(command, CONFIG_MAX_PATH, _TRUNCATE, L"%lc%ls%lc", unquoted, value, unquoted);
+    } else {
+        wcscpy_s(command, CONFIG_MAX_PATH, value);
+    }
+    BOOL has_quotes = wcschr(command, L'"') || wcschr(command, L'\'');
+    BOOL has_space  = FALSE;
+    for (const WCHAR* p = command; *p; ++p) has_space = has_space || is_go_space(*p);
+
+    if (program_first && !has_quotes) {
+        /* A plain path, as ResticPath: a bare name in the plugin folder, then in PATH */
+        WCHAR program[CONFIG_MAX_PATH] = {0};
+        BOOL earlier_error = s->settings_error[0] != L'\0';
+        BOOL found;
+        if (!has_path_component(command)) {
+            found = find_in_plugin_dir_or_path(command, program, CONFIG_MAX_PATH);
+            if (!found && !has_space) {
+                repo_setting_error(s, key, value, ini_path, L"was found neither in the plugin folder nor in PATH.");
+            }
+        } else {
+            found = resolve_setting_file(s, key, command, ini_path, program, CONFIG_MAX_PATH);
+            if (!found && has_space && !earlier_error) s->settings_error[0] = L'\0'; /* Tried as a command line next */
+        }
+        if (found) {
+            /* In double quotes, or restic would split the path at its backslashes and spaces */
+            if (wcslen(program) + 2 >= CONFIG_MAX_PATH) {
+                repo_setting_error(s, key, value, ini_path, L"is too long.");
+                return FALSE;
+            }
+            _snwprintf_s(out, CONFIG_MAX_PATH, _TRUNCATE, L"\"%ls\"", program);
+            return TRUE;
+        }
+        if (!has_space) return FALSE;
+    }
+
+    WCHAR program[CONFIG_MAX_PATH];
+    BOOL backslash_splits = FALSE;
+    int args = split_restic_command(command, program, CONFIG_MAX_PATH, &backslash_splits);
+    if (args < 0) {
+        repo_setting_error(s, key, command, ini_path, L"has a quote that is not closed.");
+        return FALSE;
+    }
+    if (args == 0 && program_first) {
+        repo_setting_error(s, key, command, ini_path, L"names no program.");
+        return FALSE;
+    }
+    if (backslash_splits) {
+        repo_setting_error(s, key, command, ini_path,
+                           program_first && !has_quotes
+                               ? L"is neither an existing file nor a command line restic can split: it has a "
+                                 L"backslash outside quotes, where restic splits. Put paths in double quotes: "
+                                 L"\"C:\\Tools\\get-password.exe\" --name backup"
+                               : L"has a backslash outside quotes, where restic splits the command. Put paths in "
+                                 L"double quotes: \"C:\\Tools\\get-password.exe\" --name backup");
+        return FALSE;
+    }
+    if (!program_first) {
+        wcscpy_s(out, CONFIG_MAX_PATH, command);
+        return TRUE;
+    }
+    if (has_path_component(program) && !config_is_absolute_path(program)) {
+        repo_setting_error(s, key, command, ini_path,
+                           L"starts with a program that depends on the current drive or folder. Use its full path, "
+                           L"or a bare name found in PATH.");
+        return FALSE;
+    }
+    if (config_is_absolute_path(program) && !file_exists(program)) {
+        repo_setting_error(s, key, command, ini_path, L"starts with a program that does not exist: %ls", program);
+        return FALSE;
+    }
+    wcscpy_s(out, CONFIG_MAX_PATH, command);
+    return TRUE;
+}
+
+/* TRUE when `value` has no control character (it goes into an environment block or a command line) */
+static BOOL setting_value_plain(ResticRepoEntry* s, const WCHAR* key, const WCHAR* value, const WCHAR* ini_path) {
+    for (const WCHAR* p = value; *p; ++p) {
+        if (*p < 0x20 || *p == 0x7F) {
+            repo_setting_error(s, key, value, ini_path, L"contains a control character.");
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+/*
+ * Appends "<name>=<value>" to a block of NUL-terminated strings ending in an empty one
+ * ("a=1\0b=2\0\0"; an empty block is "\0"), of `cap` characters. FALSE when it does not fit.
+ */
+static BOOL block_append(WCHAR* block, size_t cap, const WCHAR* name, const WCHAR* value) {
+    size_t used = 0;
+    while (block[used] != L'\0') used += wcslen(block + used) + 1;
+    size_t len = wcslen(name) + 1 + wcslen(value);
+    if (used + len + 2 > cap) return FALSE; /* The entry's NUL and the block's */
+    _snwprintf_s(block + used, cap - used, _TRUNCATE, L"%ls=%ls", name, value);
+    block[used + len + 1] = L'\0';
+    return TRUE;
+}
+
+/* The entry "<name>=..." of a block, matching the name ignoring case; NULL when it is not there */
+static const WCHAR* block_find(const WCHAR* block, const WCHAR* name) {
+    size_t len = wcslen(name);
+    for (const WCHAR* p = block; *p != L'\0'; p += wcslen(p) + 1) {
+        if (_wcsnicmp(p, name, len) == 0 && p[len] == L'=') return p;
+    }
+    return NULL;
+}
+
+const WCHAR* config_repo_env_value(const ResticRepoEntry* repo, const WCHAR* name) {
+    const WCHAR* entry = repo && name ? block_find(repo->environment, name) : NULL;
+    return entry ? entry + wcslen(name) + 1 : NULL;
+}
+
+/* TRUE for a restic extended option name: "<backend>.<option>", letters, digits and '-' around one dot */
+static BOOL is_option_key(const WCHAR* key) {
+    const WCHAR* dot = wcschr(key, L'.');
+    if (!dot || dot == key || dot[1] == L'\0' || wcschr(dot + 1, L'.')) return FALSE;
+    for (const WCHAR* p = key; *p; ++p) {
+        BOOL alnum = (*p >= L'a' && *p <= L'z') || (*p >= L'A' && *p <= L'Z') || (*p >= L'0' && *p <= L'9');
+        if (!alnum && *p != L'.' && !(*p == L'-' && p > dot)) return FALSE;
+    }
+    return TRUE;
+}
+
+/*
+ * A restic option "<backend>.<option>=<value>" of the section, first occurrence of a key winning.
+ * The INI reader removed quotes around the whole value; they are put back when the value has more
+ * of them inside, as in a command line like sftp.command="C:\a b\ssh.exe" -s sftp, where they
+ * were not around the whole value at all.
+ */
+static void read_repo_option(ResticRepoEntry* s, const WCHAR* key, const WCHAR* value, WCHAR unquoted,
+                             const WCHAR* ini_path) {
+    WCHAR name[MAX_PATH];
+    if (wcslen(key) >= MAX_PATH) return;
+    wcscpy_s(name, MAX_PATH, key);
+    _wcslwr_s(name, MAX_PATH); /* restic lowercases option names */
+    if (block_find(s->options, name)) return; /* Not the first occurrence */
+    if (value[0] == L'\0') { /* Not set, but the first occurrence all the same, as for the other keys */
+        block_append(s->options, CONFIG_MAX_REPO_OPTIONS, name, L"");
+        return;
+    }
+    if (!setting_value_plain(s, key, value, ini_path)) return;
+    WCHAR raw[CONFIG_MAX_PATH];
+    if (wcslen(value) + 2 >= CONFIG_MAX_PATH) {
+        repo_setting_error(s, key, value, ini_path, L"is too long.");
+        return;
+    }
+    /* The options restic splits into a command line, as PasswordCommand: program first or arguments only */
+    static const struct {
+        const WCHAR* name;
+        BOOL program_first;
+    } COMMAND_OPTIONS[] = {
+        {L"rclone.program", TRUE}, {L"sftp.command", TRUE}, {L"rclone.args", FALSE}, {L"sftp.args", FALSE},
+    };
+    size_t c = 0;
+    while (c < _countof(COMMAND_OPTIONS) && wcscmp(name, COMMAND_OPTIONS[c].name) != 0) ++c;
+    if (c < _countof(COMMAND_OPTIONS)) {
+        if (!resolve_command(s, name, value, unquoted, ini_path, COMMAND_OPTIONS[c].program_first, raw)) return;
+    } else if (unquoted != 0 && wcschr(value, unquoted)) {
+        _snwprintf_s(raw, CONFIG_MAX_PATH, _TRUNCATE, L"%lc%ls%lc", unquoted, value, unquoted);
+    } else {
+        wcscpy_s(raw, CONFIG_MAX_PATH, value);
+    }
+    if (!block_append(s->options, CONFIG_MAX_REPO_OPTIONS, name, raw)) {
+        repo_setting_error(s, key, value, ini_path, L"does not fit: the section's options are too long together.");
+    }
+}
+
+/* Reads one key=value line of a [Repository: <alias>] section into `rs` */
+static void read_repo_setting(RepoSettings* rs, const WCHAR* key, const WCHAR* value, WCHAR unquoted,
+                              const WCHAR* ini_path) {
+    ResticRepoEntry* s = &rs->settings;
+    if (is_option_key(key)) {
+        read_repo_option(s, key, value, unquoted, ini_path);
+        return;
+    }
+    size_t k = 0;
+    while (k < _countof(REPO_KEYS) && _wcsicmp(key, REPO_KEYS[k].key) != 0) ++k;
+    if (k == _countof(REPO_KEYS) || (rs->seen & (1u << k)) != 0) return; /* Unknown, or not the first */
+    rs->seen |= 1u << k;
+    if (value[0] == L'\0') return; /* Empty: not set */
+
+    const WCHAR* name = REPO_KEYS[k].key;
+    WCHAR path[CONFIG_MAX_PATH];
+    switch (REPO_KEYS[k].kind) {
+        case REPO_KEY_PASSWORD_FILE:
+            resolve_setting_file(s, name, value, ini_path, s->password_file, CONFIG_MAX_PATH);
+            return;
+        case REPO_KEY_PASSWORD_COMMAND:
+            resolve_command(s, name, value, unquoted, ini_path, TRUE, s->password_command);
+            return;
+        case REPO_KEY_ENV_FILE:
+            if (!resolve_setting_file(s, name, value, ini_path, path, CONFIG_MAX_PATH)) return;
+            value = path;
+            break;
+        default:
+            if (!setting_value_plain(s, name, value, ini_path)) return;
+            break;
+    }
+    if (!block_append(s->environment, CONFIG_MAX_REPO_ENV, name, value)) {
+        repo_setting_error(s, name, value, ini_path, L"does not fit: the section's settings are too long together.");
+    }
+}
+
+/* The RepoSettings of `alias` in `list` (count entries), appended when missing; NULL when out of memory */
+static RepoSettings* repo_settings_for(RepoSettings** list, size_t* count, size_t* cap, const WCHAR* alias) {
+    for (size_t i = 0; i < *count; ++i) {
+        if (_wcsicmp((*list)[i].settings.alias, alias) == 0) return &(*list)[i];
+    }
+    if (*count == *cap) {
+        size_t new_cap = *cap ? *cap * 2 : 4;
+        RepoSettings* grown = (RepoSettings*)realloc(*list, new_cap * sizeof(RepoSettings));
+        if (!grown) return NULL;
+        *list = grown;
+        *cap  = new_cap;
+    }
+    RepoSettings* rs = &(*list)[(*count)++];
+    memset(rs, 0, sizeof(*rs));
+    wcsncpy_s(rs->settings.alias, MAX_PATH, alias, _TRUNCATE);
+    return rs;
+}
+
+/* Copies the section's settings into the repository of the same alias, if there is one */
+static void apply_repo_settings(ResticConfig* config, const RepoSettings* rs) {
+    for (size_t i = 0; i < config->repo_count; ++i) {
+        ResticRepoEntry* e = &config->repos[i];
+        if (_wcsicmp(e->alias, rs->settings.alias) != 0) continue;
+        const ResticRepoEntry* s = &rs->settings;
+        wcscpy_s(e->password_file, CONFIG_MAX_PATH, s->password_file);
+        wcscpy_s(e->password_command, CONFIG_MAX_PATH, s->password_command);
+        memcpy(e->environment, s->environment, sizeof(e->environment)); /* Blocks with inner NULs */
+        memcpy(e->options, s->options, sizeof(e->options));
+        wcscpy_s(e->settings_error, CONFIG_ERROR_CHARS, s->settings_error);
+        return;
+    }
+}
+
 BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
     if (!out_config) return FALSE;
     memset(out_config, 0, sizeof(ResticConfig));
@@ -626,7 +1040,9 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
     BOOL refresh_seen = FALSE;
     BOOL connection_log_seen = FALSE;
     BOOL csv_separator_seen = FALSE;
-    IniReader reader = {ini_text, NULL};
+    RepoSettings* repo_settings = NULL; /* [Repository: <alias>] sections, applied at the end */
+    size_t repo_settings_count = 0, repo_settings_cap = 0;
+    IniReader reader = {ini_text, NULL, 0};
     WCHAR *alias = NULL, *target = NULL;
     while (ini_next_entry(&reader, &alias, &target)) {
         if (ini_in_section(&reader, L"Settings") && _wcsicmp(alias, L"RootName") == 0) {
@@ -706,6 +1122,23 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
             log_path_seen = TRUE;
             continue;
         }
+        if (reader.section && starts_with_icase(reader.section, CONFIG_REPOSITORY_SECTION_PREFIX)) {
+            WCHAR section_alias[MAX_PATH];
+            const WCHAR* name = reader.section + wcslen(CONFIG_REPOSITORY_SECTION_PREFIX);
+            if (wcslen(name) >= MAX_PATH) continue;
+            wcscpy_s(section_alias, MAX_PATH, name);
+            trim_whitespace(section_alias);
+            if (section_alias[0] == L'\0') continue;
+            RepoSettings* rs = repo_settings_for(&repo_settings, &repo_settings_count, &repo_settings_cap, section_alias);
+            if (!rs) {
+                free(repo_settings);
+                free(ini_text);
+                config_free(out_config);
+                return FALSE;
+            }
+            read_repo_setting(rs, alias, target, reader.unquoted, out_config->ini_path);
+            continue;
+        }
         if (!ini_in_section(&reader, L"Repositories")) {
             continue;
         }
@@ -719,12 +1152,16 @@ BOOL config_load_from_file(const WCHAR* ini_path, ResticConfig* out_config) {
         }
 
         if (!upsert_repo_entry(out_config, &repo_capacity, alias, target)) {
+            free(repo_settings);
             free(ini_text);
             config_free(out_config);
             return FALSE;
         }
     }
 
+    /* After the whole file: a section may come before the repository's line in [Repositories] */
+    for (size_t i = 0; i < repo_settings_count; ++i) apply_repo_settings(out_config, &repo_settings[i]);
+    free(repo_settings);
     free(ini_text);
     return TRUE;
 }

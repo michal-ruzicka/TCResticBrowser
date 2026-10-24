@@ -1,5 +1,6 @@
 #pragma once
 #include <windows.h>
+#include "config.h"
 #include "snapshot_index.h"
 #include "snapshot_tree.h"
 
@@ -33,12 +34,24 @@ const SnapshotIndex* repo_cache_lock_index(const WCHAR* alias, const WCHAR* targ
 
 void repo_cache_unlock(void);
 
-/* Reads the cached password of a repository into `out` (cap characters); FALSE if there is none */
-typedef BOOL (*RepoPasswordSource)(const WCHAR* alias, WCHAR* out, size_t cap);
+/* Longest password or secret key the plugin keeps, in characters with the terminating NUL */
+#define REPO_SECRET_CHARS 512
+
+/* What the user typed in for a repository; empty when it gets no such thing */
+typedef struct {
+    WCHAR password[REPO_SECRET_CHARS];              /* The repository password */
+    WCHAR aws_secret_access_key[REPO_SECRET_CHARS]; /* With [Repository: <alias>] AWS_ACCESS_KEY_ID */
+} RepoSecrets;
 
 /*
- * Starts reading the complete listing of a snapshot in the background with the repository's
- * cached password, unless it is already there or being read: one snapshot of a repository at a
+ * Reads what is cached for a repository whose credentials restic has accepted into `out` (the
+ * caller wipes it); FALSE when nothing is. Never asks the user.
+ */
+typedef BOOL (*RepoSecretSource)(const WCHAR* alias, RepoSecrets* out);
+
+/*
+ * Starts reading the complete listing of a snapshot of `repo` in the background with its settings
+ * and the secrets cached for it, unless it is already there or being read: one snapshot of a repository at a
  * time, up to three repositories side by side. The
  * worker gives up when the repository is forgotten (its password wiped) and its result is
  * discarded then. A snapshot whose listing needs more than the memory limit is not tried again;
@@ -48,26 +61,24 @@ typedef BOOL (*RepoPasswordSource)(const WCHAR* alias, WCHAR* out, size_t cap);
  * one growing at that moment gives up and is tried again later.
  */
 void repo_cache_load_index(
-    const WCHAR* alias,
-    const WCHAR* target,
+    const ResticRepoEntry* repo,
     const WCHAR* restic_exe,
     const char* snapshot_id,
-    RepoPasswordSource password_source
+    RepoSecretSource secret_source
 );
 
 /*
- * Re-reads the snapshot list of the repository in the background with its cached password,
+ * Re-reads the snapshot list of `repo` in the background with its settings and cached secrets,
  * unless no tree is cached, one is being re-read, or the cached tree (or the last attempt) is
  * younger than `min_interval_ms`. Until the new list replaces it the cached tree stays in use; a
  * repository forgotten meanwhile discards the result.
  */
 void repo_cache_refresh_tree(
-    const WCHAR* alias,
-    const WCHAR* target,
+    const ResticRepoEntry* repo,
     const WCHAR* restic_exe,
     const char* time_format,
     ULONGLONG min_interval_ms,
-    RepoPasswordSource password_source
+    RepoSecretSource secret_source
 );
 
 /*

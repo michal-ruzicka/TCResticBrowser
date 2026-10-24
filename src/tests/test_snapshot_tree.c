@@ -331,30 +331,34 @@ static void test_time_formats(void) {
 static void test_csv(void) {
     SnapshotTree* tree = build(
         "[{\"time\":\"2026-10-19T08:00:00+02:00\",\"id\":\"" ID("b") "\",\"hostname\":\"pc,1\","
-        "\"paths\":[\"/home\",\"/etc\"],\"tags\":[\"say \\\"hi\\\"\",\"=1+2\"]},"
+        "\"paths\":[\"/home\",\"/etc\"],\"tags\":[\"say \\\"hi\\\"\",\"=1+2\"],"
+        "\"summary\":{\"total_files_processed\":3,\"total_bytes_processed\":1088}},"
         "{\"time\":\"2026-10-18T07:00:00Z\",\"id\":\"" ID("a") "\",\"hostname\":\"pc,1\",\"paths\":[\"/home\"]},"
         "{\"time\":\"2026-10-17T06:00:00Z\",\"id\":\"" ID("c") "\",\"hostname\":\"alpha\","
-        "\"paths\":[\"C:\\\\Users\"],\"tags\":[\"-daily\",\"@x\",\"plain\"]},"
-        "{\"time\":\"2026-10-20T05:04:03-05:00\",\"id\":\"" ID("d") "\",\"hostname\":\"pc,1\",\"paths\":[\"/home\"]},"
-        "{\"time\":\"2026-10-16T00:00:00Z\",\"id\":\"" ID("e") "\"}]");
+        "\"paths\":[\"C:\\\\Users\"],\"tags\":[\"-daily\",\"@x\",\"plain\"],\"summary\":{\"total_bytes_processed\":1023}},"
+        "{\"time\":\"2026-10-20T05:04:03-05:00\",\"id\":\"" ID("d") "\",\"hostname\":\"pc,1\",\"paths\":[\"/home\"],"
+        "\"summary\":{}},"
+        "{\"time\":\"2026-10-16T00:00:00Z\",\"id\":\"" ID("e") "\",\"summary\":{\"total_bytes_processed\":5368709120}}]");
     EXPECT_TRUE(tree != NULL, "Built");
     size_t len = 0;
     char* csv = snapshot_tree_csv(tree, ',', &len);
     static const char expected[] =
-        "\xEF\xBB\xBF" "short ID,host,paths,timestamp,tags,full ID\r\n"
-        "eeeeeeee,,,2026-10-16 00:00:00,," ID("e") "\r\n"                        /* No host sorts first */
-        "cccccccc,alpha,C:\\Users,2026-10-17 06:00:00,\"'-daily\n'@x\nplain\"," ID("c") "\r\n"
-        "aaaaaaaa,\"pc,1\",/home,2026-10-18 07:00:00,," ID("a") "\r\n"            /* Same host and paths: by time */
-        "dddddddd,\"pc,1\",/home,2026-10-20 05:04:03,," ID("d") "\r\n"
-        "bbbbbbbb,\"pc,1\",\"/home\n/etc\",2026-10-19 08:00:00,\"say \"\"hi\"\"\n'=1+2\"," ID("b") "\r\n"; /* Paths after "/home" */
+        "\xEF\xBB\xBF" "short ID,host,paths,size,timestamp,tags,full ID\r\n"
+        "eeeeeeee,,,5.000 GiB,2026-10-16 00:00:00,," ID("e") "\r\n"              /* No host sorts first */
+        "cccccccc,alpha,C:\\Users,1023 B,2026-10-17 06:00:00,\"'-daily\n'@x\nplain\"," ID("c") "\r\n"
+        "aaaaaaaa,\"pc,1\",/home,,2026-10-18 07:00:00,," ID("a") "\r\n"           /* Same host and paths: by time */
+        "dddddddd,\"pc,1\",/home,0 B,2026-10-20 05:04:03,," ID("d") "\r\n"        /* A summary without the size */
+        "bbbbbbbb,\"pc,1\",\"/home\n/etc\",1.062 KiB,2026-10-19 08:00:00,\"say \"\"hi\"\"\n'=1+2\"," ID("b") "\r\n"; /* Paths after "/home" */
     if (!csv || strcmp(csv, expected) != 0) printf("       got: %s\n", csv ? csv : "(null)");
     EXPECT_TRUE(csv && strcmp(csv, expected) == 0 && len == strlen(expected),
-                "BOM, header, CRLF; sorted by host, paths, time; quoting, doubled quotes, lines in a field, the full ID last, "
+                "BOM, header, CRLF; sorted by host, paths, time; quoting, doubled quotes, lines in a field, the size as "
+                "restic prints it (none without a summary), the full ID last, "
                 "a formula character at the start of a value or of a line in it defused");
     free(csv);
     csv = snapshot_tree_csv(tree, ';', &len);
-    EXPECT_TRUE(csv && strstr(csv, "short ID;host;paths;timestamp;tags;full ID\r\n") && strstr(csv, ";pc,1;/home;") &&
-                strstr(csv, "eeeeeeee;;;2026-10-16 00:00:00;;" ID("e") "\r\n"), "Another separator; a comma then needs no quotes");
+    EXPECT_TRUE(csv && strstr(csv, "short ID;host;paths;size;timestamp;tags;full ID\r\n") && strstr(csv, ";pc,1;/home;") &&
+                strstr(csv, "eeeeeeee;;;5.000 GiB;2026-10-16 00:00:00;;" ID("e") "\r\n"),
+                "Another separator; a comma then needs no quotes");
     free(csv);
     snapshot_tree_free(tree);
 
@@ -362,7 +366,7 @@ static void test_csv(void) {
     tree = build("[{\"time\":\"2026-10-19T08:00:00Z\",\"id\":\"" ID("f") "\",\"hostname\":\"x,=HYPERLINK(1)\","
                  "\"paths\":[\"/a|+b;-c\\t@d\"],\"tags\":[\"q\\\"=1\",\"a - b\"]}]");
     csv = snapshot_tree_csv(tree, ';', &len);
-    EXPECT_TRUE(csv && strstr(csv, "\r\nffffffff;x,'=HYPERLINK(1);\"/a|'+b;'-c\t'@d\";2026-10-19 08:00:00;"
+    EXPECT_TRUE(csv && strstr(csv, "\r\nffffffff;x,'=HYPERLINK(1);\"/a|'+b;'-c\t'@d\";;2026-10-19 08:00:00;"
                                    "\"q\"\"'=1\na - b\";" ID("f") "\r\n"),
                 "A formula character after , ; | tab or a quote defused too; one after a space is left alone");
     free(csv);
@@ -390,8 +394,53 @@ static void test_csv(void) {
 
     tree = build("null");
     csv = snapshot_tree_csv(tree, ',', &len);
-    EXPECT_TRUE(csv && strcmp(csv, "\xEF\xBB\xBF" "short ID,host,paths,timestamp,tags,full ID\r\n") == 0,
+    EXPECT_TRUE(csv && strcmp(csv, "\xEF\xBB\xBF" "short ID,host,paths,size,timestamp,tags,full ID\r\n") == 0,
                 "An empty repository has the header only");
+    free(csv);
+    snapshot_tree_free(tree);
+}
+
+/* The size column against restic's ui.FormatBytes: unit limits, three decimals rounded half to even */
+static void test_csv_size(void) {
+    static const struct {
+        const char* bytes; /* total_bytes_processed as JSON; NULL: no summary */
+        const char* text;
+    } cases[] = {
+        {"0", "0 B"},
+        {"1023", "1023 B"},
+        {"1024", "1.000 KiB"},
+        {"1088", "1.062 KiB"},       /* 1.0625: a tie, rounded to the even digit */
+        {"1216", "1.188 KiB"},       /* 1.1875: a tie, rounded to the even digit */
+        {"1048575", "1023.999 KiB"},
+        {"1048576", "1.000 MiB"},
+        {"1073741823", "1024.000 MiB"}, /* Rounding carries into the whole number, as in restic */
+        {"1073741824", "1.000 GiB"},
+        {"1099511627776", "1.000 TiB"},
+        {"1125899906842624", "1024.000 TiB"}, /* No unit above TiB */
+        {"18446744073709551615", "16777216.000 TiB"},
+        {"-1", ""}, /* Not a size: unknown */
+        {"\"1024\"", ""},
+        {"1e3", ""},
+        {"18446744073709551616", ""},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        char json[256], expected[128];
+        snprintf(json, sizeof(json),
+                 "[{\"time\":\"2026-10-19T08:00:00Z\",\"id\":\"" ID("a") "\",\"summary\":{\"total_bytes_processed\":%s}}]",
+                 cases[i].bytes);
+        snprintf(expected, sizeof(expected), "\r\naaaaaaaa,,,%s,2026-10-19 08:00:00,,", cases[i].text);
+        SnapshotTree* tree = build(json);
+        size_t len = 0;
+        char* csv = tree ? snapshot_tree_csv(tree, ',', &len) : NULL;
+        if (!csv || !strstr(csv, expected)) printf("       %s: got %s\n", cases[i].bytes, csv ? csv : "(null)");
+        EXPECT_TRUE(csv && strstr(csv, expected), "Size written as restic snapshots prints it");
+        free(csv);
+        snapshot_tree_free(tree);
+    }
+    SnapshotTree* tree = build("[{\"time\":\"2026-10-19T08:00:00Z\",\"id\":\"" ID("a") "\",\"summary\":null}]");
+    size_t len = 0;
+    char* csv = tree ? snapshot_tree_csv(tree, ',', &len) : NULL;
+    EXPECT_TRUE(csv && strstr(csv, "\r\naaaaaaaa,,,,2026-10-19"), "A summary that is not an object gives no size");
     free(csv);
     snapshot_tree_free(tree);
 }
@@ -608,6 +657,7 @@ int main(void) {
     test_sanitized_names();
     test_time_formats();
     test_csv();
+    test_csv_size();
     test_skipped_entries();
     test_many_snapshots();
     test_index_listing();

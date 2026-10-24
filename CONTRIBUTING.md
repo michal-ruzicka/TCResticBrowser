@@ -37,6 +37,11 @@ it up to date with every change.
   against `RESTIC_ZIP_SHA256` there (`Get-FileHash -Algorithm SHA256`), the
   `.exe` inside copied to `tmp\restic.exe` (the 64-bit `restic.exe` serves the
   x86 tests too).
+- *(Optional, but CI has it)* `tmp\rclone.exe`: the live tests of an `rclone:`
+  repository (rclone's local backend over the test repository) and of an S3
+  repository (on `rclone serve s3`) need it and report `[SKIP]` without it. Again the version CI pins, `PINNED_RCLONE_VERSION`
+  and `PINNED_RCLONE_ZIP_SHA256`, `rclone.exe` from
+  `rclone-v<version>-windows-amd64.zip` of the rclone GitHub release.
 
 Nothing else: no Bash, no Python, no .NET. The plugin is pure C11 / Win32,
 linked against the static MSVC runtime, and contains no third-party code.
@@ -51,7 +56,7 @@ linked against the static MSVC runtime, and contains no third-party code.
 | `logo\` | SVG sources of the plugin icon `src\TCResticBrowser.ico` (see [Plugin Icon](#plugin-icon)) |
 | `src\` | C sources and headers, `CMakeLists.txt`, `.def`/`.rc`/`.ico`, `pluginst.inf`, the sample `TCResticBrowser.ini` |
 | `src\tests\` | Test programs and the libFuzzer targets |
-| `tmp\` | Optional live-test input `restic.exe` and the generated test repository (gitignored) |
+| `tmp\` | Optional live-test inputs `restic.exe` and `rclone.exe` and the generated test repository (gitignored) |
 | `.gitattributes` | Line-ending normalization rules |
 | `.gitignore` | Excludes build output and `tmp\` from version control |
 | `.vsconfig` | Visual Studio component selection; pins the MSVC toolset and Windows SDK versions for the CI workflow and `setup-build-environment-example.cmd` |
@@ -103,8 +108,8 @@ automatically. Open it in a text editor before running — it is intentionally
 readable so you can see and trust every step.
 
 The GitHub Actions CI workflow runs `build.cmd` and `build.cmd check` on every
-push and pull request, with `restic.exe` downloaded for the live tests and
-verified against a SHA-256 pinned in the workflow. The workflow uploads the
+push and pull request, with `restic.exe` and `rclone.exe` downloaded for the
+live tests and verified against SHA-256 hashes pinned in the workflow. The workflow uploads the
 resulting ZIP as a downloadable artifact but does **not** publish GitHub
 Releases — that step is done locally after GPG-signing the artifact (see
 *Release process* below).
@@ -112,8 +117,10 @@ Releases — that step is done locally after GPG-signing the artifact (see
 All actions in the workflow are pinned to a full commit SHA. Dependabot is
 configured to open monthly PRs that bump those SHAs when upstream actions
 release new versions — do not update the SHAs by hand. The pinned `restic`
-version is bumped by hand, together with its SHA-256, after verifying the
-release's signed `SHA256SUMS`.
+and `rclone` versions are bumped by hand, each together with its SHA-256,
+after verifying the release's signed `SHA256SUMS` (the workflow comments name
+the keys). The rclone pins must not be named `RCLONE_*`: rclone reads such
+variables as its options.
 
 ### Tests
 
@@ -124,9 +131,9 @@ are not shipped in the ZIP) and run from the repository root:
 |---|---|
 | `test_json` | The JSON reader on its own: malformed input, escapes, surrogates, exact 64-bit integers, the nesting limit, real Restic output, pinned JSONTestSuite edge cases |
 | `test_snapshot_tree` | RFC 3339 timestamps, the `restic mount` folder tree and the whole-snapshot index (portable C, also builds with gcc/clang and sanitizers): naming, `SnapshotTimeFormat`, `-1` suffixes, `latest`, `latest → <folder>` and `latest → <short ID>`, host and tag names made Windows-safe, `snapshots.csv` (quoting, sort order, formula defusing), the index's walk order, limits and lookups |
-| `test_config` | `TCResticBrowser.ini` lookup and parsing, `restic.exe` resolution (never from the current directory), root listing, the inert plugin without an INI |
-| `test_restic_cli` | `ls` parser, argument quoting, child-process handling with `cmd.exe` and a fake `restic` stand-in (`fake_restic.exe`), line streaming, and live tests against `tmp\restic.exe` (including every folder listed identically from the whole-snapshot index and from `restic ls`) |
-| `test_plugin_dll` | Loads the built DLL like Total Commander does: exact export surface, icon and version resources, INI lookup, and live navigation (the `restic mount` folders, background listings and refreshes) and extraction through the WFX API |
+| `test_config` | `TCResticBrowser.ini` lookup and parsing, `[Repository: <alias>]` sections, `restic.exe` resolution (never from the current directory), root listing, the inert plugin without an INI |
+| `test_restic_cli` | `ls` parser, argument quoting, child-process handling with `cmd.exe` and a fake `restic` stand-in (`fake_restic.exe`), line streaming, the credentials in the environment, `-o` options, the job object, the version check, refused S3 credentials, and live tests against `tmp\restic.exe` (including every folder listed identically from the whole-snapshot index and from `restic ls`) |
+| `test_plugin_dll` | Loads the built DLL like Total Commander does: exact export surface, icon and version resources, INI lookup, and live navigation (the `restic mount` folders, background listings and refreshes) and extraction through the WFX API, also of `[Repository: <alias>]` settings, an `rclone:` repository and an S3 repository on `rclone serve s3` with `tmp\rclone.exe` |
 
 [AGENT.md](AGENT.md#87-test-suites-srctests) lists every case. Run them
 manually after a build:
@@ -405,8 +412,10 @@ Total Commander process
     │                                or the ID from `restic cat config --json`)
     │                                -> temporary file -> atomic replace of the
     │                                target (F5, F3, Ctrl+Q)
-    ├── RequestProcW (TC callback)   repository password, kept in memory
-    │                                per alias, passed as RESTIC_PASSWORD
+    ├── RequestProcW (TC callback)   repository password and S3 secret key, kept in
+    │                                memory per alias, passed as RESTIC_PASSWORD and
+    │                                AWS_SECRET_ACCESS_KEY (none with PasswordFile/
+    │                                PasswordCommand, which restic reads itself)
     └── LogProcW (TC callback)       unless ConnectionLog=no: one CONNECT \ for all
                                      repositories when one is first used, before
                                      its password is asked for; passwords, restic
@@ -418,8 +427,8 @@ Total Commander process
 | Source | Responsibility |
 |---|---|
 | `main.c` | `DllMain`, the exported WFX entry points, virtual path routing, password sessions |
-| `config.c` | `TCResticBrowser.ini` lookup and parsing, `restic.exe` resolution |
-| `restic_cli.c` | `CreateProcessW` with an explicit handle list and environment block, pipes (also streamed line by line), timeouts and cancellation, `ls` parsing |
+| `config.c` | `TCResticBrowser.ini` lookup and parsing, `[Repository: <alias>]` settings, `restic.exe` resolution |
+| `restic_cli.c` | `CreateProcessW` with an explicit handle list, environment block and job object, `-o` options, pipes (also streamed line by line, stderr watched for refused credentials), timeouts and cancellation, the version check, `ls` parsing |
 | `repo_cache.c` | Per-repository cache: snapshot trees and whole-snapshot listings, background workers, dropped with the password |
 | `snapshot_tree.c` | The `restic mount` folder tree from `restic snapshots --json` (portable C11, no Win32) |
 | `snapshot_index.c` | Compact listing of a whole snapshot from streamed `restic ls --json` (portable C11, no Win32) |

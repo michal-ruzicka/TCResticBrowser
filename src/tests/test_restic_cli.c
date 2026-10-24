@@ -20,6 +20,19 @@
 #include "restic_cli.h"
 #include "repo_cache.h"
 
+/*
+ * A ResticRepo for the calls below: repository and password, nothing else. One static structure
+ * rather than a compound literal per call, each of which would take its own stack space: a test
+ * function with dozens of calls would exceed what /analyze allows a frame (C6262, 16 KB).
+ */
+static const ResticRepo* REPO(const WCHAR* target, const WCHAR* password) {
+    static ResticRepo repo;
+    memset(&repo, 0, sizeof(repo));
+    repo.target   = target;
+    repo.password = password;
+    return &repo;
+}
+
 static int g_tests_run    = 0;
 static int g_tests_failed = 0;
 
@@ -352,7 +365,7 @@ static BOOL get_cmd_exe(WCHAR* out, DWORD cap) {
 static ResticResult run_cmd(const WCHAR* args, const ResticExecOptions* opts, ResticCommandOutput* out) {
     WCHAR cmd[MAX_PATH];
     if (!get_cmd_exe(cmd, MAX_PATH)) return RESTIC_ERR_SPAWN_FAILED;
-    return restic_exec_command(cmd, L"repo", L"pw", args, opts, out);
+    return restic_exec_command(cmd, REPO(L"repo", L"pw"), args, opts, out);
 }
 
 /* stdout/stderr are kept apart and exit codes are mapped */
@@ -417,7 +430,7 @@ static void test_exec_environment(void) {
 
     ResticCommandOutput out;
     ResticResult res = restic_exec_command(
-        cmd, L"C:\\repo dir", L"p@ss w0rd \"q\" 100%",
+        cmd, REPO(L"C:\\repo dir", L"p@ss w0rd \"q\" 100%"),
         L"/c \"echo [%RESTIC_REPOSITORY%][%RESTIC_PASSWORD%][%RESTIC_PASSWORD_COMMAND%]"
         L"[%RESTIC_PASSWORD_FILE%][%RESTIC_REPOSITORY_FILE%][%RESTIC_TEST_MARKER%][%SystemRoot%]\"",
         NULL, &out);
@@ -436,6 +449,71 @@ static void test_exec_environment(void) {
     EXPECT_TRUE(strstr(out.output, "[inherited_marker]") != NULL, "Other variables are inherited");
     EXPECT_TRUE(strstr(out.output, "[%SystemRoot%]") == NULL, "System variables are inherited");
     restic_free_command_output(&out);
+}
+
+/*
+ * A password file or command instead of a typed password, and S3 settings: those of a repository
+ * replace every inherited AWS_*, MINIO_* and RESTIC_AWS_* variable, which are inherited otherwise
+ */
+static void test_exec_environment_credentials(void) {
+    WCHAR cmd[MAX_PATH];
+    EXPECT_TRUE(get_cmd_exe(cmd, MAX_PATH), "ComSpec available");
+    static const WCHAR* const inherited[][2] = {
+        {L"AWS_ACCESS_KEY_ID", L"parent_key"}, {L"AWS_DEFAULT_REGION", L"parent_region"},
+        {L"MINIO_ACCESS_KEY", L"parent_minio"}, {L"RESTIC_AWS_ASSUME_ROLE_ARN", L"parent_role"},
+    };
+    for (size_t i = 0; i < _countof(inherited); ++i) SetEnvironmentVariableW(inherited[i][0], inherited[i][1]);
+    static const WCHAR probe[] =
+        L"/c \"echo [%RESTIC_PASSWORD%][%RESTIC_PASSWORD_FILE%][%RESTIC_PASSWORD_COMMAND%][%AWS_ACCESS_KEY_ID%]"
+        L"[%AWS_SECRET_ACCESS_KEY%][%AWS_SHARED_CREDENTIALS_FILE%][%AWS_PROFILE%][%AWS_DEFAULT_REGION%]"
+        L"[%MINIO_ACCESS_KEY%][%RESTIC_AWS_ASSUME_ROLE_ARN%]\"";
+
+    ResticRepo external = {.target = L"r", .password_file = L"C:\\pw dir\\pw.txt",
+                           .password_command = L"\"C:\\x y\\kp.exe\" --name 'a b'"};
+    ResticCommandOutput out;
+    ResticResult res = restic_exec_command(cmd, &external, probe, NULL, &out);
+    EXPECT_TRUE(res == RESTIC_OK, "Probe with a password file and command ran");
+    EXPECT_TRUE(strstr(out.output, "[%RESTIC_PASSWORD%][C:\\pw dir\\pw.txt][\"C:\\x y\\kp.exe\" --name 'a b']"
+                                   "[parent_key][%AWS_SECRET_ACCESS_KEY%][%AWS_SHARED_CREDENTIALS_FILE%][%AWS_PROFILE%]"
+                                   "[parent_region][parent_minio][parent_role]") != NULL,
+                "No RESTIC_PASSWORD; file and command both passed verbatim; without S3 settings AWS_* are inherited");
+    restic_free_command_output(&out);
+
+    ResticRepo s3 = {.target = L"s3:host/bucket", .password = L"pw", .aws_secret_access_key = L"s3cr3t/key+",
+                     .environment = L"AWS_ACCESS_KEY_ID=AKIAOWN\0AWS_SHARED_CREDENTIALS_FILE=C:\\aws\\credentials\0"
+                                    L"AWS_PROFILE=backup\0"};
+    res = restic_exec_command(cmd, &s3, probe, NULL, &out);
+    EXPECT_TRUE(res == RESTIC_OK, "Probe with S3 settings ran");
+    EXPECT_TRUE(strstr(out.output, "[pw][%RESTIC_PASSWORD_FILE%][%RESTIC_PASSWORD_COMMAND%][AKIAOWN][s3cr3t/key+]"
+                                   "[C:\\aws\\credentials][backup][%AWS_DEFAULT_REGION%][%MINIO_ACCESS_KEY%]"
+                                   "[%RESTIC_AWS_ASSUME_ROLE_ARN%]") != NULL,
+                "The repository's S3 settings replace every inherited AWS_*, MINIO_*, RESTIC_AWS_* variable");
+    restic_free_command_output(&out);
+
+    ResticRepo profile_only = {.target = L"s3:host/bucket", .password = L"pw", .environment = L"AWS_PROFILE=backup\0"};
+    res = restic_exec_command(cmd, &profile_only, probe, NULL, &out);
+    EXPECT_TRUE(res == RESTIC_OK && strstr(out.output, "[pw][%RESTIC_PASSWORD_FILE%][%RESTIC_PASSWORD_COMMAND%]"
+                                                       "[%AWS_ACCESS_KEY_ID%]") != NULL,
+                "AWS_PROFILE alone also leaves the inherited access key out");
+    restic_free_command_output(&out);
+
+    ResticRepo region = {.target = L"s3:host/bucket", .password = L"pw",
+                         .environment = L"AWS_DEFAULT_REGION=eu-central-1\0RESTIC_AWS_ASSUME_ROLE_ARN=arn:own\0"};
+    res = restic_exec_command(cmd, &region, probe, NULL, &out);
+    EXPECT_TRUE(res == RESTIC_OK && strstr(out.output, "[%AWS_ACCESS_KEY_ID%][%AWS_SECRET_ACCESS_KEY%]"
+                                                       "[%AWS_SHARED_CREDENTIALS_FILE%][%AWS_PROFILE%][eu-central-1]"
+                                                       "[%MINIO_ACCESS_KEY%][arn:own]") != NULL,
+                "Region and role of the repository replace the inherited ones");
+    restic_free_command_output(&out);
+
+    for (size_t i = 0; i < _countof(inherited); ++i) SetEnvironmentVariableW(inherited[i][0], NULL);
+
+    ResticRepo no_password = {.target = L"r", .environment = L"AWS_ACCESS_KEY_ID=AKIA\0"};
+    EXPECT_TRUE(restic_exec_command(cmd, &no_password, probe, NULL, &out) == RESTIC_ERR_INVALID_ARG &&
+                    !restic_repo_usable(&no_password) && !restic_repo_usable(NULL),
+                "No password, password file or command: refused before anything is started");
+    ResticRepo empty_password = {.target = L"r", .password = L"", .password_file = L""};
+    EXPECT_TRUE(!restic_repo_usable(&empty_password), "Empty strings count as not set");
 }
 
 static int g_cancel_polls = 0;
@@ -475,7 +553,7 @@ static void test_exec_limits_and_failures(void) {
     EXPECT_TRUE(res == RESTIC_OK, "Fast command within timeout");
     restic_free_command_output(&out);
 
-    res = restic_exec_command(L"C:\\no\\such\\dir\\restic.exe", L"r", L"p", L"version", NULL, &out);
+    res = restic_exec_command(L"C:\\no\\such\\dir\\restic.exe", REPO(L"r", L"p"), L"version", NULL, &out);
     EXPECT_TRUE(res == RESTIC_ERR_SPAWN_FAILED, "Missing executable");
     EXPECT_TRUE(out.output == NULL, "No buffers allocated on spawn failure");
     EXPECT_TRUE(wcsstr(out.error_message, L"Cannot start C:\\no\\such\\dir\\restic.exe") != NULL &&
@@ -506,12 +584,12 @@ static void test_exec_limits_and_failures(void) {
                     WriteFile(h, not_programs[i].bytes, not_programs[i].size, &written, NULL),
                     "Create a fake restic.exe");
         CloseHandle(h);
-        res = restic_exec_command(not_exe, L"r", L"p", L"version", NULL, &out);
+        res = restic_exec_command(not_exe, REPO(L"r", L"p"), L"version", NULL, &out);
         EXPECT_TRUE(res == RESTIC_ERR_SPAWN_FAILED && wcsstr(out.error_message, not_exe) != NULL &&
                     wcsstr(out.error_message, L"not a Windows program") != NULL,
                     "A file that is no Windows program is refused with its path");
         DeleteFileW(dest);
-        res = restic_dump_file(not_exe, L"r", L"p", "deadbeef", L"/f.txt", dest, FALSE, NULL, 0, NULL, NULL,
+        res = restic_dump_file(not_exe, REPO(L"r", L"p"), "deadbeef", L"/f.txt", dest, FALSE, NULL, 0, NULL, NULL,
                                err_text, _countof(err_text));
         EXPECT_TRUE(res == RESTIC_ERR_SPAWN_FAILED && wcsstr(err_text, L"not a Windows program") != NULL &&
                     GetFileAttributesW(dest) == INVALID_FILE_ATTRIBUTES,
@@ -521,18 +599,18 @@ static void test_exec_limits_and_failures(void) {
 
     /* A folder named like the binary passes the check and fails in CreateProcessW, with the reason */
     CreateDirectoryW(not_exe, NULL);
-    res = restic_exec_command(not_exe, L"r", L"p", L"version", NULL, &out);
+    res = restic_exec_command(not_exe, REPO(L"r", L"p"), L"version", NULL, &out);
     EXPECT_TRUE(res == RESTIC_ERR_SPAWN_FAILED && wcsstr(out.error_message, not_exe) != NULL &&
                 wcsstr(out.error_message, L"(Windows error ") != NULL && wcsstr(out.error_message, L"%1") == NULL,
                 "A spawn failure names the binary and the Windows reason, with inserts filled in");
     RemoveDirectoryW(not_exe);
-    res = restic_exec_command(L"restic.exe", L"r", L"p", L"version", NULL, &out);
+    res = restic_exec_command(L"restic.exe", REPO(L"r", L"p"), L"version", NULL, &out);
     EXPECT_TRUE(res == RESTIC_ERR_SPAWN_FAILED, "Bare executable names are refused (no cwd search)");
-    res = restic_exec_command(L"", L"r", L"p", L"version", NULL, &out);
+    res = restic_exec_command(L"", REPO(L"r", L"p"), L"version", NULL, &out);
     EXPECT_TRUE(res == RESTIC_ERR_SPAWN_FAILED, "Empty executable name");
-    res = restic_exec_command(NULL, L"r", L"p", L"version", NULL, &out);
+    res = restic_exec_command(NULL, REPO(L"r", L"p"), L"version", NULL, &out);
     EXPECT_TRUE(res == RESTIC_ERR_INVALID_ARG, "NULL executable");
-    res = restic_exec_command(L"C:\\x\\restic.exe", L"r", L"p", L"version", NULL, NULL);
+    res = restic_exec_command(L"C:\\x\\restic.exe", REPO(L"r", L"p"), L"version", NULL, NULL);
     EXPECT_TRUE(res == RESTIC_ERR_INVALID_ARG, "NULL result");
 
     WCHAR* huge = (WCHAR*)calloc(40000, sizeof(WCHAR));
@@ -540,7 +618,7 @@ static void test_exec_limits_and_failures(void) {
     wmemset(huge, L'x', 39999);
     WCHAR cmd[MAX_PATH];
     EXPECT_TRUE(get_cmd_exe(cmd, MAX_PATH), "ComSpec available");
-    res = restic_exec_command(cmd, L"r", L"p", huge, NULL, &out);
+    res = restic_exec_command(cmd, REPO(L"r", L"p"), huge, NULL, &out);
     free(huge);
     EXPECT_TRUE(res == RESTIC_ERR_INVALID_ARG, "Command line above the CreateProcess limit");
 
@@ -602,10 +680,19 @@ static void test_repo_cache_generations(void) {
     repo_cache_clear();
 }
 
-/* RepoPasswordSource for the background loads of the live test */
-static BOOL fixture_password(const WCHAR* alias, WCHAR* out, size_t cap) {
+/* RepoSecretSource for the background loads of the live test */
+static BOOL fixture_password(const WCHAR* alias, RepoSecrets* out) {
     (void)alias;
-    return wcscpy_s(out, cap, L"p@ss \"w0rd\" \u00fc %PATH% \u65e5\u672c") == 0;
+    memset(out, 0, sizeof(*out));
+    return wcscpy_s(out->password, _countof(out->password), L"p@ss \"w0rd\" \u00fc %PATH% \u65e5\u672c") == 0;
+}
+
+/* A configured repository without [Repository: <alias>] settings, for the background loads */
+static const ResticRepoEntry* live_entry(ResticRepoEntry* e, const WCHAR* alias, const WCHAR* target) {
+    memset(e, 0, sizeof(*e));
+    wcscpy_s(e->alias, MAX_PATH, alias);
+    wcscpy_s(e->target, CONFIG_MAX_PATH, target);
+    return e;
 }
 
 /* Counts the lines a line consumer receives, checking that they arrive whole and in order */
@@ -665,7 +752,7 @@ static void test_exec_line_streaming(void) {
     wcscpy_s(slash + 1, MAX_PATH - (size_t)(slash + 1 - fake), L"fake_restic.exe");
     LineCount endless = {0, 1, 0};
     opts.line_ctx = &endless;
-    res = restic_exec_command(fake, L"repo", L"pw", L"/longline", &opts, &out);
+    res = restic_exec_command(fake, REPO(L"repo", L"pw"), L"/longline", &opts, &out);
     restic_free_command_output(&out);
     EXPECT_TRUE(res == RESTIC_ERR_JSON_PARSE && endless.lines == 0, "A streamed line over 16 MiB fails the command");
 }
@@ -684,7 +771,7 @@ static int compare_index_with_restic(const WCHAR* restic_bin, const WCHAR* repo,
     WIN32_FIND_DATAW *a = NULL, *b = NULL;
     size_t na = 0, nb = 0;
     WCHAR err[512];
-    ResticResult ra = restic_list_directory(restic_bin, repo, password, snap, subpath, NULL, &a, &na, err, _countof(err));
+    ResticResult ra = restic_list_directory(restic_bin, REPO(repo, password), snap, subpath, NULL, &a, &na, err, _countof(err));
     ResticResult rb = restic_list_index_directory(index, subpath, &b, &nb);
     int folders = 1;
     if (ra != RESTIC_OK || rb != RESTIC_OK || na != nb || (na && memcmp(a, b, na * sizeof(*a)) != 0)) {
@@ -880,19 +967,23 @@ static void test_live_restic_cli(void) {
     ResticResult res;
     ResticCommandOutput out;
 
+    unsigned live_version = 0;
+    res = restic_read_version(restic_bin, NULL, &live_version, err, _countof(err));
+    EXPECT_TRUE(res == RESTIC_OK && live_version >= RESTIC_MIN_VERSION, "restic version read; the live restic is recent enough");
+
     /* Error mapping before the repository exists */
     SnapshotTree* tree = NULL;
-    res = restic_list_snapshots(restic_bin, repo, password, NULL, NULL, &tree, err, _countof(err));
+    res = restic_list_snapshots(restic_bin, REPO(repo, password), NULL, NULL, &tree, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_REPO_NOT_FOUND && tree == NULL, "Missing repository -> RESTIC_ERR_REPO_NOT_FOUND");
     EXPECT_TRUE(err[0] != L'\0', "Missing repository reports a reason");
 
     WCHAR* q_data = restic_quote_arg(data);
     WCHAR args[2048];
     char repo_id[RESTIC_REPOSITORY_ID_CHARS + 1];
-    res = restic_read_repository_id(restic_bin, repo, password, NULL, repo_id, err, _countof(err));
+    res = restic_read_repository_id(restic_bin, REPO(repo, password), NULL, repo_id, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_REPO_NOT_FOUND && repo_id[0] == '\0', "Repository ID of a missing repository");
 
-    res = restic_exec_command(restic_bin, repo, password, L"init --json --repository-version 2", NULL, &out);
+    res = restic_exec_command(restic_bin, REPO(repo, password), L"init --json --repository-version 2", NULL, &out);
     EXPECT_TRUE(res == RESTIC_OK, "restic init with a password containing quotes, %PATH% and CJK text");
     /* {"message_type":"initialized","id":"<64 hex>",...} */
     char init_id[RESTIC_REPOSITORY_ID_CHARS + 1] = {0};
@@ -900,33 +991,33 @@ static void test_live_restic_cli(void) {
     if (id_at) memcpy(init_id, id_at + 6, RESTIC_REPOSITORY_ID_CHARS);
     restic_free_command_output(&out);
 
-    res = restic_read_repository_id(restic_bin, repo, password, NULL, repo_id, err, _countof(err));
+    res = restic_read_repository_id(restic_bin, REPO(repo, password), NULL, repo_id, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_OK && strlen(repo_id) == RESTIC_REPOSITORY_ID_CHARS && strcmp(repo_id, init_id) == 0,
                 "restic cat config gives the ID restic init reported");
-    res = restic_read_repository_id(restic_bin, repo, L"wrong password", NULL, repo_id, err, _countof(err));
+    res = restic_read_repository_id(restic_bin, REPO(repo, L"wrong password"), NULL, repo_id, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_WRONG_PASSWORD && repo_id[0] == '\0', "Repository ID with a wrong password");
 
-    res = restic_list_snapshots(restic_bin, repo, L"wrong password", NULL, NULL, &tree, err, _countof(err));
+    res = restic_list_snapshots(restic_bin, REPO(repo, L"wrong password"), NULL, NULL, &tree, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_WRONG_PASSWORD, "Wrong password -> RESTIC_ERR_WRONG_PASSWORD");
     EXPECT_TRUE(wcsstr(err, L"password") != NULL, "Wrong password reason mentions the password");
 
-    res = restic_list_snapshots(restic_bin, repo, password, NULL, NULL, &tree, err, _countof(err));
+    res = restic_list_snapshots(restic_bin, REPO(repo, password), NULL, NULL, &tree, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_OK && snapshot_tree_snapshot_count(tree) == 0, "Empty repository -> no snapshots");
     EXPECT_TRUE(snapshot_tree_root(tree)->child_count == 4, "...but the four restic mount folders");
     snapshot_tree_free(tree);
 
     /* Two snapshots, the second after changing one file */
     swprintf_s(args, _countof(args), L"backup %ls --json --quiet", q_data);
-    res = restic_exec_command(restic_bin, repo, password, args, NULL, &out);
+    res = restic_exec_command(restic_bin, REPO(repo, password), args, NULL, &out);
     EXPECT_TRUE(res == RESTIC_OK, "First backup");
     restic_free_command_output(&out);
     EXPECT_TRUE(write_file(data, L"with space.txt", 12, NULL), "Modify fixture");
-    res = restic_exec_command(restic_bin, repo, password, args, NULL, &out);
+    res = restic_exec_command(restic_bin, REPO(repo, password), args, NULL, &out);
     EXPECT_TRUE(res == RESTIC_OK, "Second backup");
     restic_free_command_output(&out);
     free(q_data);
 
-    res = restic_list_snapshots(restic_bin, repo, password, NULL, NULL, &tree, err, _countof(err));
+    res = restic_list_snapshots(restic_bin, REPO(repo, password), NULL, NULL, &tree, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_OK && snapshot_tree_snapshot_count(tree) == 2, "Two snapshots listed");
     const SnapshotNode* by_time = snapshot_tree_child(snapshot_tree_root(tree), "snapshots");
     EXPECT_TRUE(by_time && by_time->child_count == 5 && strcmp(by_time->children[2]->name, "latest") == 0,
@@ -942,7 +1033,7 @@ static void test_live_restic_cli(void) {
     snapshot_tree_free(tree);
 
     /* Level 2: root of the snapshot holds only the drive letter */
-    res = restic_list_directory(restic_bin, repo, password, snap2, L"\\", NULL, &items, &count, err, _countof(err));
+    res = restic_list_directory(restic_bin, REPO(repo, password), snap2, L"\\", NULL, &items, &count, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_OK && count == 1, "Snapshot root contains one entry");
     EXPECT_TRUE(is_dir_entry(&items[0]) && _wcsnicmp(items[0].cFileName, data, 1) == 0 && items[0].cFileName[1] == L'\0',
                 "Root entry is the drive letter directory");
@@ -950,7 +1041,7 @@ static void test_live_restic_cli(void) {
 
     WCHAR wfx[MAX_PATH * 2];
     to_wfx_path(data, NULL, wfx, _countof(wfx));
-    res = restic_list_directory(restic_bin, repo, password, snap2, wfx, NULL, &items, &count, err, _countof(err));
+    res = restic_list_directory(restic_bin, REPO(repo, password), snap2, wfx, NULL, &items, &count, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_OK, "List fixture directory (snapshot 2)");
     EXPECT_TRUE(count == 9, "Nine direct children (nothing from deeper levels)");
     const WIN32_FIND_DATAW* e = find_entry(items, count, L"readme.txt");
@@ -974,7 +1065,7 @@ static void test_live_restic_cli(void) {
     free(items);
 
     /* The older snapshot still reflects the original content */
-    res = restic_list_directory(restic_bin, repo, password, snap1, wfx, NULL, &items, &count, err, _countof(err));
+    res = restic_list_directory(restic_bin, REPO(repo, password), snap1, wfx, NULL, &items, &count, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_OK && count == 9, "List fixture directory (snapshot 1)");
     e = find_entry(items, count, L"with space.txt");
     EXPECT_TRUE(e && file_size_of(e) == 5, "Snapshot 1 keeps the original size");
@@ -983,7 +1074,7 @@ static void test_live_restic_cli(void) {
     /* The whole snapshot read at once (restic ls without a path) lists every folder as restic does */
     SnapshotIndex* index = snapshot_index_new(0);
     SnapshotIndexStatus index_status = SNAPSHOT_INDEX_BAD_JSON;
-    res = restic_list_snapshot_index(restic_bin, repo, password, snap2, NULL, index, &index_status, err, _countof(err));
+    res = restic_list_snapshot_index(restic_bin, REPO(repo, password), snap2, NULL, index, &index_status, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_OK && index_status == SNAPSHOT_INDEX_OK && snapshot_index_entry_count(index) > 300,
                 "Whole snapshot read into an index");
     int compared = compare_index_with_restic(restic_bin, repo, password, snap2, index, L"\\");
@@ -997,25 +1088,28 @@ static void test_live_restic_cli(void) {
     snapshot_index_free(index);
 
     index = snapshot_index_new(4096);
-    res = restic_list_snapshot_index(restic_bin, repo, password, snap2, NULL, index, &index_status, err, _countof(err));
+    res = restic_list_snapshot_index(restic_bin, REPO(repo, password), snap2, NULL, index, &index_status, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_OUT_OF_MEMORY && index_status == SNAPSHOT_INDEX_TOO_LARGE,
                 "An index over its memory limit stops restic and says so");
     snapshot_index_free(index);
     index = snapshot_index_new(0);
-    res = restic_list_snapshot_index(restic_bin, repo, L"wrong password", snap2, NULL, index, &index_status, err,
+    res = restic_list_snapshot_index(restic_bin, REPO(repo, L"wrong password"), snap2, NULL, index, &index_status, err,
                                      _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_WRONG_PASSWORD, "Wrong password reported as for any other command");
-    EXPECT_TRUE(restic_list_snapshot_index(restic_bin, repo, password, "--help", NULL, index, &index_status, err,
+    EXPECT_TRUE(restic_list_snapshot_index(restic_bin, REPO(repo, password), "--help", NULL, index, &index_status, err,
                                            _countof(err)) == RESTIC_ERR_INVALID_ARG, "Non-hex snapshot ID refused");
     snapshot_index_free(index);
 
     /* Background loads: one at a time, and the snapshot being read makes room within SnapshotCacheMB */
     WCHAR live_repo[MAX_PATH];
     wcscpy_s(live_repo, MAX_PATH, repo);
+    static ResticRepoEntry live, live2;
+    live_entry(&live, L"Live", live_repo);
+    live_entry(&live2, L"Live2", live_repo);
     repo_cache_clear();
     repo_cache_set_index_limit(64u * 1024u * 1024u);
-    repo_cache_load_index(L"Live", live_repo, restic_bin, snap1, fixture_password);
-    repo_cache_load_index(L"Live", live_repo, restic_bin, snap2, fixture_password); /* Not while snap1 loads */
+    repo_cache_load_index(&live, restic_bin, snap1, fixture_password);
+    repo_cache_load_index(&live, restic_bin, snap2, fixture_password); /* Not while snap1 loads */
     EXPECT_TRUE(repo_cache_wait_idle(120000), "First background load finishes");
     const SnapshotIndex* one = repo_cache_lock_index(L"Live", live_repo, snap1);
     size_t one_bytes = one ? snapshot_index_memory(one) : 0;
@@ -1024,7 +1118,7 @@ static void test_live_restic_cli(void) {
     if (two) repo_cache_unlock();
     EXPECT_TRUE(one_bytes > 0 && two == NULL, "Snapshot 1 read; snapshot 2 was not started while it loaded");
     repo_cache_set_index_limit(one_bytes + one_bytes / 2); /* Room for one listing, not for two */
-    repo_cache_load_index(L"Live", live_repo, restic_bin, snap2, fixture_password);
+    repo_cache_load_index(&live, restic_bin, snap2, fixture_password);
     EXPECT_TRUE(repo_cache_wait_idle(120000), "Second background load finishes");
     one = repo_cache_lock_index(L"Live", live_repo, snap1);
     if (one) repo_cache_unlock();
@@ -1034,8 +1128,8 @@ static void test_live_restic_cli(void) {
     repo_cache_clear();
     /* Two repositories (here two aliases of the same one) are read side by side */
     repo_cache_set_index_limit(64u * 1024u * 1024u);
-    repo_cache_load_index(L"Live", live_repo, restic_bin, snap1, fixture_password);
-    repo_cache_load_index(L"Live2", live_repo, restic_bin, snap2, fixture_password);
+    repo_cache_load_index(&live, restic_bin, snap1, fixture_password);
+    repo_cache_load_index(&live2, restic_bin, snap2, fixture_password);
     EXPECT_TRUE(repo_cache_wait_idle(120000), "Both background loads finish");
     one = repo_cache_lock_index(L"Live", live_repo, snap1);
     if (one) repo_cache_unlock();
@@ -1047,7 +1141,7 @@ static void test_live_restic_cli(void) {
 
     /* Output larger than the initial 4 KB / typical buffers: 300 NDJSON lines */
     to_wfx_path(data, L"many", wfx, _countof(wfx));
-    res = restic_list_directory(restic_bin, repo, password, snap2, wfx, NULL, &items, &count, err, _countof(err));
+    res = restic_list_directory(restic_bin, REPO(repo, password), snap2, wfx, NULL, &items, &count, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_OK && count == 300, "300 entries (~100 KB of NDJSON) listed");
     EXPECT_TRUE(find_entry(items, count, L"file_with_a_reasonably_long_name_to_grow_the_buffer_0300.txt") != NULL,
                 "Last entry present");
@@ -1055,34 +1149,34 @@ static void test_live_restic_cli(void) {
 
     /* Names containing metacharacters travel through the command line intact */
     to_wfx_path(data, L"odd [dir] & (x) ^ 100% !", wfx, _countof(wfx));
-    res = restic_list_directory(restic_bin, repo, password, snap2, wfx, NULL, &items, &count, err, _countof(err));
+    res = restic_list_directory(restic_bin, REPO(repo, password), snap2, wfx, NULL, &items, &count, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_OK && count == 1 && wcscmp(items[0].cFileName, L"odd_inner.txt") == 0,
                 "Directory with metacharacters lists its content");
     free(items);
 
     to_wfx_path(data, L"empty_dir", wfx, _countof(wfx));
-    res = restic_list_directory(restic_bin, repo, password, snap2, wfx, NULL, &items, &count, err, _countof(err));
+    res = restic_list_directory(restic_bin, REPO(repo, password), snap2, wfx, NULL, &items, &count, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_OK && count == 0, "Existing empty directory is not an error");
 
     /* Missing paths, files used as directories, quote injection attempts */
     to_wfx_path(data, L"does_not_exist", wfx, _countof(wfx));
-    res = restic_list_directory(restic_bin, repo, password, snap2, wfx, NULL, &items, &count, err, _countof(err));
+    res = restic_list_directory(restic_bin, REPO(repo, password), snap2, wfx, NULL, &items, &count, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_PATH_NOT_FOUND && items == NULL, "Missing directory -> RESTIC_ERR_PATH_NOT_FOUND");
     to_wfx_path(data, L"readme.txt", wfx, _countof(wfx));
-    res = restic_list_directory(restic_bin, repo, password, snap2, wfx, NULL, &items, &count, err, _countof(err));
+    res = restic_list_directory(restic_bin, REPO(repo, password), snap2, wfx, NULL, &items, &count, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_PATH_NOT_FOUND, "File used as directory -> RESTIC_ERR_PATH_NOT_FOUND");
     to_wfx_path(data, L"no\"such\" --help \"dir", wfx, _countof(wfx));
-    res = restic_list_directory(restic_bin, repo, password, snap2, wfx, NULL, &items, &count, err, _countof(err));
+    res = restic_list_directory(restic_bin, REPO(repo, password), snap2, wfx, NULL, &items, &count, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_PATH_NOT_FOUND, "Embedded quotes cannot inject extra arguments");
 
     /* Snapshot ID handling */
-    res = restic_list_directory(restic_bin, repo, password, "deadbeef", L"\\", NULL, &items, &count, err, _countof(err));
+    res = restic_list_directory(restic_bin, REPO(repo, password), "deadbeef", L"\\", NULL, &items, &count, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_CLI_FAILED && wcsstr(err, L"deadbeef") != NULL, "Unknown snapshot ID reports Restic's reason");
-    res = restic_list_directory(restic_bin, repo, password, "--help", L"\\", NULL, &items, &count, err, _countof(err));
+    res = restic_list_directory(restic_bin, REPO(repo, password), "--help", L"\\", NULL, &items, &count, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_INVALID_ARG, "Option-like snapshot ID rejected before spawning");
-    res = restic_list_directory(restic_bin, repo, password, "abc def", L"\\", NULL, &items, &count, err, _countof(err));
+    res = restic_list_directory(restic_bin, REPO(repo, password), "abc def", L"\\", NULL, &items, &count, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_INVALID_ARG, "Snapshot ID with whitespace rejected");
-    res = restic_list_directory(restic_bin, repo, password, NULL, L"\\", NULL, &items, &count, err, _countof(err));
+    res = restic_list_directory(restic_bin, REPO(repo, password), NULL, L"\\", NULL, &items, &count, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_INVALID_ARG, "NULL snapshot ID rejected");
 
     /* File extraction via restic_dump_file */
@@ -1092,17 +1186,17 @@ static void test_live_restic_cli(void) {
 
     /* 1. Missing snapshot file or wrong password never creates the local file */
     to_wfx_path(data, L"no_such_file.txt", wfx, _countof(wfx));
-    res = restic_dump_file(restic_bin, repo, password, snap2, wfx, dump_dest, TRUE, NULL, 0, NULL, NULL, err, _countof(err));
+    res = restic_dump_file(restic_bin, REPO(repo, password), snap2, wfx, dump_dest, TRUE, NULL, 0, NULL, NULL, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_PATH_NOT_FOUND, "Missing file in snapshot -> RESTIC_ERR_PATH_NOT_FOUND");
     EXPECT_TRUE(GetFileAttributesW(dump_dest) == INVALID_FILE_ATTRIBUTES, "Local file not created when remote path is missing");
 
     to_wfx_path(data, L"readme.txt", wfx, _countof(wfx));
-    res = restic_dump_file(restic_bin, repo, L"wrong_pwd", snap2, wfx, dump_dest, TRUE, NULL, 0, NULL, NULL, err, _countof(err));
+    res = restic_dump_file(restic_bin, REPO(repo, L"wrong_pwd"), snap2, wfx, dump_dest, TRUE, NULL, 0, NULL, NULL, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_WRONG_PASSWORD, "Wrong password on dump -> RESTIC_ERR_WRONG_PASSWORD");
     EXPECT_TRUE(GetFileAttributesW(dump_dest) == INVALID_FILE_ATTRIBUTES, "Local file not created when password fails");
 
     /* 2. Extract readme.txt (5 bytes) and preserve mtime */
-    res = restic_dump_file(restic_bin, repo, password, snap2, wfx, dump_dest, FALSE, &expected, 0, NULL, NULL, err, _countof(err));
+    res = restic_dump_file(restic_bin, REPO(repo, password), snap2, wfx, dump_dest, FALSE, &expected, 0, NULL, NULL, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_OK, "Dump readme.txt succeeds");
     HANDLE hf = CreateFileW(dump_dest, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
     EXPECT_TRUE(hf != INVALID_HANDLE_VALUE, "Extracted readme.txt exists");
@@ -1116,13 +1210,13 @@ static void test_live_restic_cli(void) {
     EXPECT_TRUE(ft_u64(actual_ft) == ft_u64(expected), "Extracted file preserves snapshot LastWriteTime");
 
     /* 3. overwrite = FALSE refuses to clobber an existing file; overwrite = TRUE succeeds even on READONLY */
-    res = restic_dump_file(restic_bin, repo, password, snap2, wfx, dump_dest, FALSE, NULL, 0, NULL, NULL, err, _countof(err));
+    res = restic_dump_file(restic_bin, REPO(repo, password), snap2, wfx, dump_dest, FALSE, NULL, 0, NULL, NULL, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_LOCAL_WRITE, "Refuses to overwrite when overwrite is FALSE");
     SetFileAttributesW(dump_dest, FILE_ATTRIBUTE_READONLY);
     to_wfx_path(data, L"big.bin", wfx, _countof(wfx));
     g_last_dump_bytes = 0;
     g_abort_dump      = FALSE;
-    res = restic_dump_file(restic_bin, repo, password, snap2, wfx, dump_dest, TRUE, NULL, 0, dump_progress_cb, NULL, err, _countof(err));
+    res = restic_dump_file(restic_bin, REPO(repo, password), snap2, wfx, dump_dest, TRUE, NULL, 0, dump_progress_cb, NULL, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_OK, "Streaming 100 KB file over multi-chunk pipe succeeds");
     WIN32_FILE_ATTRIBUTE_DATA big_fad;
     EXPECT_TRUE(GetFileAttributesExW(dump_dest, GetFileExInfoStandard, &big_fad) &&
@@ -1134,7 +1228,7 @@ static void test_live_restic_cli(void) {
     /* 4. Zero-byte file extraction */
     DeleteFileW(dump_dest);
     to_wfx_path(data, L"zero.bin", wfx, _countof(wfx));
-    res = restic_dump_file(restic_bin, repo, password, snap2, wfx, dump_dest, FALSE, NULL, 0, NULL, NULL, err, _countof(err));
+    res = restic_dump_file(restic_bin, REPO(repo, password), snap2, wfx, dump_dest, FALSE, NULL, 0, NULL, NULL, err, _countof(err));
     WIN32_FILE_ATTRIBUTE_DATA fad;
     EXPECT_TRUE(res == RESTIC_OK && GetFileAttributesExW(dump_dest, GetFileExInfoStandard, &fad) &&
                 fad.nFileSizeLow == 0 && fad.nFileSizeHigh == 0, "Zero-byte file created on disk");
@@ -1143,7 +1237,7 @@ static void test_live_restic_cli(void) {
     DeleteFileW(dump_dest);
     to_wfx_path(data, L"big.bin", wfx, _countof(wfx));
     g_abort_dump = TRUE;
-    res = restic_dump_file(restic_bin, repo, password, snap2, wfx, dump_dest, TRUE, NULL, 0, dump_progress_cb, NULL, err, _countof(err));
+    res = restic_dump_file(restic_bin, REPO(repo, password), snap2, wfx, dump_dest, TRUE, NULL, 0, dump_progress_cb, NULL, err, _countof(err));
     g_abort_dump = FALSE;
     EXPECT_TRUE(res == RESTIC_ERR_CANCELLED, "Dump cancelled via progress callback");
     EXPECT_TRUE(GetFileAttributesW(dump_dest) == INVALID_FILE_ATTRIBUTES, "Incomplete local file removed on abort");
@@ -1151,52 +1245,52 @@ static void test_live_restic_cli(void) {
 
     /* 6. Binary fidelity: 0x00/0x0A/0x0D/0x1A bytes survive the pipe byte for byte (no text-mode translation) */
     to_wfx_path(data, L"sub\\sub2\\binary.dat", wfx, _countof(wfx));
-    res = restic_dump_file(restic_bin, repo, password, snap2, wfx, dump_dest, FALSE, NULL, 0, NULL, NULL, err, _countof(err));
+    res = restic_dump_file(restic_bin, REPO(repo, password), snap2, wfx, dump_dest, FALSE, NULL, 0, NULL, NULL, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_OK && verify_pattern_file(dump_dest, 70000), "Binary file extracted byte for byte");
 
     /* 7. A failed overwrite never destroys the existing target (data goes to a temporary file first) */
     to_wfx_path(data, L"no_such_file.txt", wfx, _countof(wfx));
-    res = restic_dump_file(restic_bin, repo, password, snap2, wfx, dump_dest, TRUE, NULL, 0, NULL, NULL, err, _countof(err));
+    res = restic_dump_file(restic_bin, REPO(repo, password), snap2, wfx, dump_dest, TRUE, NULL, 0, NULL, NULL, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_PATH_NOT_FOUND && verify_pattern_file(dump_dest, 70000),
                 "Missing remote file keeps the existing target intact");
     to_wfx_path(data, L"big.bin", wfx, _countof(wfx));
     g_abort_dump = TRUE;
-    res = restic_dump_file(restic_bin, repo, password, snap2, wfx, dump_dest, TRUE, NULL, 0, dump_progress_cb, NULL, err, _countof(err));
+    res = restic_dump_file(restic_bin, REPO(repo, password), snap2, wfx, dump_dest, TRUE, NULL, 0, dump_progress_cb, NULL, err, _countof(err));
     g_abort_dump = FALSE;
     EXPECT_TRUE(res == RESTIC_ERR_CANCELLED && verify_pattern_file(dump_dest, 70000) && count_partial_files(base) == 0,
                 "Cancelled overwrite keeps the existing target intact and removes the temporary file");
-    res = restic_dump_file(restic_bin, repo, L"wrong_pwd", snap2, wfx, dump_dest, TRUE, NULL, 0, NULL, NULL, err, _countof(err));
+    res = restic_dump_file(restic_bin, REPO(repo, L"wrong_pwd"), snap2, wfx, dump_dest, TRUE, NULL, 0, NULL, NULL, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_WRONG_PASSWORD && verify_pattern_file(dump_dest, 70000),
                 "Wrong password keeps the existing target intact");
 
     /* 8. Local-side failures */
     to_wfx_path(data, L"readme.txt", wfx, _countof(wfx));
-    res = restic_dump_file(restic_bin, repo, password, snap2, wfx, dump_dest, FALSE, NULL, 0, NULL, NULL, err, _countof(err));
+    res = restic_dump_file(restic_bin, REPO(repo, password), snap2, wfx, dump_dest, FALSE, NULL, 0, NULL, NULL, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_LOCAL_WRITE && verify_pattern_file(dump_dest, 70000),
                 "overwrite=FALSE on an existing target fails before touching it");
-    res = restic_dump_file(restic_bin, repo, password, snap2, wfx, base, TRUE, NULL, 0, NULL, NULL, err, _countof(err));
+    res = restic_dump_file(restic_bin, REPO(repo, password), snap2, wfx, base, TRUE, NULL, 0, NULL, NULL, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_LOCAL_WRITE, "A directory as the local target is refused");
     WCHAR bad_dest[MAX_PATH];
     swprintf_s(bad_dest, _countof(bad_dest), L"%ls\\no_such_dir\\out.bin", base);
-    res = restic_dump_file(restic_bin, repo, password, snap2, wfx, bad_dest, TRUE, NULL, 0, NULL, NULL, err, _countof(err));
+    res = restic_dump_file(restic_bin, REPO(repo, password), snap2, wfx, bad_dest, TRUE, NULL, 0, NULL, NULL, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_LOCAL_WRITE, "Non-existent local directory -> RESTIC_ERR_LOCAL_WRITE (non-empty file)");
     to_wfx_path(data, L"zero.bin", wfx, _countof(wfx));
-    res = restic_dump_file(restic_bin, repo, password, snap2, wfx, bad_dest, TRUE, NULL, 0, NULL, NULL, err, _countof(err));
+    res = restic_dump_file(restic_bin, REPO(repo, password), snap2, wfx, bad_dest, TRUE, NULL, 0, NULL, NULL, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_LOCAL_WRITE, "Non-existent local directory -> RESTIC_ERR_LOCAL_WRITE (zero-byte file)");
     EXPECT_TRUE(count_partial_files(base) == 0, "No temporary file after local failures");
 
     /* 9. Argument validation (nothing is spawned) */
-    res = restic_dump_file(restic_bin, repo, password, snap2, L"\\", dump_dest, TRUE, NULL, 0, NULL, NULL, err, _countof(err));
+    res = restic_dump_file(restic_bin, REPO(repo, password), snap2, L"\\", dump_dest, TRUE, NULL, 0, NULL, NULL, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_INVALID_ARG, "Dumping the snapshot root is refused");
-    res = restic_dump_file(restic_bin, repo, password, "--help", wfx, dump_dest, TRUE, NULL, 0, NULL, NULL, err, _countof(err));
+    res = restic_dump_file(restic_bin, REPO(repo, password), "--help", wfx, dump_dest, TRUE, NULL, 0, NULL, NULL, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_INVALID_ARG, "Option-like snapshot ID refused");
-    res = restic_dump_file(restic_bin, repo, password, NULL, wfx, dump_dest, TRUE, NULL, 0, NULL, NULL, err, _countof(err));
+    res = restic_dump_file(restic_bin, REPO(repo, password), NULL, wfx, dump_dest, TRUE, NULL, 0, NULL, NULL, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_INVALID_ARG, "NULL snapshot ID refused");
-    res = restic_dump_file(restic_bin, repo, password, snap2, wfx, L"", TRUE, NULL, 0, NULL, NULL, err, _countof(err));
+    res = restic_dump_file(restic_bin, REPO(repo, password), snap2, wfx, L"", TRUE, NULL, 0, NULL, NULL, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_INVALID_ARG, "Empty local path refused");
-    res = restic_dump_file(L"restic.exe", repo, password, snap2, wfx, dump_dest, TRUE, NULL, 0, NULL, NULL, err, _countof(err));
+    res = restic_dump_file(L"restic.exe", REPO(repo, password), snap2, wfx, dump_dest, TRUE, NULL, 0, NULL, NULL, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_SPAWN_FAILED, "Bare executable name refused (cwd is never searched)");
-    res = restic_dump_file(restic_bin, repo, password, "deadbeef", wfx, dump_dest, TRUE, NULL, 0, NULL, NULL, err, _countof(err));
+    res = restic_dump_file(restic_bin, REPO(repo, password), "deadbeef", wfx, dump_dest, TRUE, NULL, 0, NULL, NULL, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_CLI_FAILED && verify_pattern_file(dump_dest, 70000),
                 "Unknown snapshot -> CLI failure, target intact");
     DeleteFileW(dump_dest);
@@ -1224,7 +1318,7 @@ static void test_dump_with_fake_restic(void) {
     ResticResult res;
     DeleteFileW(dest);
 #define FAKE_DUMP(path, overwrite, timeout) \
-    restic_dump_file(fake, L"repo-url", L"s3cret", "abcd1234", path, dest, overwrite, NULL, timeout, NULL, NULL, err, _countof(err))
+    restic_dump_file(fake, REPO(L"repo-url", L"s3cret"), "abcd1234", path, dest, overwrite, NULL, timeout, NULL, NULL, err, _countof(err))
 
     res = FAKE_DUMP(L"\\ok", FALSE, 0);
     EXPECT_TRUE(res == RESTIC_OK && file_equals(dest, "hello"), "Fake restic: stdout bytes are stored verbatim");
@@ -1277,8 +1371,170 @@ static void test_dump_with_fake_restic(void) {
     EXPECT_TRUE(slow_ms > 1800, "The whole transfer lasted longer than the timeout value (it is not a total-time limit)");
 #undef FAKE_DUMP
 
+    /*
+     * Extended options go before the command, one -o each, one argument each; restic reads an -o
+     * value as CSV, so one with a quote or a comma is a quoted CSV field
+     */
+    ResticRepo with_options = {.target = L"repo-url", .password = L"pw",
+                               .options = L"s3.region=eu-west-1\0sftp.command=\"C:\\x y\\ssh.exe\" -s sftp\0"
+                                          L"s3.storage-class=a,b\0"};
+    ResticCommandOutput out;
+    res = restic_exec_command(fake, &with_options, L"snapshots /args", NULL, &out);
+    EXPECT_TRUE(res == RESTIC_OK && strcmp(out.output, "-o|s3.region=eu-west-1|-o|\"sftp.command=\"\"C:\\x y\\ssh.exe\"\" -s sftp\"|"
+                                                       "-o|\"s3.storage-class=a,b\"|snapshots|/args|") == 0,
+                "Options as -o arguments before the command, each one argument, a CSV field where restic needs one");
+    restic_free_command_output(&out);
+    res = restic_dump_file(fake, &with_options, "abcd1234", L"\\args", dest, TRUE, NULL, 0, NULL, NULL, err, _countof(err));
+    EXPECT_TRUE(res == RESTIC_OK && file_equals(dest, "-o|s3.region=eu-west-1|-o|\"sftp.command=\"\"C:\\x y\\ssh.exe\"\" -s sftp\"|"
+                                                      "-o|\"s3.storage-class=a,b\"|dump|--no-lock|abcd1234|/args|"),
+                "restic dump gets the options too");
+    res = restic_exec_command(fake, REPO(L"repo-url", L"pw"), L"snapshots /args", NULL, &out);
+    EXPECT_TRUE(res == RESTIC_OK && strcmp(out.output, "snapshots|/args|") == 0, "No options: nothing added");
+    restic_free_command_output(&out);
+    ResticRepo empty_option = {.target = L"repo-url", .password = L"pw", .options = L"rest.connections=\0s3.region=x\0"};
+    res = restic_exec_command(fake, &empty_option, L"snapshots /args", NULL, &out);
+    EXPECT_TRUE(res == RESTIC_OK && strcmp(out.output, "-o|s3.region=x|snapshots|/args|") == 0,
+                "An option written empty in the INI is not passed");
+    restic_free_command_output(&out);
+
     DeleteFileW(dest);
     RemoveDirectoryW(dir);
+}
+
+/* TRUE when the process with the ID printed at the start of `text` has ended (or never existed) */
+static BOOL printed_process_ended(const char* text) {
+    unsigned long pid = text ? strtoul(text, NULL, 10) : 0;
+    if (pid == 0) return FALSE;
+    HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)pid);
+    if (!h) return TRUE;
+    BOOL ended = WaitForSingleObject(h, 5000) == WAIT_OBJECT_0;
+    CloseHandle(h);
+    return ended;
+}
+
+/*
+ * Processes restic starts (fake_restic's /child-* modes start a helper and print its ID) end with
+ * it: on a timeout or ESC together with restic, after a normal exit when restic leaves them behind
+ */
+static void test_process_tree_ends(void) {
+    WCHAR fake[MAX_PATH];
+    DWORD len = GetModuleFileNameW(NULL, fake, MAX_PATH);
+    WCHAR* slash = (len > 0 && len < MAX_PATH) ? wcsrchr(fake, L'\\') : NULL;
+    EXPECT_TRUE(slash != NULL, "Locate the test's own folder");
+    wcscpy_s(slash + 1, MAX_PATH - (size_t)(slash + 1 - fake), L"fake_restic.exe");
+
+    ResticExecOptions opts;
+    memset(&opts, 0, sizeof(opts));
+    opts.timeout_ms = 3000;
+    ResticCommandOutput out;
+    ResticResult res = restic_exec_command(fake, REPO(L"repo", L"pw"), L"/child-hang", &opts, &out);
+    EXPECT_TRUE(res == RESTIC_ERR_TIMEOUT && out.output && out.output[0] >= '1' && out.output[0] <= '9',
+                "A hanging restic that started a helper times out");
+    EXPECT_TRUE(printed_process_ended(out.output), "The helper is ended together with restic");
+    restic_free_command_output(&out);
+
+    memset(&opts, 0, sizeof(opts));
+    opts.cancel_proc = cancel_after_first_poll;
+    res = restic_exec_command(fake, REPO(L"repo", L"pw"), L"/child-hang", &opts, &out);
+    EXPECT_TRUE(res == RESTIC_ERR_CANCELLED, "ESC ends a restic that started a helper");
+    restic_free_command_output(&out);
+
+    res = restic_exec_command(fake, REPO(L"repo", L"pw"), L"/child-exit", NULL, &out);
+    EXPECT_TRUE(res == RESTIC_OK && printed_process_ended(out.output),
+                "A helper restic leaves behind is ended when restic has exited");
+    restic_free_command_output(&out);
+}
+
+/* ResticNoticeProc of test_refused_credentials: counts the lines and keeps the last */
+static int  g_notices = 0;
+static char g_last_notice[1024];
+static void count_notice(const char* line, void* ctx) {
+    (void)ctx;
+    g_notices++;
+    strncpy_s(g_last_notice, sizeof(g_last_notice), line, _TRUNCATE);
+}
+
+/*
+ * restic retries a storage that refuses the credentials for 15 minutes; its "retrying" line with
+ * such a reason ends it at once (fake_restic.exe /retry-auth), while other retries are only
+ * reported (/retry-net)
+ */
+static void test_refused_credentials(void) {
+    WCHAR fake[MAX_PATH];
+    DWORD len = GetModuleFileNameW(NULL, fake, MAX_PATH);
+    WCHAR* slash = (len > 0 && len < MAX_PATH) ? wcsrchr(fake, L'\\') : NULL;
+    EXPECT_TRUE(slash != NULL, "Locate the test's own folder");
+    wcscpy_s(slash + 1, MAX_PATH - (size_t)(slash + 1 - fake), L"fake_restic.exe");
+
+    ResticExecOptions opts;
+    memset(&opts, 0, sizeof(opts));
+    opts.timeout_ms  = 15000;
+    opts.notice_proc = count_notice;
+    g_notices        = 0;
+    ResticCommandOutput out;
+    ULONGLONG t0     = GetTickCount64();
+    ResticResult res = restic_exec_command(fake, REPO(L"repo", L"pw"), L"/retry-auth", &opts, &out);
+    EXPECT_TRUE(res == RESTIC_ERR_CREDENTIALS_REFUSED && GetTickCount64() - t0 < 10000,
+                "A refused secret key ends restic at once instead of after its 15 minutes of retries");
+    EXPECT_TRUE(wcsstr(out.error_message, L"refused the credentials: Stat: The request signature we calculated") != NULL,
+                "... with the storage's reason");
+    EXPECT_TRUE(g_notices == 1 && strstr(g_last_notice, "retrying after") != NULL, "... which was also reported");
+    restic_free_command_output(&out);
+
+    g_notices = 0;
+    res       = restic_exec_command(fake, REPO(L"repo", L"pw"), L"/retry-net", &opts, &out);
+    EXPECT_TRUE(res == RESTIC_OK && g_notices == 1 && strstr(g_last_notice, "i/o timeout") != NULL,
+                "Another retry is reported and restic left alone");
+    restic_free_command_output(&out);
+
+    WCHAR dest[MAX_PATH], err[512];
+    GetTempPathW(MAX_PATH, dest);
+    wcscat_s(dest, MAX_PATH, L"restic_refused_dump.bin");
+    DeleteFileW(dest);
+    t0  = GetTickCount64();
+    res = restic_dump_file(fake, REPO(L"repo", L"pw"), "abcd1234", L"\\retry-auth", dest, TRUE, NULL, 15000, NULL, NULL,
+                           err, _countof(err));
+    EXPECT_TRUE(res == RESTIC_ERR_CREDENTIALS_REFUSED && GetTickCount64() - t0 < 10000 &&
+                    wcsstr(err, L"refused the credentials") != NULL && GetFileAttributesW(dest) == INVALID_FILE_ATTRIBUTES,
+                "restic dump is ended the same way, writing nothing");
+}
+
+/* restic_read_version against fake_restic.exe, which prints FAKE_RESTIC_VERSION as restic would */
+static void test_read_version(void) {
+    WCHAR fake[MAX_PATH];
+    DWORD len = GetModuleFileNameW(NULL, fake, MAX_PATH);
+    WCHAR* slash = (len > 0 && len < MAX_PATH) ? wcsrchr(fake, L'\\') : NULL;
+    EXPECT_TRUE(slash != NULL, "Locate the test's own folder");
+    wcscpy_s(slash + 1, MAX_PATH - (size_t)(slash + 1 - fake), L"fake_restic.exe");
+    static const struct {
+        const WCHAR* printed; /* NULL: the fake's default */
+        BOOL text;            /* Printed as text, as restic before 0.17.0 does */
+        ResticResult result;
+        unsigned version;
+    } cases[] = {
+        {NULL, FALSE, RESTIC_OK, RESTIC_VERSION(0, 19, 1)},
+        {L"0.17.0", FALSE, RESTIC_OK, RESTIC_VERSION(0, 17, 0)},
+        {L"0.17.1", FALSE, RESTIC_OK, RESTIC_MIN_VERSION},
+        {L"1.2.3-dev (compiled manually)", FALSE, RESTIC_OK, RESTIC_VERSION(1, 2, 3)},
+        {L"0.17", FALSE, RESTIC_ERR_JSON_PARSE, 0},
+        {L"v0.18.0", FALSE, RESTIC_ERR_JSON_PARSE, 0},
+        {L"0.18.99999999", FALSE, RESTIC_ERR_JSON_PARSE, 0},
+        {L"0.16.4", TRUE, RESTIC_ERR_JSON_PARSE, 0}, /* Text, however recent it says it is */
+        {L"0.19.1", TRUE, RESTIC_ERR_JSON_PARSE, 0},
+    };
+    for (size_t i = 0; i < _countof(cases); ++i) {
+        SetEnvironmentVariableW(L"FAKE_RESTIC_VERSION", cases[i].printed);
+        SetEnvironmentVariableW(L"FAKE_RESTIC_VERSION_TEXT", cases[i].text ? L"1" : NULL);
+        unsigned version = 12345;
+        WCHAR err[512];
+        ResticResult res = restic_read_version(fake, NULL, &version, err, _countof(err));
+        EXPECT_TRUE(res == cases[i].result && version == cases[i].version, "restic version parsed, or refused as not one");
+    }
+    SetEnvironmentVariableW(L"FAKE_RESTIC_VERSION", NULL);
+    SetEnvironmentVariableW(L"FAKE_RESTIC_VERSION_TEXT", NULL);
+    EXPECT_TRUE(RESTIC_VERSION(0, 17, 0) < RESTIC_MIN_VERSION && RESTIC_VERSION(0, 17, 1) == RESTIC_MIN_VERSION &&
+                    RESTIC_VERSION(0, 9, 999) < RESTIC_VERSION(0, 10, 0),
+                "Versions compare as numbers");
 }
 
 int main(void) {
@@ -1301,11 +1557,15 @@ int main(void) {
     test_parse_ls_ndjson();
     test_exec_streams_and_exit_codes();
     test_exec_environment();
+    test_exec_environment_credentials();
     test_exec_limits_and_failures();
     test_exec_large_output_and_long_args();
     test_exec_line_streaming();
     test_repo_cache_generations();
     test_dump_with_fake_restic();
+    test_read_version();
+    test_process_tree_ends();
+    test_refused_credentials();
     test_live_restic_cli();
 
 #if defined(_DEBUG) && !defined(__SANITIZE_ADDRESS__)

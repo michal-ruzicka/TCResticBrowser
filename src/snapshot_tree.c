@@ -27,6 +27,8 @@ typedef struct {
     const char* hostname;             /* Points into the JSON document */
     const JsonValue* tags;            /* JSON array or NULL */
     const JsonValue* paths;           /* JSON array or NULL */
+    int has_size;                     /* The snapshot has a summary (restic 0.17 and later) */
+    uint64_t size;                    /* summary.total_bytes_processed, what restic shows as Size */
 } SnapshotRecord;
 
 /*
@@ -40,6 +42,8 @@ typedef struct {
     const char* host;  /* These three point just past the structure */
     const char* paths; /* The backed-up paths, one per line */
     const char* tags;  /* The tags, one per line */
+    int has_size;      /* 0: no summary, the size is not known */
+    uint64_t size;     /* Bytes the backup processed */
 } SnapshotInfo;
 
 /* Open-addressing hash set of (parent, name) -> node, so inserting N snapshots stays O(N) */
@@ -272,6 +276,12 @@ static size_t collect_records(const JsonValue* array, SnapshotRecord* records) {
         r->tags = tags && tags->type == JSON_ARRAY ? tags : NULL;
         const JsonValue* paths = json_object_get(v, "paths");
         r->paths = paths && paths->type == JSON_ARRAY ? paths : NULL;
+        /* restic snapshots shows a summary without the field as 0 B, a snapshot without one with no size */
+        const JsonValue* summary = json_object_get(v, "summary");
+        const JsonValue* bytes   = json_object_get(summary, "total_bytes_processed");
+        unsigned long long size  = 0;
+        r->has_size = summary && summary->type == JSON_OBJECT && (!bytes || json_u64(bytes, &size));
+        r->size     = r->has_size ? (uint64_t)size : 0;
         n++;
     }
     qsort(records, n, sizeof(SnapshotRecord), compare_records);
@@ -315,6 +325,8 @@ static SnapshotInfo* new_info(const SnapshotRecord* rec, const char* id) {
     info->host  = text;
     info->paths = text + host_len;
     info->tags  = text + host_len + paths_len;
+    info->has_size = rec->has_size;
+    info->size     = rec->size;
     return info;
 }
 
@@ -600,6 +612,31 @@ static void csv_field(CsvText* t, const char* value, char separator) {
     if (quote) csv_put(t, "\"", 1);
 }
 
+/*
+ * A snapshot's size as `restic snapshots` prints it (ui.FormatBytes): "<n> B" below 1 KiB, else three
+ * decimals of the largest of KiB, MiB, GiB, TiB it reaches, rounded half to even like Go's "%.3f".
+ * Integer arithmetic, so it is exact and the decimal point never follows the C locale.
+ */
+static void size_text(uint64_t bytes, char* out, size_t cap) {
+    static const char* const units[] = {"KiB", "MiB", "GiB", "TiB"};
+    int u = bytes >= (1ull << 40) ? 3 : bytes >= (1ull << 30) ? 2 : bytes >= (1ull << 20) ? 1 : bytes >= (1ull << 10) ? 0 : -1;
+    if (u < 0) {
+        snprintf(out, cap, "%llu B", (unsigned long long)bytes);
+        return;
+    }
+    unsigned shift  = 10u * (unsigned)(u + 1);
+    uint64_t mask   = (1ull << shift) - 1;
+    uint64_t whole  = bytes >> shift;
+    uint64_t scaled = (bytes & mask) * 1000u; /* Below 2^40 * 1000: no overflow */
+    uint64_t frac   = scaled >> shift, rest = scaled & mask, half = 1ull << (shift - 1);
+    if (rest > half || (rest == half && (frac & 1u))) ++frac;
+    if (frac == 1000) {
+        ++whole;
+        frac = 0;
+    }
+    snprintf(out, cap, "%llu.%03u %s", (unsigned long long)whole, (unsigned)frac, units[u]);
+}
+
 static int compare_info(const void* a, const void* b) {
     const SnapshotInfo* x = *(const SnapshotInfo* const*)a;
     const SnapshotInfo* y = *(const SnapshotInfo* const*)b;
@@ -620,7 +657,7 @@ char* snapshot_tree_csv(const SnapshotTree* tree, char separator, size_t* out_le
 
     CsvText t = {NULL, 0, 0, 0};
     const char sep[2] = {separator, '\0'};
-    static const char* const header[] = {"short ID", "host", "paths", "timestamp", "tags", "full ID"};
+    static const char* const header[] = {"short ID", "host", "paths", "size", "timestamp", "tags", "full ID"};
     csv_put(&t, "\xEF\xBB\xBF", 3); /* UTF-8 byte-order mark: spreadsheets then read the file as UTF-8 */
     for (size_t c = 0; c < sizeof(header) / sizeof(header[0]); ++c) {
         if (c) csv_put(&t, sep, 1);
@@ -629,15 +666,18 @@ char* snapshot_tree_csv(const SnapshotTree* tree, char separator, size_t* out_le
     csv_put(&t, "\r\n", 2);
     for (size_t i = 0; i < n; ++i) {
         const SnapshotInfo* s = order[i];
-        char short_id[SNAPSHOT_TREE_SHORT_ID_CHARS + 1], when[SNAPSHOT_TREE_TIME_FORMAT_MAX * 2 + 1];
+        char short_id[SNAPSHOT_TREE_SHORT_ID_CHARS + 1], when[SNAPSHOT_TREE_TIME_FORMAT_MAX * 2 + 1], size[32] = "";
         memcpy(short_id, s->id, SNAPSHOT_TREE_SHORT_ID_CHARS);
         short_id[SNAPSHOT_TREE_SHORT_ID_CHARS] = '\0';
         time_name(&s->time, "YYYY-MM-DD hh:mm:ss", when); /* A date and time spreadsheets recognise */
+        if (s->has_size) size_text(s->size, size, sizeof(size));
         csv_field(&t, short_id, separator);
         csv_put(&t, sep, 1);
         csv_field(&t, s->host, separator);
         csv_put(&t, sep, 1);
         csv_field(&t, s->paths, separator);
+        csv_put(&t, sep, 1);
+        csv_field(&t, size, separator);
         csv_put(&t, sep, 1);
         csv_field(&t, when, separator);
         csv_put(&t, sep, 1);

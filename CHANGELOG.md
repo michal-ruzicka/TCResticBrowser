@@ -5,6 +5,70 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.2.0] – 2026-10-24
+
+### Added
+
+- **`snapshots.csv` has a `size` column** after `paths`: the size of each
+  snapshot as `restic snapshots` shows it (`1.234 GiB`), from the summary
+  restic 0.17 and later record with a snapshot; empty for older snapshots.
+- **Settings per repository in `[Repository: <alias>]` sections**, named
+  as restic names them:
+  - `PasswordFile=` and `PasswordCommand=` let restic read the password
+    from a file or a password manager's command, so the repository opens
+    without a password dialog and the plugin never sees the password.
+    `PasswordCommand=` is normally a plain path, like `ResticPath=`; with
+    arguments it is a command line as restic splits it, and one with an
+    unquoted backslash, where restic would cut a Windows path apart, is
+    refused with a hint. Both together go to restic, which refuses the
+    pair. A password from a file or command that restic rejects is
+    reported, not asked for.
+  - `AWS_ACCESS_KEY_ID=` gives an S3 repository its own access key; the
+    plugin asks for the secret access key in a dialog titled
+    `<alias> - S3 secret access key` (for password managers that pick an
+    entry by window title), before the password, and keeps it in memory
+    only, encrypted, as long as the password. `AWS_SHARED_CREDENTIALS_FILE=`
+    and `AWS_PROFILE=` select an AWS credentials file and profile instead;
+    `AWS_DEFAULT_REGION=` and the `RESTIC_AWS_ASSUME_ROLE_*=` variables
+    complete the S3 variables restic reads. A repository with S3 variables
+    does not inherit `AWS_*`, `MINIO_*` and `RESTIC_AWS_*` variables from
+    Total Commander's environment; repositories without them inherit them
+    as before.
+  - Any restic extended option is given as `<backend>.<option>=`
+    (`s3.region=`, `s3.bucket-lookup=`, `rclone.program=`...) and passed as
+    `-o`, also to `restic dump`; names are lowercased as restic does, and
+    the first occurrence counts. `rclone.program=`, `sftp.command=`,
+    `rclone.args=` and `sftp.args=`, which restic splits into a command
+    line itself, are written and checked like `PasswordCommand=`.
+  - A setting that cannot be used (a missing file, a path relative to the
+    current folder, a broken command line) is reported when the repository
+    is opened, before any dialog or restic run.
+  - `🗑 Forget N Passwords` counts the repositories with a password or
+    secret key typed in; it also forgets that a password file or command
+    was accepted.
+- **Refused S3 credentials are reported at once.** restic retries a
+  storage that refuses the credentials for 15 minutes, so a mistyped S3
+  secret key made Total Commander wait that long. The plugin ends restic
+  on the first such retry and asks for the secret key again, or shows the
+  storage's reason when the key was not typed in. Other retries (a server
+  that is down, say) appear in the connection log while restic waits.
+- **`rclone:` and S3 repositories are tested end to end**, with the rclone
+  release pinned in CI: an `rclone:` repository through rclone's local
+  backend, and an S3 repository on `rclone serve s3`.
+
+### Changed
+
+- **The restic version is checked.** A `restic.exe` older than 0.17.1,
+  whose exit codes the plugin would misread, is refused with a message
+  before a repository is opened, instead of failing in confusing ways.
+
+### Fixed
+
+- **`ESC` ends restic's helper processes too.** restic now runs in a job
+  object, so cancelling, a timeout or closing Total Commander ends the
+  `rclone`, `ssh` or password command it started as well, instead of
+  leaving them running until they notice the closed pipe.
+
 ## [v2.1.0] – 2026-10-22
 
 ### Added
@@ -276,6 +340,7 @@ by Pietro Partescano, the base of this fork was commit [c8481b43c9ab2867eee82471
   block.
 
 
+[v2.2.0]: https://github.com/michal-ruzicka/TCResticBrowser/compare/v2.1.0...v2.2.0
 [v2.1.0]: https://github.com/michal-ruzicka/TCResticBrowser/compare/v2.0.0...v2.1.0
 [v2.0.0]: https://github.com/michal-ruzicka/TCResticBrowser/compare/c8481b43c9ab2867eee824719e3a9c6785db6c61...v2.0.0
 [v1.0.0]: https://github.com/goldfix/Restic_WFX_Plugin/tree/1.0.0
