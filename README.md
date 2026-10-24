@@ -106,6 +106,7 @@ entries pointing there need to be recreated.
   - Copy individual files or entire directory trees out of any snapshot using **`F5`** (preserving original modification timestamps and 64-bit file sizes).
   - Inspect files directly with Total Commander's **Lister (`F3`)** or **Quick View (`Ctrl+Q`)**.
   - Constant-memory streaming (`64 KB` chunks via `restic dump --no-lock`) into a temporary file with **atomic replacement** on completion: an interrupted or failed overwrite never corrupts or deletes your existing local file.
+- **File Versions and Snapshot Properties (`Alt+Enter`):** `Alt+Enter` on a file inside a snapshot opens it as a folder that lists every version of that file in the snapshots of the same host, named by its modification time and the short ID of the snapshot it was first backed up in (`2026-10-17_14-02-11 (1a2b3c4d) report.docx`), to view (`F3`) or copy (`F5`) like any file - one `restic find` instead of opening snapshot after snapshot. `Alt+Enter` on a snapshot or a folder in it shows the snapshot's details (host, user, paths, tags, size, files new and changed, data added, how long the backup took), and on a version the snapshots that hold it. See [File Versions and Snapshot Properties](#file-versions-and-snapshot-properties-altenter).
 - **Strictly Read-Only by Design:** Every Restic command runs with `--no-lock`. Repository modification entry points (`FsPutFile`, `FsDeleteFile`, `FsRemoveDir`, `FsMkDir`, `FsRenMovFile`) are intentionally not exported, and `F6` (Move) is rejected.
 - **Zero Passwords on Disk:** Repository passwords are requested interactively via Total Commander's native password dialog (`RequestProcW`), kept only in RAM per repository alias for 30 minutes by default (see [Password Timeout](#password-timeout)), passed to `restic.exe` via an isolated environment block (`RESTIC_PASSWORD`), and wiped with `SecureZeroMemory`. Cached passwords are encrypted in memory (`CryptProtectMemory`), in pages locked out of the page file and excluded from Windows Error Reporting crash dumps, so a memory dump or the hibernation file does not reveal them. A repository can instead take its password from a file or a password manager's command, which restic reads itself, and S3 repositories can have their own access key, whose secret key is asked for and kept like a password (see [Repository Settings](#repository-settings-password-file-password-command-s3-credentials)).
 - **Responsive Cancellation (`ESC`):** Long operations on remote backends can be aborted with `ESC`. Extraction uses a 30-minute **inactivity** timeout (so slow multi-gigabyte transfers are never cut off as long as bytes keep flowing); a folder listing is stopped after 30 minutes in total.
@@ -215,6 +216,7 @@ documentation.
 | **Forget Passwords** | While passwords are remembered, the plugin's root folder starts with **`🗑 Forget N Passwords`** (N is their number; `🗑 Forget 1 Password` for one). Press **Enter** on it to wipe them all at once; a message says how many were forgotten, the root folder is then re-read without the entry, and the next access asks again. The entry is not removed by itself when the passwords expire; it disappears the next time the root folder is read (`Ctrl+R`). |
 | **Explore Files** | Enter a snapshot through `snapshots`, `ids`, `hosts` or `tags` (or `latest`) and navigate the backed-up directory tree. The snapshot list is read once and then shown at once from memory; when it is older than a minute (`SnapshotListRefreshSeconds=`), as `restic mount` would re-read it, restic reads a new one in the background and the next listing (`Ctrl+R`) shows any new snapshots (see [Snapshot List Refresh](#snapshot-list-refresh)). |
 | **View File (`F3` / `Ctrl+Q`)** | Press **`F3`** (Lister) or **`Ctrl+Q`** (Quick View) on any file to stream it to a temporary location and view its contents. |
+| **File Versions (`Alt+Enter`)** | Press **`Alt+Enter`** on a file inside a snapshot: the panel changes into a folder of that file's versions across the snapshots of the same host, oldest first, to view or copy; `Backspace` returns. `Alt+Enter` on a snapshot or a folder shows the snapshot's details. See [File Versions and Snapshot Properties](#file-versions-and-snapshot-properties-altenter). |
 | **Restore / Extract (`F5`)** | Select one or more files or directories and press **`F5`** to copy them to the target panel, preserving original `LastWriteTime` timestamps. Standard Total Commander overwrite prompts are supported. |
 | **Cancel Operation (`ESC`)** | Press **`ESC`** in Total Commander's progress dialog to terminate the underlying `restic.exe` child process, together with any `rclone`, `ssh` or password command it started, and clean up any temporary file. Closing Total Commander ends restic runs still working in the background the same way. |
 
@@ -233,6 +235,8 @@ it can, so the same folder can take a moment once and open instantly later:
 | Any folder of that snapshot once the background read is done | Instant, from memory. The read takes from seconds to minutes depending on the number of files, and runs while you browse. |
 | A snapshot with more files than `SnapshotCacheMB=` holds | Every folder waits for its own `restic ls`; it is never read as a whole. |
 | A file you view (`F3`, `Ctrl+Q`) or copy (`F5`) | Always runs `restic dump`, about a second per file plus the transfer. |
+| The versions of a file (`Alt+Enter`) | Waits for one `restic find`, which opens every snapshot of the host along the file's path: longer than a folder, shorter than opening the snapshots one by one. Kept for a minute (`SnapshotListRefreshSeconds=`), so returning to it, copying a version or `Alt+Enter` on one runs no `restic find` again. |
+| The details of a snapshot (`Alt+Enter`) | Instant, from the snapshot list. |
 
 After the password timeout (30 minutes by default) or `🗑 Forget N
 Passwords`, everything read from that repository is dropped, so the next
@@ -353,6 +357,52 @@ restic is asked for the ID only when you view or copy it, and the answer
 is remembered as long as the repository's password is. The file's date
 is the moment restic was asked for the ID; until then the listing shows
 the date of `snapshots.csv`.
+
+### File Versions and Snapshot Properties (`Alt+Enter`)
+
+`Alt+Enter` (or *Properties* in the context menu) on a **file inside a
+snapshot** turns the file into a folder: the panel changes into
+`...\report.docx\`, which lists the versions of that file in all
+snapshots of the same host as the snapshot you came from:
+
+```text
+2026-09-30_08-15-02 (5e6f7a8b) report.docx      48 213   30.09.2026 08:15
+2026-10-17_14-02-11 (1a2b3c4d) report.docx      51 877   17.10.2026 14:02
+```
+
+- A version is what restic itself compares when it decides whether a
+  file changed: the same size and modification time in several
+  snapshots is one version. Versions are named by their modification
+  time, written by `SnapshotTimeFormat=` in the file's own time zone,
+  then the short ID of the oldest snapshot that holds the version - the
+  backup in which it first appeared - in parentheses, then the file's
+  name, so they sort by time and keep their extension (opening one in
+  the Lister or with Enter works as usual). The short ID is the name of
+  that snapshot's folder under `ids`, where the files that changed
+  together with this version can be found. Two versions with the same
+  time and short ID get `-1`, `-2`... after the time.
+- View (`F3`, `Ctrl+Q`) or copy (`F5`) a version like any file; it comes
+  from the snapshot its name carries. Several selected versions can
+  be copied into a folder at once.
+- `Alt+Enter` on a version shows its modification time, size and the
+  snapshots that hold it (their short IDs and times).
+- `Backspace` returns to the folder the file is in.
+- Only files have versions: a folder at that path in other snapshots is
+  left out, as is the file in snapshots of other hosts. The versions are
+  looked up with one `restic find` for exactly the file's path, which
+  opens every snapshot of the host only along that path; on a big remote
+  repository with many snapshots that takes a while (`ESC` cancels). The
+  result is kept as long as the snapshot list (a minute,
+  `SnapshotListRefreshSeconds=`).
+
+`Alt+Enter` on a **snapshot folder** (in `snapshots`, `ids`, `hosts` or
+`tags`, also `latest`) or on any **folder inside a snapshot** shows the
+snapshot's details from the snapshot list, without running restic: its
+full ID, time, host, user, backed-up paths, tags, and for snapshots
+taken with restic 0.17 or later the size, the number of new, changed and
+unmodified files and folders, the data added to the repository, how
+long the backup took, the parent snapshot and the restic version that
+made it.
 
 ### Dates in the Panels
 

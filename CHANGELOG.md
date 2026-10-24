@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **File versions (`Alt+Enter` on a file inside a snapshot):** the panel
+  changes into a folder of that file's versions across the snapshots of
+  the same host, named by their modification time, the short ID of the
+  oldest snapshot that holds the version (the backup it first appeared
+  in) and the file's name (`2026-10-17_14-02-11 (1a2b3c4d) report.docx`),
+  oldest first, which can be viewed and copied like files; a version is
+  copied from the snapshot its name carries. One `restic find --json` for exactly the file's path
+  finds them; its output is kept as long as the snapshot list.
+  `Alt+Enter` on a version lists the snapshots that hold it.
+- **Snapshot details (`Alt+Enter` on a snapshot or a folder in it):** a
+  dialog with the snapshot's ID, time, host, user, paths, tags, and from
+  its summary the size, files and folders new, changed and unmodified,
+  data added (and stored), the backup's duration, the parent snapshot
+  and the restic version, all from the snapshot list without a restic
+  run.
+
 ## [v2.2.0] – 2026-10-24
 
 ### Added

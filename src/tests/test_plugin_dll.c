@@ -969,14 +969,10 @@ static void test_e2e_snapshot_cache(const Plugin* p, const WCHAR* dir, const WCH
     SetLastError(0);
     EXPECT_TRUE(p->find_first_w(sub, &fd) == INVALID_HANDLE_VALUE && GetLastError() == ERROR_NO_MORE_FILES,
                 "An empty folder is still empty");
-    swprintf_s(sub, _countof(sub), L"%ls\\readme.txt", data_path);
-    SetLastError(0);
-    EXPECT_TRUE(p->find_first_w(sub, &fd) == INVALID_HANDLE_VALUE && GetLastError() == ERROR_PATH_NOT_FOUND,
-                "A file is not a folder");
     swprintf_s(sub, _countof(sub), L"%ls\\no_such_folder", data_path);
     SetLastError(0);
     EXPECT_TRUE(p->find_first_w(sub, &fd) == INVALID_HANDLE_VALUE && GetLastError() == ERROR_PATH_NOT_FOUND,
-                "A missing folder is missing");
+                "A missing folder is missing (and no file there to search the versions of)");
     EXPECT_TRUE(count_restic_runs(log_file) == runs && g_e2e_pwd_prompts == 0, "None of it ran restic");
 
     /* Forgetting the passwords drops the listing with them: the next visit asks and runs restic */
@@ -992,6 +988,115 @@ static void test_e2e_snapshot_cache(const Plugin* p, const WCHAR* dir, const WCH
     EXPECT_TRUE(g_e2e_pwd_prompts == 1 && count_restic_runs(log_file) > runs, "Asked for the password and ran restic");
     EXPECT_TRUE(conn_log_count(L"1:CONNECT \\\n") == 1, "...on the connection still listed, not a new one");
     g_e2e_pwd_prompts = 0;
+    g_e2e_msg_dialogs = 0;
+}
+
+/* The size of a local file, or -1 */
+static long long local_size(const WCHAR* path) {
+    WIN32_FILE_ATTRIBUTE_DATA a;
+    if (!GetFileAttributesExW(path, GetFileExInfoStandard, &a)) return -1;
+    return ((long long)a.nFileSizeHigh << 32) | a.nFileSizeLow;
+}
+
+/*
+ * Alt+Enter (FsExecuteFileW "properties"): a file opens as the folder of its versions across the
+ * snapshots, which copy like files; a version, a snapshot and a folder in it show their properties
+ */
+static void test_e2e_file_history(const Plugin* p, const WCHAR* dir, const WCHAR* snap_root, const WCHAR* data_path) {
+    static WCHAR remote[MAX_PATH * 2], names[2048], version_path[MAX_PATH * 2], local[MAX_PATH];
+    WCHAR properties[] = L"properties";
+    g_e2e_pwd_prompts = 0;
+    g_e2e_msg_dialogs = 0;
+
+    /* with space.txt was changed between the two fixture snapshots: two versions */
+    swprintf_s(remote, _countof(remote), L"%ls\\with space.txt", data_path);
+    EXPECT_TRUE(p->execute_w(NULL, remote, properties) == FS_EXEC_SYMLINK && g_e2e_msg_dialogs == 0,
+                "Alt+Enter on a file opens it as a folder");
+    EXPECT_TRUE(wcsncmp(remote, data_path, wcslen(data_path)) == 0 && wcscmp(remote + wcslen(data_path), L"\\with space.txt\\") == 0,
+                "...the file's own path, as a folder");
+    WIN32_FIND_DATAW fd;
+    WCHAR older[MAX_PATH] = {0}, newer[MAX_PATH] = {0};
+    long long older_size = -1, newer_size = -1;
+    size_t versions = 0;
+    HANDLE h = p->find_first_w(remote, &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE, "...which lists the file's versions");
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            ++versions;
+            BOOL plain = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 && fd.ftLastWriteTime.dwHighDateTime != 0xFFFFFFFF;
+            EXPECT_TRUE(plain && wcsstr(fd.cFileName, L" with space.txt") != NULL,
+                        "A version is a file named by its modification time and the file's name");
+            WCHAR* slot = older[0] ? newer : older;
+            wcsncpy_s(slot, MAX_PATH, fd.cFileName, _TRUNCATE);
+            *(slot == older ? &older_size : &newer_size) = ((long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+        } while (p->find_next_w(h, &fd));
+        p->find_close(h);
+    }
+    EXPECT_TRUE(versions == 2 && older_size == 5 && newer_size == 12 && wcscmp(older, newer) < 0,
+                "Two versions, oldest first: 5 bytes, then 12");
+    EXPECT_TRUE(older[4] == L'-' && older[10] == L'T' && older[13] == L'.', "Named by SnapshotTimeFormat");
+    EXPECT_TRUE(wcsncmp(older + 19, L" (", 2) == 0 && wcsspn(older + 21, L"0123456789abcdef") == 8 &&
+                    wcsncmp(older + 29, L") with space.txt", 16) == 0 && wcsncmp(older + 19, newer + 19, 10) != 0,
+                "...then the short ID of the snapshot holding the version, a different one for each");
+
+    remote[wcslen(remote) - 1] = L'\0'; /* Total Commander names what is inside without the backslash */
+
+    /* F5 on a version copies the file from a snapshot that holds that version */
+    swprintf_s(version_path, _countof(version_path), L"%ls\\%ls", remote, older);
+    swprintf_s(local, _countof(local), L"%ls\\older version.txt", dir);
+    DeleteFileW(local);
+    RemoteInfo ri = {5, 0, {0x802D2000, 0x01D5EF01}, FILE_ATTRIBUTE_READONLY};
+    EXPECT_TRUE(p->get_file_w(version_path, local, 0, &ri) == FS_FILE_OK && local_size(local) == 5,
+                "The older version copied: the content of the older snapshot");
+    DeleteFileW(local);
+    swprintf_s(version_path, _countof(version_path), L"%ls\\%ls", remote, newer);
+    ri.SizeLow = 12;
+    EXPECT_TRUE(p->get_file_w(version_path, local, 0, &ri) == FS_FILE_OK && local_size(local) == 12,
+                "The newer version copied");
+    DeleteFileW(local);
+    swprintf_s(version_path, _countof(version_path), L"%ls\\1999-01-01T00.00.00 with space.txt", remote);
+    EXPECT_TRUE(p->get_file_w(version_path, local, 0, &ri) == FS_FILE_NOTFOUND &&
+                    GetFileAttributesW(local) == INVALID_FILE_ATTRIBUTES,
+                "No such version: not found, nothing written");
+
+    /* Alt+Enter on a version: the snapshots holding it */
+    swprintf_s(version_path, _countof(version_path), L"%ls\\%ls", remote, newer);
+    EXPECT_TRUE(p->execute_w(NULL, version_path, properties) == FS_EXEC_OK && g_e2e_msg_dialogs == 1 &&
+                    wcsstr(g_e2e_last_msg, L"Version of with space.txt\n") == g_e2e_last_msg &&
+                    wcsstr(g_e2e_last_msg, L"Size: 12 B\n") != NULL && wcsstr(g_e2e_last_msg, L"In 1 snapshot:\n") != NULL,
+                "Alt+Enter on a version names it, its size and the snapshot holding it");
+
+    /* An unchanged file: one version in both snapshots */
+    swprintf_s(remote, _countof(remote), L"%ls\\readme.txt", data_path);
+    EXPECT_TRUE(list_names(p, remote, names, _countof(names)) && wcschr(names, L'|') == NULL &&
+                    wcsstr(names, L" readme.txt") != NULL,
+                "An unchanged file has one version");
+    swprintf_s(version_path, _countof(version_path), L"%ls\\%ls", remote, names);
+    EXPECT_TRUE(p->execute_w(NULL, version_path, properties) == FS_EXEC_OK && g_e2e_msg_dialogs == 2 &&
+                    wcsstr(g_e2e_last_msg, L"In 2 snapshots:\n") != NULL,
+                "...held by both snapshots");
+
+    /* A snapshot, or a folder in it: the snapshot's properties */
+    EXPECT_TRUE(p->execute_w(NULL, (WCHAR*)snap_root, properties) == FS_EXEC_OK && g_e2e_msg_dialogs == 3 &&
+                    wcsncmp(g_e2e_last_msg, L"Snapshot ", 9) == 0 && wcsstr(g_e2e_last_msg, L"\nPaths: ") != NULL &&
+                    wcsstr(g_e2e_last_msg, L"\nFiles: ") != NULL && wcsstr(g_e2e_last_msg, L"\nProgram: restic ") != NULL,
+                "Alt+Enter on a snapshot shows its properties");
+    static WCHAR snapshot_text[1024];
+    wcscpy_s(snapshot_text, _countof(snapshot_text), g_e2e_last_msg);
+    wcscpy_s(remote, _countof(remote), data_path);
+    EXPECT_TRUE(p->execute_w(NULL, remote, properties) == FS_EXEC_OK && g_e2e_msg_dialogs == 4 &&
+                    wcscmp(g_e2e_last_msg, snapshot_text) == 0 && wcscmp(remote, data_path) == 0,
+                "...and on a folder inside it the same");
+    wcscpy_s(remote, _countof(remote), L"\\MainRepo\\hosts");
+    EXPECT_TRUE(p->execute_w(NULL, remote, properties) == FS_EXEC_OK && g_e2e_msg_dialogs == 4,
+                "Above the snapshots: nothing to show");
+
+    /* A missing path is neither a folder nor a file */
+    swprintf_s(remote, _countof(remote), L"%ls\\no_such_file.txt", data_path);
+    SetLastError(0);
+    EXPECT_TRUE(p->find_first_w(remote, &fd) == INVALID_HANDLE_VALUE && GetLastError() == ERROR_PATH_NOT_FOUND,
+                "A missing file has no versions");
+    EXPECT_TRUE(g_e2e_pwd_prompts == 0 && g_e2e_msg_dialogs == 4, "No password asked, no error shown");
     g_e2e_msg_dialogs = 0;
 }
 
@@ -1390,6 +1495,7 @@ static void test_live_end_to_end_navigation(void) {
     EXPECT_TRUE(g_e2e_pwd_prompts == 0 && g_e2e_msg_dialogs == 0,
                 "All navigations within MainRepo reused the cached RAM password with no popups");
     test_e2e_snapshot_cache(&p, dir, data_path);
+    test_e2e_file_history(&p, dir, snap_root, data_path);
 
     /* 3. Repositories keep independent sessions: SecondRepo prompts once, MainRepo is NOT asked again */
     g_e2e_pwd_mode = 1;

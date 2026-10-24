@@ -26,6 +26,7 @@
 #include "fsplugin.h"
 #include "config.h"
 #include "restic_cli.h"
+#include "file_history.h"
 #include "repo_cache.h"
 #include "snapshot_tree.h"
 #include "log.h"
@@ -1340,6 +1341,200 @@ static ResticResult resolve_repo_path(const RepoCall* call, const WCHAR* rest, B
     return res;
 }
 
+/*
+ * The versions of a file (file_history.h)
+ *
+ * A file inside a snapshot opened as a folder (Alt+Enter on it, FsExecuteFileW "properties") lists
+ * its versions across the snapshots of the same host: one `restic find` for exactly its path. A
+ * version is named after and copied from the oldest snapshot that holds it; Alt+Enter on one lists
+ * those snapshots.
+ */
+
+#define HISTORY_PATH_BYTES (1024 * 3 + 1) /* A WFX path (MAX_WFX_PATH in restic_cli.c) as UTF-8 */
+#define HISTORY_TIME_FORMAT "YYYY-MM-DD hh:mm:ss zzzz" /* Times in the properties dialogs */
+#define HISTORY_DIALOG_SNAPSHOTS 25 /* Snapshots named in the dialog of a version; the rest counted */
+
+/* The host of a snapshot from the cached tree (heap; "" when unknown: every host); NULL without memory */
+static char* snapshot_host_of(const RepoCall* call, const char* snapshot_id) {
+    const SnapshotTree* tree =
+        repo_cache_lock_tree(call->repo->alias, call->repo->target, call->cfg->snapshot_time_format, NULL);
+    const char* host = tree ? snapshot_tree_snapshot_host(tree, snapshot_id) : NULL;
+    size_t len       = host ? strlen(host) : 0;
+    char* copy       = (char*)malloc(len + 1);
+    if (copy) {
+        if (len) memcpy(copy, host, len);
+        copy[len] = '\0';
+    }
+    if (tree) repo_cache_unlock();
+    return copy;
+}
+
+/*
+ * Splits a path inside a snapshot ("\a\b\c", separators repeated or trailing allowed) into a heap
+ * copy of its parent ("\a\b") and its last component ("c", pointing into the copy); FALSE when it
+ * has fewer than two components or no memory
+ */
+static BOOL split_subpath(const WCHAR* subpath, WCHAR** out_parent, const WCHAR** out_last) {
+    *out_parent = NULL;
+    *out_last   = NULL;
+    size_t len  = wcslen(subpath);
+    while (len > 0 && subpath[len - 1] == L'\\') len--;
+    size_t start = len;
+    while (start > 0 && subpath[start - 1] != L'\\') start--;
+    size_t parent_end = start;
+    while (parent_end > 0 && subpath[parent_end - 1] == L'\\') parent_end--;
+    if (start == len || parent_end == 0) return FALSE;
+    WCHAR* copy = (WCHAR*)malloc((len + 2) * sizeof(WCHAR));
+    if (!copy) return FALSE;
+    memcpy(copy, subpath, parent_end * sizeof(WCHAR));
+    copy[parent_end] = L'\0';
+    memcpy(copy + parent_end + 1, subpath + start, (len - start) * sizeof(WCHAR));
+    copy[parent_end + 1 + len - start] = L'\0';
+    *out_parent = copy;
+    *out_last   = copy + parent_end + 1;
+    return TRUE;
+}
+
+/*
+ * Reads the versions of the file at `file_subpath` (a WFX subpath) across the snapshots of the
+ * host of `snapshot_id`: from the cache (`use_cache`, trusted credentials only, younger than
+ * SnapshotListRefreshSeconds) or else (`use_restic`) one `restic find`, whose output is then cached.
+ * With `in_snapshot` the path must be a file in `snapshot_id`. RESTIC_ERR_PATH_NOT_FOUND when it is
+ * not, or when the versions are neither cached nor to be searched for.
+ */
+static ResticResult read_history(const RepoCall* call, const char* snapshot_id, const WCHAR* file_subpath,
+                                 BOOL in_snapshot, BOOL use_cache, BOOL use_restic, FileHistory** out) {
+    *out = NULL;
+    char* path = (char*)malloc(HISTORY_PATH_BYTES);
+    char* host = snapshot_host_of(call, snapshot_id);
+    char* key  = NULL;
+    char* json = NULL;
+    size_t len = 0;
+    ResticResult res = RESTIC_ERR_OUT_OF_MEMORY;
+    if (!path || !host) goto done;
+    if (!restic_normalize_filter_path(file_subpath, path, HISTORY_PATH_BYTES) || strcmp(path, "/") == 0) {
+        res = RESTIC_ERR_PATH_NOT_FOUND;
+        goto done;
+    }
+    size_t key_bytes = strlen(host) + strlen(path) + 2;
+    if (!(key = (char*)malloc(key_bytes))) goto done;
+    _snprintf_s(key, key_bytes, _TRUNCATE, "%s\n%s", host, path);
+
+    BOOL fresh = FALSE;
+    ULONGLONG max_age_ms = (ULONGLONG)call->cfg->snapshot_list_refresh_s * 1000ull;
+    if (!(use_cache && call->trusted &&
+          repo_cache_get_history(call->repo->alias, call->repo->target, key, max_age_ms, &json, &len))) {
+        res = RESTIC_ERR_PATH_NOT_FOUND;
+        if (!use_restic) goto done;
+        ULONGLONG started = GetTickCount64();
+        res = restic_find_file(call->cfg->restic_path, call->access, host, file_subpath, call->exec, &json, &len,
+                               call->err, call->err_cap);
+        if (res != RESTIC_OK) goto done;
+        fresh = TRUE;
+        conn_log(FALSE, call->repo->alias, L"%ls: versions searched for by restic in %.1f s", file_subpath,
+                 (double)(GetTickCount64() - started) / 1000.0);
+    }
+    FileHistoryStatus st = file_history_build(json, len, path, in_snapshot ? snapshot_id : NULL,
+                                              call->cfg->snapshot_time_format, out);
+    switch (st) {
+        case FILE_HISTORY_OK: res = RESTIC_OK; break;
+        case FILE_HISTORY_NOT_A_FILE: res = RESTIC_ERR_PATH_NOT_FOUND; break;
+        case FILE_HISTORY_NO_MEMORY: res = RESTIC_ERR_OUT_OF_MEMORY; break;
+        default: res = RESTIC_ERR_JSON_PARSE; break;
+    }
+    if (fresh && (st == FILE_HISTORY_OK || st == FILE_HISTORY_NOT_A_FILE)) {
+        repo_cache_put_history(call->repo->alias, call->repo->target, key, json, len, call->generation);
+        json = NULL; /* Owned by the cache now */
+    }
+
+done:
+    free(path);
+    free(host);
+    free(key);
+    free(json);
+    return res;
+}
+
+/*
+ * FALSE when the snapshot's cached listing `index` shows no file at `subpath` (a WFX subpath), so
+ * that a missing path is not searched for with restic; TRUE when it does, or cannot tell
+ */
+static BOOL index_may_hold_file(const SnapshotIndex* index, const WCHAR* subpath) {
+    WCHAR* parent = NULL;
+    const WCHAR* name = NULL;
+    if (!split_subpath(subpath, &parent, &name)) {
+        /* One component: a file in the snapshot's root, which only holds folders */
+        const WCHAR* p = subpath;
+        while (*p == L'\\') p++;
+        return *p == L'\0';
+    }
+    WIN32_FIND_DATAW* items = NULL;
+    size_t count            = 0;
+    BOOL found              = FALSE;
+    if (restic_list_index_directory(index, parent, &items, &count) == RESTIC_OK) {
+        for (size_t i = 0; i < count && !found; ++i) {
+            found = (items[i].dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 && wcscmp(items[i].cFileName, name) == 0;
+        }
+    }
+    free(items);
+    free(parent);
+    return found;
+}
+
+/* The versions of a file as Total Commander directory entries (heap array) */
+static ResticResult history_items(const FileHistory* history, WIN32_FIND_DATAW** out_items, size_t* out_count) {
+    size_t count = file_history_count(history);
+    *out_items   = NULL;
+    *out_count   = 0;
+    if (count == 0) return RESTIC_OK;
+    WIN32_FIND_DATAW* items = (WIN32_FIND_DATAW*)calloc(count, sizeof(WIN32_FIND_DATAW));
+    if (!items) return RESTIC_ERR_OUT_OF_MEMORY;
+    size_t n = 0;
+    for (size_t i = 0; i < count; ++i) {
+        const FileVersion* v = file_history_version(history, i);
+        WIN32_FIND_DATAW* fd = &items[n];
+        /* A name of at most 255 UTF-16 units (file_history.h) */
+        if (MultiByteToWideChar(CP_UTF8, 0, v->name, -1, fd->cFileName, MAX_PATH) <= 0) continue;
+        fd->dwFileAttributes = FILE_ATTRIBUTE_READONLY;
+        fd->nFileSizeLow     = (DWORD)(v->size & 0xFFFFFFFFULL);
+        fd->nFileSizeHigh    = (DWORD)(v->size >> 32);
+        set_find_time(fd, v->mtime.utc_ticks);
+        n++;
+    }
+    *out_items = items;
+    *out_count = n;
+    return RESTIC_OK;
+}
+
+/*
+ * The version named `name` (a WFX component) of the file at `file_subpath`: its snapshot ID into
+ * `out_snapshot_id`, from the cached versions first (`allow_restic` FALSE: only from there), else
+ * from a `restic find` run now; RESTIC_ERR_PATH_NOT_FOUND when there is no such version
+ */
+static ResticResult find_version(const RepoCall* call, const char* snapshot_id, const WCHAR* file_subpath,
+                                 const WCHAR* name, BOOL allow_restic, FileHistory** out_history,
+                                 const FileVersion** out_version) {
+    *out_history = NULL;
+    *out_version = NULL;
+    char name_utf8[MAX_PATH * 3 + 1];
+    if (!component_to_utf8(name, wcslen(name), name_utf8, sizeof(name_utf8))) return RESTIC_ERR_PATH_NOT_FOUND;
+    for (int from_cache = 1; from_cache >= 0; --from_cache) {
+        if (!from_cache && !allow_restic) break;
+        if (from_cache && !call->trusted) continue;
+        FileHistory* history = NULL;
+        ResticResult res = read_history(call, snapshot_id, file_subpath, TRUE, from_cache, !from_cache, &history);
+        if (res != RESTIC_OK && !(res == RESTIC_ERR_PATH_NOT_FOUND && from_cache)) return res;
+        const FileVersion* v = history ? file_history_find(history, name_utf8) : NULL;
+        if (v) {
+            *out_history = history;
+            *out_version = v;
+            return RESTIC_OK;
+        }
+        file_history_free(history);
+    }
+    return RESTIC_ERR_PATH_NOT_FOUND;
+}
+
 /* FsFindFirstW below a repository alias */
 typedef struct {
     const WCHAR* rest;
@@ -1373,19 +1568,33 @@ static ResticResult list_operation(const RepoCall* call, void* ctx_ptr) {
             /* The whole snapshot read before: no restic at all */
             const SnapshotIndex* index =
                 call->trusted ? repo_cache_lock_index(call->repo->alias, call->repo->target, where.snapshot_id) : NULL;
+            BOOL may_be_file = TRUE;
             if (index) {
                 res = restic_list_index_directory(index, where.subpath, &ctx->items, &ctx->count);
+                if (res == RESTIC_ERR_PATH_NOT_FOUND) may_be_file = index_may_hold_file(index, where.subpath);
                 repo_cache_unlock();
-                return res;
             }
-            /* Until then one `restic ls` per folder, as before */
-            ULONGLONG started = GetTickCount64();
-            res = restic_list_directory(call->cfg->restic_path, call->access,
-                                        where.snapshot_id, where.subpath, call->exec, &ctx->items, &ctx->count,
-                                        call->err, call->err_cap);
-            if (res == RESTIC_OK) {
-                conn_log(FALSE, call->repo->alias, L"%ls: %u entries listed by restic in %.1f s", ctx->rest,
-                         (unsigned)ctx->count, (double)(GetTickCount64() - started) / 1000.0);
+            if (!index) {
+                /* Until then one `restic ls` per folder, as before */
+                ULONGLONG started = GetTickCount64();
+                res = restic_list_directory(call->cfg->restic_path, call->access,
+                                            where.snapshot_id, where.subpath, call->exec, &ctx->items, &ctx->count,
+                                            call->err, call->err_cap);
+                if (res == RESTIC_OK) {
+                    conn_log(FALSE, call->repo->alias, L"%ls: %u entries listed by restic in %.1f s", ctx->rest,
+                             (unsigned)ctx->count, (double)(GetTickCount64() - started) / 1000.0);
+                }
+            }
+            if (res == RESTIC_ERR_PATH_NOT_FOUND && may_be_file) {
+                /* No folder there: a file opened as one (Alt+Enter) lists its versions */
+                FileHistory* history = NULL;
+                ResticResult found   = read_history(call, where.snapshot_id, where.subpath, TRUE, TRUE, TRUE, &history);
+                if (found == RESTIC_OK) {
+                    res = history_items(history, &ctx->items, &ctx->count);
+                    file_history_free(history);
+                } else if (found != RESTIC_ERR_PATH_NOT_FOUND) {
+                    res = found;
+                }
             }
             return res;
         }
@@ -1619,6 +1828,184 @@ static HANDLE enumerate_root_repositories(WIN32_FIND_DATAW* FindData) {
  * Total Commander itself, as before this function was exported. "properties" has nothing to show; "chmod" and "quote"
  * commands are not supported by this read-only plugin.
  */
+/*
+ * FsExecuteFileW "properties" (Alt+Enter) below a repository alias: a snapshot, or a folder inside
+ * one, shows the snapshot's properties; a version of a file the snapshots holding it; a file inside
+ * a snapshot opens as the folder of its versions (`symlink`)
+ */
+typedef struct {
+    const WCHAR* rest;
+    char* text;   /* Heap: what to show (UTF-8) */
+    BOOL symlink; /* Open the path as a folder */
+} PropertiesContext;
+
+/* The properties of a snapshot from the cached tree (heap text), or NULL */
+static char* describe_snapshot(const RepoCall* call, const char* snapshot_id) {
+    const SnapshotTree* tree =
+        repo_cache_lock_tree(call->repo->alias, call->repo->target, call->cfg->snapshot_time_format, NULL);
+    if (!tree) return NULL;
+    char* text = snapshot_tree_describe(tree, snapshot_id);
+    repo_cache_unlock();
+    return text;
+}
+
+/* Appends to a heap text of `cap` bytes; silently cut when full */
+static void append_text(char* text, size_t cap, const char* format, ...) {
+    size_t len = strlen(text);
+    if (len + 1 >= cap) return;
+    va_list args;
+    va_start(args, format);
+    _vsnprintf_s(text + len, cap - len, _TRUNCATE, format, args);
+    va_end(args);
+}
+
+/* The dialog of version `v` (index `i` in `history`) of the file named `file_name`: heap text */
+static char* describe_version(const RepoCall* call, const FileHistory* history, size_t i, const char* file_name) {
+    const FileVersion* v = file_history_version(history, i);
+    const size_t cap     = 8192;
+    char* text           = (char*)calloc(cap, 1);
+    if (!text) return NULL;
+    char when[SNAPSHOT_TREE_TIME_FORMAT_MAX * 2 + 1], size[32];
+    snapshot_tree_format_time(&v->mtime, HISTORY_TIME_FORMAT, when);
+    snapshot_tree_format_size(v->size, size, sizeof(size));
+    append_text(text, cap, "Version of %s\nModified: %s\nSize: %s\nType: %s\nIn %u snapshot%s:\n", file_name, when,
+                size, v->type, (unsigned)v->snapshot_count, v->snapshot_count == 1 ? "" : "s");
+    const SnapshotTree* tree =
+        repo_cache_lock_tree(call->repo->alias, call->repo->target, call->cfg->snapshot_time_format, NULL);
+    for (size_t k = 0; k < v->snapshot_count && k < HISTORY_DIALOG_SNAPSHOTS; ++k) {
+        const char* id = file_history_snapshot(history, i, k);
+        Timestamp t;
+        if (tree && id && snapshot_tree_snapshot_time(tree, id, &t)) {
+            snapshot_tree_format_time(&t, HISTORY_TIME_FORMAT, when);
+            append_text(text, cap, "    %.8s  %s\n", id, when);
+        } else if (id) {
+            append_text(text, cap, "    %.8s\n", id);
+        }
+    }
+    if (tree) repo_cache_unlock();
+    if (v->snapshot_count > HISTORY_DIALOG_SNAPSHOTS) {
+        append_text(text, cap, "    ... and %u older\n", (unsigned)(v->snapshot_count - HISTORY_DIALOG_SNAPSHOTS));
+    }
+    return text;
+}
+
+/* TRUE when `subpath` is a folder of the snapshot: from its cached listing, or else `restic ls` */
+static ResticResult is_snapshot_folder(const RepoCall* call, const char* snapshot_id, const WCHAR* subpath,
+                                       BOOL* out_folder) {
+    *out_folder = FALSE;
+    WIN32_FIND_DATAW* items = NULL;
+    size_t count            = 0;
+    ResticResult res        = RESTIC_ERR_PATH_NOT_FOUND;
+    const SnapshotIndex* index =
+        call->trusted ? repo_cache_lock_index(call->repo->alias, call->repo->target, snapshot_id) : NULL;
+    if (index) {
+        res = restic_list_index_directory(index, subpath, &items, &count);
+        repo_cache_unlock();
+    } else {
+        res = restic_list_directory(call->cfg->restic_path, call->access, snapshot_id, subpath, call->exec, &items,
+                                    &count, call->err, call->err_cap);
+    }
+    free(items);
+    *out_folder = res == RESTIC_OK;
+    return res == RESTIC_ERR_PATH_NOT_FOUND ? RESTIC_OK : res;
+}
+
+static ResticResult properties_operation(const RepoCall* call, void* ctx_ptr) {
+    PropertiesContext* ctx = (PropertiesContext*)ctx_ptr;
+    RepoPath where;
+    ResticResult res = resolve_repo_path(call, ctx->rest, FALSE, &where);
+    if (res != RESTIC_OK) return res;
+    if (where.kind == REPO_PATH_CSV) free(where.csv);
+    if (where.kind != REPO_PATH_SNAPSHOT) return RESTIC_OK; /* Above the snapshots: nothing to show */
+
+    const WCHAR* sp = where.subpath;
+    while (*sp == L'\\') sp++;
+    BOOL folder = *sp == L'\0';
+    WCHAR* parent = NULL;
+    const WCHAR* name = NULL;
+    if (!folder && split_subpath(where.subpath, &parent, &name)) {
+        /* A version of a file listed before: its versions are cached (no restic for a file's own path) */
+        FileHistory* history = NULL;
+        const FileVersion* v = NULL;
+        res = find_version(call, where.snapshot_id, parent, name, FALSE, &history, &v);
+        if (res == RESTIC_OK) {
+            size_t i = 0;
+            while (file_history_version(history, i) != v) ++i;
+            char file_name[MAX_PATH * 3 + 1];
+            const WCHAR* last = wcsrchr(parent, L'\\');
+            if (!last || !component_to_utf8(last + 1, wcslen(last + 1), file_name, sizeof(file_name))) {
+                file_name[0] = '\0';
+            }
+            ctx->text = describe_version(call, history, i, file_name);
+            file_history_free(history);
+            free(parent);
+            return ctx->text ? RESTIC_OK : RESTIC_ERR_OUT_OF_MEMORY;
+        }
+        free(parent);
+        if (res != RESTIC_ERR_PATH_NOT_FOUND) return res;
+    }
+    if (!folder) {
+        res = is_snapshot_folder(call, where.snapshot_id, where.subpath, &folder);
+        if (res != RESTIC_OK) return res;
+    }
+    if (!folder) {
+        ctx->symlink = TRUE; /* Listing it as a folder tells whether it is a file */
+        return RESTIC_OK;
+    }
+    ctx->text = describe_snapshot(call, where.snapshot_id);
+    return RESTIC_OK;
+}
+
+/* Alt+Enter: see PropertiesContext. Returns an FS_EXEC_* code. */
+static int show_properties(WCHAR* remote_name) {
+    WfxParsedPath parsed;
+    if (!parse_wfx_path(remote_name, &parsed) || parsed.level != WFX_PATH_REPO || parsed.rest[0] == L'\0' ||
+        is_forget_entry_name(parsed.repo_alias)) {
+        return FS_EXEC_OK; /* The root, a repository's folder: nothing more than Total Commander shows */
+    }
+    ResticConfig cfg;
+    const ResticRepoEntry* repo = load_config(&cfg) ? config_find_repo(&cfg, parsed.repo_alias) : NULL;
+    if (!repo || !repository_usable(&cfg, repo)) {
+        config_free(&cfg);
+        return repo ? FS_EXEC_ERROR : FS_EXEC_OK;
+    }
+    WfxCancelContext cancel_ctx = {remote_name, repo->alias};
+    ResticExecOptions exec_opts = {WFX_RESTIC_TIMEOUT_MS, wfx_cancel_callback, &cancel_ctx};
+    exec_opts.notice_proc = wfx_notice_callback;
+    exec_opts.notice_ctx  = &cancel_ctx;
+    PropertiesContext ctx = {parsed.rest, NULL, FALSE};
+    WCHAR err_msg[512]    = {0};
+    ResticResult res = run_with_password(&cfg, repo, &exec_opts, properties_operation, &ctx, err_msg, _countof(err_msg));
+    int rc = FS_EXEC_OK;
+    size_t len = wcslen(remote_name);
+    if (res == RESTIC_OK && ctx.symlink && len + 1 < MAX_PATH) {
+        /*
+         * `remote_name` itself, with a trailing backslash: for the bare path of a file, Total Commander
+         * was seen showing its own (empty) version information dialog instead of opening a folder
+         */
+        log_write(L"Properties of %ls: opened as the folder of its versions", remote_name);
+        remote_name[len]     = L'\\';
+        remote_name[len + 1] = L'\0';
+        rc                   = FS_EXEC_SYMLINK;
+    } else if (res == RESTIC_OK && ctx.text) {
+        int chars = MultiByteToWideChar(CP_UTF8, 0, ctx.text, -1, NULL, 0);
+        WCHAR* text = chars > 0 ? (WCHAR*)malloc((size_t)chars * sizeof(WCHAR)) : NULL;
+        if (text && MultiByteToWideChar(CP_UTF8, 0, ctx.text, -1, text, chars) > 0 && g_RequestProc) {
+            WCHAR title[MAX_PATH], unused[4] = {0};
+            const WCHAR* last = wcsrchr(remote_name, L'\\');
+            wcsncpy_s(title, _countof(title), last && last[1] ? last + 1 : remote_name, _TRUNCATE);
+            g_RequestProc(g_PluginNr, RT_MsgOK, title, text, unused, _countof(unused));
+        }
+        free(text);
+    } else if (res != RESTIC_OK && res != RESTIC_ERR_CANCELLED) {
+        handle_restic_failure(res, repo->alias, err_msg);
+        rc = FS_EXEC_ERROR;
+    }
+    free(ctx.text);
+    config_free(&cfg);
+    return rc;
+}
+
 int __stdcall FsExecuteFileW(HWND MainWin, WCHAR* RemoteName, WCHAR* Verb) {
     (void)MainWin;
     if (!RemoteName || !Verb) return FS_EXEC_ERROR;
@@ -1645,7 +2032,7 @@ int __stdcall FsExecuteFileW(HWND MainWin, WCHAR* RemoteName, WCHAR* Verb) {
         wcscpy_s(RemoteName, MAX_PATH, L"\\");
         return FS_EXEC_SYMLINK;
     }
-    if (_wcsicmp(Verb, L"properties") == 0) return FS_EXEC_OK;
+    if (_wcsicmp(Verb, L"properties") == 0) return is_forget ? FS_EXEC_OK : show_properties(RemoteName);
     /*
      * The transfer mode of the connections toolbar (undocumented verb "MODE I", "MODE A", or
      * "MODE X <text-file extensions>" for automatic): Total Commander only tells the plugin, and
@@ -1860,9 +2247,42 @@ static ResticResult get_file_operation(const RepoCall* call, void* ctx_ptr) {
     if (where.kind != REPO_PATH_SNAPSHOT || *sp == L'\0') {
         return RESTIC_ERR_PATH_NOT_FOUND; /* A folder above the snapshots, or a snapshot itself */
     }
-    return restic_dump_file(call->cfg->restic_path, call->access, where.snapshot_id,
-                            where.subpath, ctx->local_name, ctx->overwrite, ctx->mtime, WFX_RESTIC_TIMEOUT_MS,
-                            wfx_dump_progress_callback, ctx->progress, call->err, call->err_cap);
+    /*
+     * A version of a file (`<file>\<version>`): the file, from the oldest snapshot holding that
+     * version (the one its name carries). Known from the cached versions without restic; otherwise the path is tried as it is
+     * first, and its versions are searched for only when the snapshot has no such path.
+     */
+    WCHAR* parent = NULL;
+    const WCHAR* name = NULL;
+    FileHistory* history = NULL;
+    const FileVersion* version = NULL;
+    if (split_subpath(where.subpath, &parent, &name) &&
+        find_version(call, where.snapshot_id, parent, name, FALSE, &history, &version) != RESTIC_OK) {
+        res = restic_dump_file(call->cfg->restic_path, call->access, where.snapshot_id,
+                               where.subpath, ctx->local_name, ctx->overwrite, ctx->mtime, WFX_RESTIC_TIMEOUT_MS,
+                               wfx_dump_progress_callback, ctx->progress, call->err, call->err_cap);
+        if (res == RESTIC_ERR_PATH_NOT_FOUND) {
+            res = find_version(call, where.snapshot_id, parent, name, TRUE, &history, &version);
+        }
+        if (!version) {
+            free(parent);
+            return res;
+        }
+    } else if (!version) { /* No parent, so not a version (find_version() sets it on success) */
+        free(parent);
+        return restic_dump_file(call->cfg->restic_path, call->access, where.snapshot_id,
+                                where.subpath, ctx->local_name, ctx->overwrite, ctx->mtime, WFX_RESTIC_TIMEOUT_MS,
+                                wfx_dump_progress_callback, ctx->progress, call->err, call->err_cap);
+    }
+    char version_snapshot[SNAPSHOT_TREE_ID_CHARS + 1];
+    strcpy_s(version_snapshot, sizeof(version_snapshot), version->snapshot_id);
+    file_history_free(history);
+    log_write(L"%ls: a version of %ls, copied from snapshot %.8hs", ctx->rest, parent, version_snapshot);
+    res = restic_dump_file(call->cfg->restic_path, call->access, version_snapshot,
+                           parent, ctx->local_name, ctx->overwrite, ctx->mtime, WFX_RESTIC_TIMEOUT_MS,
+                           wfx_dump_progress_callback, ctx->progress, call->err, call->err_cap);
+    free(parent);
+    return res;
 }
 
 int __stdcall FsGetFile(char* RemoteName, char* LocalName, int CopyFlags, RemoteInfoStruct* ri) {
