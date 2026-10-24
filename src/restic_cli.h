@@ -285,6 +285,27 @@ ResticResult restic_list_snapshot_index(
 );
 
 /**
+ * Runs `restic find --json --no-lock [--host=<host>] <pattern>` for exactly the path `subpath_w`
+ * (the WFX form, as for restic_list_directory(); wildcards in it are matched literally) and returns
+ * restic's output in `*out_json` (`*out_len` bytes, NUL-terminated; release with free()), to build
+ * the versions of a file from (file_history.h). `host_utf8` (NULL or empty: every host) limits the
+ * search to the snapshots of one host. A folder at that path prints everything below it, so the
+ * output is limited: beyond 16 MiB it fails with RESTIC_ERR_OUT_OF_MEMORY. On failure
+ * `out_error_msg` (optional) receives the reason reported by Restic.
+ */
+ResticResult restic_find_file(
+    const WCHAR* restic_exe,
+    const ResticRepo* repo,
+    const char* host_utf8,
+    const WCHAR* subpath_w,
+    const ResticExecOptions* options,
+    char** out_json,
+    size_t* out_len,
+    WCHAR* out_error_msg,
+    size_t err_capacity
+);
+
+/**
  * Writes `len` bytes of `data` to `local_dest_path` the way restic_dump_file() writes a file: into
  * a temporary file in the target folder that replaces the target only once it is complete, a
  * pre-existing target left untouched on any failure; with `overwrite` FALSE an existing target is

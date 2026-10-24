@@ -8,7 +8,8 @@
  * What the plugin keeps in memory about each repository between two Total Commander calls: the
  * restic mount folder tree built from its last `restic snapshots` (snapshot_tree.h), and the
  * complete listing of the snapshots the user has entered (snapshot_index.h), read by one
- * `restic ls` per snapshot in the background (repo_cache_load_index), and the repository's ID.
+ * `restic ls` per snapshot in the background (repo_cache_load_index), the repository's ID and the
+ * output of the last few `restic find` runs for the versions of a file (file_history.h).
  *
  * A repository is identified by its alias and target together, so editing the INI never mixes two
  * repositories. Everything about a repository is dropped together with its cached password
@@ -126,6 +127,22 @@ BOOL repo_cache_get_repository_id(const WCHAR* alias, const WCHAR* target, char*
  */
 void repo_cache_put_repository_id(const WCHAR* alias, const WCHAR* target, const char* id, ULONGLONG read_at,
                                   ULONGLONG generation);
+
+/*
+ * Copies the cached output of `restic find` stored under `key` (the host and path searched for)
+ * into `*out_json` (`*out_len` bytes, NUL-terminated; release with free()) unless it is older than
+ * `max_age_ms`; FALSE when there is none (or no memory for the copy)
+ */
+BOOL repo_cache_get_history(const WCHAR* alias, const WCHAR* target, const char* key, ULONGLONG max_age_ms,
+                            char** out_json, size_t* out_len);
+
+/*
+ * Caches `len` bytes of `restic find` output (`json`, NUL-terminated, from malloc(); ownership
+ * passes to the cache, also when it is dropped) under `key`, unless a repository was forgotten
+ * since `generation` was obtained. The last few are kept per repository, the oldest dropped first.
+ */
+void repo_cache_put_history(const WCHAR* alias, const WCHAR* target, const char* key, char* json, size_t len,
+                            ULONGLONG generation);
 
 /* Drops everything cached for the alias (any target), e.g. when its password is wiped */
 void repo_cache_forget(const WCHAR* alias);

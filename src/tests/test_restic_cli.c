@@ -17,6 +17,7 @@
 #include <string.h>
 #include <wchar.h>
 #include "fsplugin.h"
+#include "file_history.h"
 #include "restic_cli.h"
 #include "repo_cache.h"
 
@@ -680,6 +681,51 @@ static void test_repo_cache_generations(void) {
     repo_cache_clear();
 }
 
+static char* heap_text(const char* text) {
+    size_t n = strlen(text) + 1;
+    char* copy = (char*)malloc(n);
+    if (copy) memcpy(copy, text, n);
+    return copy;
+}
+
+/* The output of restic find kept per repository: the last few, by key, within their age */
+static void test_repo_cache_histories(void) {
+    repo_cache_clear();
+    char* json = NULL;
+    size_t len = 0;
+    ULONGLONG g = repo_cache_generation();
+    repo_cache_put_history(L"Repo", L"C:\\r", "pc\n/a", heap_text("[1]"), 3, g);
+    EXPECT_TRUE(repo_cache_get_history(L"repo", L"C:\\r", "pc\n/a", 60000, &json, &len) && len == 3 &&
+                    strcmp(json, "[1]") == 0,
+                "A history cached and read back (alias case ignored)");
+    free(json);
+    EXPECT_TRUE(!repo_cache_get_history(L"Repo", L"C:\\other", "pc\n/a", 60000, &json, &len) && !json &&
+                    !repo_cache_get_history(L"Repo", L"C:\\r", "pc\n/b", 60000, &json, &len),
+                "...only for its repository and key");
+    Sleep(20);
+    EXPECT_TRUE(!repo_cache_get_history(L"Repo", L"C:\\r", "pc\n/a", 0, &json, &len), "...within its age");
+    repo_cache_put_history(L"Repo", L"C:\\r", "pc\n/a", heap_text("[22]"), 4, g);
+    EXPECT_TRUE(repo_cache_get_history(L"Repo", L"C:\\r", "pc\n/a", 60000, &json, &len) && strcmp(json, "[22]") == 0,
+                "The same key again replaces it");
+    free(json);
+    for (int i = 0; i < 8; ++i) {
+        char key[16];
+        snprintf(key, sizeof(key), "pc\n/%d", i);
+        repo_cache_put_history(L"Repo", L"C:\\r", key, heap_text("[]"), 2, g);
+    }
+    EXPECT_TRUE(!repo_cache_get_history(L"Repo", L"C:\\r", "pc\n/a", 60000, &json, &len) &&
+                    repo_cache_get_history(L"Repo", L"C:\\r", "pc\n/0", 60000, &json, &len),
+                "Eight kept per repository, the oldest dropped");
+    free(json);
+    repo_cache_forget(L"Repo");
+    EXPECT_TRUE(!repo_cache_get_history(L"Repo", L"C:\\r", "pc\n/7", 60000, &json, &len),
+                "Forgetting the repository drops them");
+    repo_cache_put_history(L"Repo", L"C:\\r", "pc\n/a", heap_text("[]"), 2, g);
+    EXPECT_TRUE(!repo_cache_get_history(L"Repo", L"C:\\r", "pc\n/a", 60000, &json, &len),
+                "...and what was read before the forget is not kept");
+    repo_cache_clear();
+}
+
 /* RepoSecretSource for the background loads of the live test */
 static BOOL fixture_password(const WCHAR* alias, RepoSecrets* out) {
     (void)alias;
@@ -1030,6 +1076,10 @@ static void test_live_restic_cli(void) {
     strcpy_s(snap1, sizeof(snap1), strcmp(by_time->children[0]->snapshot_id, snap2) != 0 ? by_time->children[0]->snapshot_id
                                                                                        : by_time->children[1]->snapshot_id);
     EXPECT_TRUE(strcmp(snap1, snap2) != 0, "Two different snapshots");
+    static char host[256]; /* Static: /analyze (C6262) caps a frame at 16 KB */
+    const char* snap_host = snapshot_tree_snapshot_host(tree, snap2);
+    EXPECT_TRUE(snap_host && snap_host[0] && strlen(snap_host) < sizeof(host), "The snapshots' host");
+    if (snap_host) strncpy_s(host, sizeof(host), snap_host, _TRUNCATE);
     snapshot_tree_free(tree);
 
     /* Level 2: root of the snapshot holds only the drive letter */
@@ -1070,6 +1120,60 @@ static void test_live_restic_cli(void) {
     e = find_entry(items, count, L"with space.txt");
     EXPECT_TRUE(e && file_size_of(e) == 5, "Snapshot 1 keeps the original size");
     free(items);
+
+    /* The versions of a file: restic find for exactly its path, in the snapshots of one host */
+    static const struct {
+        const WCHAR* leaf;
+        const char* in_snapshot; /* NULL: snap2 */
+        const char* host;        /* NULL: the snapshots' host */
+        FileHistoryStatus status;
+        size_t versions;
+        const char* what;
+    } finds[] = {
+        {L"with space.txt", NULL, NULL, FILE_HISTORY_OK, 2, "The modified file has two versions"},
+        {L"readme.txt", NULL, NULL, FILE_HISTORY_OK, 1, "An unchanged file has one, in both snapshots"},
+        {L"odd [dir] & (x) ^ 100% !\\odd_inner.txt", NULL, NULL, FILE_HISTORY_OK, 1,
+         "A path with wildcard characters is matched literally"},
+        {L"sub", NULL, NULL, FILE_HISTORY_NOT_A_FILE, 0, "A folder has no versions (what lies below it is ignored)"},
+        {L"no such file", NULL, NULL, FILE_HISTORY_NOT_A_FILE, 0, "A missing file has none"},
+        {L"readme.txt", NULL, "no-such-host", FILE_HISTORY_NOT_A_FILE, 0, "Only the snapshots of the host searched"},
+    };
+    for (size_t i = 0; i < _countof(finds); ++i) {
+        char* found      = NULL;
+        size_t found_len = 0;
+        static char path_utf8[1024];
+        to_wfx_path(data, finds[i].leaf, wfx, _countof(wfx));
+        res = restic_find_file(restic_bin, REPO(repo, password), finds[i].host ? finds[i].host : host, wfx, NULL,
+                               &found, &found_len, err, _countof(err));
+        FileHistory* history = NULL;
+        FileHistoryStatus st = FILE_HISTORY_BAD_JSON;
+        if (res == RESTIC_OK && restic_normalize_filter_path(wfx, path_utf8, sizeof(path_utf8))) {
+            st = file_history_build(found, found_len, path_utf8, snap2, NULL, &history);
+        }
+        EXPECT_TRUE(res == RESTIC_OK && st == finds[i].status && file_history_count(history) == finds[i].versions,
+                    finds[i].what);
+        if (i == 0 && history) {
+            const FileVersion* old = file_history_version(history, 0);
+            const FileVersion* now = file_history_version(history, 1);
+            EXPECT_TRUE(old && now && old->size == 5 && strcmp(old->snapshot_id, snap1) == 0 && now->size == 12 &&
+                            strcmp(now->snapshot_id, snap2) == 0 && strstr(now->name, " with space.txt") != NULL,
+                        "...the older from snapshot 1, the newer from snapshot 2, named by their times");
+        }
+        if (i == 1 && history) {
+            EXPECT_TRUE(file_history_version(history, 0)->snapshot_count == 2, "...held by both snapshots");
+        }
+        file_history_free(history);
+        free(found);
+    }
+    char* nothing = NULL;
+    size_t nothing_len = 0;
+    EXPECT_TRUE(restic_find_file(restic_bin, REPO(repo, password), NULL, L"\\", NULL, &nothing, &nothing_len, err,
+                                 _countof(err)) == RESTIC_ERR_INVALID_ARG && !nothing,
+                "The snapshot root is no file");
+    to_wfx_path(data, L"readme.txt", wfx, _countof(wfx));
+    EXPECT_TRUE(restic_find_file(restic_bin, REPO(repo, L"wrong password"), host, wfx, NULL, &nothing, &nothing_len,
+                                 err, _countof(err)) == RESTIC_ERR_WRONG_PASSWORD && !nothing,
+                "Wrong password reported as for any other command");
 
     /* The whole snapshot read at once (restic ls without a path) lists every folder as restic does */
     SnapshotIndex* index = snapshot_index_new(0);
@@ -1562,6 +1666,7 @@ int main(void) {
     test_exec_large_output_and_long_args();
     test_exec_line_streaming();
     test_repo_cache_generations();
+    test_repo_cache_histories();
     test_dump_with_fake_restic();
     test_read_version();
     test_process_tree_ends();

@@ -19,6 +19,7 @@
 #include <wchar.h>
 #include "json.h"
 #include "config.h"
+#include "file_history.h"
 #include "log.h"
 #include "timestamp.h"
 
@@ -1456,6 +1457,122 @@ ResticResult restic_list_snapshot_index(
     return res;
 }
 
+/* The output of restic find, kept whole up to STREAM_LINE_MAX_BYTES */
+typedef struct {
+    char* data;
+    size_t len;
+    size_t cap;
+} FindOutput;
+
+static ResticResult collect_find_line(const char* line, size_t len, void* ctx) {
+    FindOutput* out = (FindOutput*)ctx;
+    if (len > STREAM_LINE_MAX_BYTES - out->len - 2) return RESTIC_ERR_OUT_OF_MEMORY;
+    if (out->len + len + 2 > out->cap) {
+        size_t cap = out->cap ? out->cap : 4096;
+        while (cap < out->len + len + 2) cap *= 2;
+        char* grown = (char*)realloc(out->data, cap);
+        if (!grown) return RESTIC_ERR_OUT_OF_MEMORY;
+        out->data = grown;
+        out->cap  = cap;
+    }
+    memcpy(out->data + out->len, line, len);
+    out->len += len;
+    out->data[out->len++] = '\n';
+    out->data[out->len]   = '\0';
+    return RESTIC_OK;
+}
+
+ResticResult restic_find_file(
+    const WCHAR* restic_exe,
+    const ResticRepo* repo,
+    const char* host_utf8,
+    const WCHAR* subpath_w,
+    const ResticExecOptions* options,
+    char** out_json,
+    size_t* out_len,
+    WCHAR* out_error_msg,
+    size_t err_capacity
+) {
+    if (out_error_msg && err_capacity > 0) out_error_msg[0] = L'\0';
+    if (out_json) *out_json = NULL;
+    if (out_len) *out_len = 0;
+    if (!restic_exe || !restic_repo_usable(repo) || !subpath_w || !out_json || !out_len) {
+        return RESTIC_ERR_INVALID_ARG;
+    }
+
+    /* The path as a pattern of itself, then both arguments quoted (heap: a pattern is up to 3x the path) */
+    static const size_t PATTERN_CAP = MAX_UTF8_PATH * 3;
+    char* path_utf8 = (char*)malloc(MAX_UTF8_PATH);
+    char* pattern   = (char*)malloc(PATTERN_CAP);
+    WCHAR* pattern_w = (WCHAR*)malloc(PATTERN_CAP * sizeof(WCHAR));
+    WCHAR* host_w    = NULL;
+    WCHAR* quoted_pattern = NULL;
+    WCHAR* quoted_host    = NULL;
+    WCHAR* args = NULL;
+    ResticResult res = RESTIC_ERR_OUT_OF_MEMORY;
+    if (!path_utf8 || !pattern || !pattern_w) goto done;
+    res = RESTIC_ERR_INVALID_ARG;
+    if (!restic_normalize_filter_path(subpath_w, path_utf8, MAX_UTF8_PATH) || strcmp(path_utf8, "/") == 0 ||
+        file_history_pattern(path_utf8, pattern, PATTERN_CAP) == 0 ||
+        MultiByteToWideChar(CP_UTF8, 0, pattern, -1, pattern_w, (int)PATTERN_CAP) <= 0) {
+        goto done;
+    }
+    res = RESTIC_ERR_OUT_OF_MEMORY;
+    quoted_pattern = restic_quote_arg(pattern_w);
+    if (!quoted_pattern) goto done;
+    if (host_utf8 && host_utf8[0]) {
+        int chars = MultiByteToWideChar(CP_UTF8, 0, host_utf8, -1, NULL, 0);
+        if (chars <= 0) {
+            res = RESTIC_ERR_INVALID_ARG;
+            goto done;
+        }
+        size_t host_chars = (size_t)chars + 7; /* "--host=" */
+        host_w = (WCHAR*)malloc(host_chars * sizeof(WCHAR));
+        if (!host_w) goto done;
+        wcscpy_s(host_w, host_chars, L"--host=");
+        MultiByteToWideChar(CP_UTF8, 0, host_utf8, -1, host_w + 7, chars);
+        quoted_host = restic_quote_arg(host_w);
+        if (!quoted_host) goto done;
+    }
+    size_t args_chars = wcslen(L"find --json --no-lock   ") + (quoted_host ? wcslen(quoted_host) : 0) +
+                        wcslen(quoted_pattern) + 1;
+    args = (WCHAR*)malloc(args_chars * sizeof(WCHAR));
+    if (!args) goto done;
+    swprintf_s(args, args_chars, L"find --json --no-lock %ls%ls%ls", quoted_host ? quoted_host : L"",
+               quoted_host ? L" " : L"", quoted_pattern);
+
+    FindOutput found = {NULL, 0, 0};
+    ResticExecOptions opts;
+    memset(&opts, 0, sizeof(opts));
+    if (options) opts = *options;
+    opts.line_proc = collect_find_line;
+    opts.line_ctx  = &found;
+    ResticCommandOutput cmd_out;
+    res = run_and_check(restic_exe, repo, args, &opts, &cmd_out, out_error_msg, err_capacity);
+    if (res == RESTIC_OK) {
+        restic_free_command_output(&cmd_out);
+        if (!found.data) found.data = (char*)calloc(1, 1); /* No output at all: restic printed nothing */
+        if (found.data) {
+            *out_json = found.data;
+            *out_len  = found.len;
+            found.data = NULL;
+        } else {
+            res = RESTIC_ERR_OUT_OF_MEMORY;
+        }
+    }
+    free(found.data);
+
+done:
+    free(path_utf8);
+    free(pattern);
+    free(pattern_w);
+    free(host_w);
+    free(quoted_pattern);
+    free(quoted_host);
+    free(args);
+    return res;
+}
+
 #define DUMP_CHUNK_BYTES (64u * 1024u)
 
 /* State of one streaming extraction: data goes to a temporary file that replaces the target on success */
@@ -1780,8 +1897,10 @@ ResticResult restic_dump_file(
                 case 11: result = RESTIC_ERR_REPO_LOCKED; break;
                 case 12: result = RESTIC_ERR_WRONG_PASSWORD; break;
                 default:
+                    /* "should be a dir": a path below a file, such as a version of it (file_history.h) */
                     if (err.data && (strstr(err.data, "not found in snapshot") != NULL ||
-                                     strstr(err.data, "does not exist") != NULL)) {
+                                     strstr(err.data, "does not exist") != NULL ||
+                                     strstr(err.data, "should be a dir, but is a") != NULL)) {
                         result = RESTIC_ERR_PATH_NOT_FOUND;
                     } else {
                         result = RESTIC_ERR_CLI_FAILED;

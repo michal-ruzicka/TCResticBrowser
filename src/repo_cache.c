@@ -48,6 +48,18 @@ struct IndexEntry {
     IndexEntry* next;
 };
 
+/* The output of one `restic find` (file_history.h): the versions of a file */
+#define MAX_HISTORIES 8                            /* Kept per repository */
+#define MAX_HISTORY_BYTES (32u * 1024u * 1024u)    /* Kept per repository together */
+typedef struct HistoryEntry HistoryEntry;
+struct HistoryEntry {
+    char* key;     /* "<host>\n<path>" */
+    char* json;
+    size_t len;
+    ULONGLONG at;  /* GetTickCount64() when it was cached */
+    HistoryEntry* next; /* Youngest first */
+};
+
 typedef struct RepoEntry RepoEntry;
 struct RepoEntry {
     WCHAR alias[MAX_PATH];
@@ -60,6 +72,7 @@ struct RepoEntry {
     IndexEntry* indexes;
     char repository_id[RESTIC_REPOSITORY_ID_CHARS + 1]; /* From `restic cat config`; "" until read */
     ULONGLONG repository_id_at;                         /* FILETIME ticks: when restic was asked for it */
+    HistoryEntry* histories;
     RepoEntry* next;
 };
 
@@ -149,8 +162,19 @@ static void free_index_entry(IndexEntry* e) {
     free(e);
 }
 
+static void free_history(HistoryEntry* h) {
+    free(h->key);
+    free(h->json);
+    free(h);
+}
+
 /* Caller holds g_CacheLock exclusively */
 static void free_repo(RepoEntry* r) {
+    while (r->histories) {
+        HistoryEntry* h = r->histories;
+        r->histories = h->next;
+        free_history(h);
+    }
     while (r->indexes) {
         IndexEntry* e = r->indexes;
         r->indexes = e->next;
@@ -691,6 +715,60 @@ void repo_cache_put_repository_id(const WCHAR* alias, const WCHAR* target, const
         r->repository_id_at = read_at;
     }
     ReleaseSRWLockExclusive(&g_CacheLock);
+}
+
+BOOL repo_cache_get_history(const WCHAR* alias, const WCHAR* target, const char* key, ULONGLONG max_age_ms,
+                            char** out_json, size_t* out_len) {
+    *out_json = NULL;
+    *out_len  = 0;
+    AcquireSRWLockShared(&g_CacheLock);
+    const RepoEntry* r = find_repo_locked(alias, target);
+    for (const HistoryEntry* h = r ? r->histories : NULL; h; h = h->next) {
+        if (strcmp(h->key, key) != 0) continue;
+        if (GetTickCount64() - h->at <= max_age_ms && (*out_json = (char*)malloc(h->len + 1)) != NULL) {
+            memcpy(*out_json, h->json, h->len + 1);
+            *out_len = h->len;
+        }
+        break;
+    }
+    ReleaseSRWLockShared(&g_CacheLock);
+    return *out_json != NULL;
+}
+
+void repo_cache_put_history(const WCHAR* alias, const WCHAR* target, const char* key, char* json, size_t len,
+                            ULONGLONG generation) {
+    size_t key_len    = strlen(key);
+    HistoryEntry* add = len <= MAX_HISTORY_BYTES ? (HistoryEntry*)calloc(1, sizeof(HistoryEntry)) : NULL;
+    if (add && (add->key = (char*)malloc(key_len + 1)) != NULL) {
+        memcpy(add->key, key, key_len + 1);
+        add->json = json;
+        add->len  = len;
+        add->at   = GetTickCount64();
+        json      = NULL;
+    }
+    AcquireSRWLockExclusive(&g_CacheLock);
+    RepoEntry* r = add && add->key && generation_valid_locked(alias, generation) ? get_repo_locked(alias, target) : NULL;
+    if (r) {
+        add->next    = r->histories;
+        r->histories = add;
+        add          = NULL;
+        /* The same key again replaces the older one; beyond the count or the bytes, the oldest go */
+        size_t count = 1, bytes = r->histories->len;
+        for (HistoryEntry** link = &r->histories->next; *link;) {
+            HistoryEntry* h = *link;
+            if (strcmp(h->key, key) == 0 || count >= MAX_HISTORIES || bytes + h->len > MAX_HISTORY_BYTES) {
+                *link = h->next;
+                free_history(h);
+            } else {
+                ++count;
+                bytes += h->len;
+                link = &h->next;
+            }
+        }
+    }
+    ReleaseSRWLockExclusive(&g_CacheLock);
+    if (add) free_history(add); /* Not cached; it holds `json` unless that is still to free below */
+    free(json);
 }
 
 void repo_cache_forget(const WCHAR* alias) {
