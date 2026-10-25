@@ -430,7 +430,10 @@ folder, add `\` after a file's name in the path above the file list.
   snapshots that hold it (their short IDs and times).
 - `Backspace` returns to the folder the file is in.
 - Only files have versions: a folder at that path in other snapshots is
-  left out, as is the file in snapshots of other hosts. The versions are
+  left out, as is the file in snapshots of other hosts (for a snapshot
+  recorded without a host name, restic searches the snapshots of every
+  host). A version whose modification time restic recorded as unknown
+  (year 1) is left out too. The versions are
   looked up with one `restic find` for exactly the file's path, which
   opens every snapshot of the host only along that path; on a big remote
   repository with many snapshots that takes a while (`ESC` cancels). The

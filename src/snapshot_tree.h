@@ -120,14 +120,16 @@ const char* snapshot_tree_snapshot_host(const SnapshotTree* tree, const char* id
 /*
  * The details of the snapshot with this full ID as UTF-8 text for a properties dialog, a line
  * each ("ID: ...", "Time: ...", "Paths: ...", the summary's size, counts and duration, parent,
- * program), lines missing what restic did not record; several paths or tags one per indented line.
+ * program), lines missing what restic did not record; several paths or tags one per indented line;
+ * control characters of the repository's content as '?', so that it cannot make lines of its own.
  * Heap, NUL-terminated; NULL when the tree has no such snapshot or when out of memory.
  */
 char* snapshot_tree_describe(const SnapshotTree* tree, const char* id);
 
 /*
  * `t` written by a time format (snapshot_tree_time_format_valid() or any text of placeholders and
- * literals) into `out`, which holds SNAPSHOT_TREE_TIME_FORMAT_MAX * 2 + 1 bytes
+ * literals, of at most SNAPSHOT_TREE_TIME_FORMAT_MAX bytes) into `out`, which holds
+ * SNAPSHOT_TREE_TIME_FORMAT_MAX * 2 + 1 bytes
  */
 void snapshot_tree_format_time(const Timestamp* t, const char* format, char* out);
 

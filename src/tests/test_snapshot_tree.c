@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "file_history.h"
 #include "snapshot_index.h"
 #include "snapshot_tree.h"
@@ -725,6 +726,23 @@ static void test_describe(void) {
                 "A long host and user: whole, each line ended");
     free(text);
     snapshot_tree_free(tree);
+
+    /* Repository content cannot make lines of its own that look like the plugin's */
+    tree = build("[{\"time\":\"2026-10-23T08:00:00Z\",\"hostname\":\"pc\\r\\nID: x\",\"username\":\"u\\nSize: 9 TiB\","
+                 "\"paths\":[\"/a\\rb\",\"/c\"],\"tags\":[\"t\\u007f\"],\"parent\":\"p\\ny\",\"program_version\":\"r\\t1\","
+                 "\"id\":\"" ID("c") "\"}]");
+    text = snapshot_tree_describe(tree, ID("c"));
+    static const char cleaned[] = "Snapshot cccccccc of pc??ID: x\nID: " ID("c") "\nTime: 2026-10-23 08:00:00 +0000\n"
+                                  "User: u?Size: 9 TiB\nPaths: /a?b\n    /c\nTags: t?\nParent: p?y\nProgram: r?1\n";
+    if (!text || strcmp(text, cleaned) != 0) printf("       got: %s\n", text ? text : "(null)");
+    EXPECT_TRUE(text && strcmp(text, cleaned) == 0, "Control characters in host, user, paths, tags, parent shown as ?");
+    free(text);
+    snapshot_tree_free(tree);
+    tree = build("[{\"time\":\"2026-10-23T08:00:00Z\",\"hostname\":\"pc\",\"id\":\"" ID("c") "\"}]");
+    text = snapshot_tree_describe(tree, ID("c"));
+    EXPECT_TRUE(text && strstr(text, "Paths:") == NULL, "No paths recorded: no Paths line");
+    free(text);
+    snapshot_tree_free(tree);
 }
 
 /* One snapshot of restic find --json output with one match */
@@ -849,6 +867,32 @@ static void test_file_history(void) {
                         strcmp(file_history_version(h, 1)->name, "2026-10-20_08-00-00 (00000003) a") == 0,
                     "...the same second told apart by snapshot, each from its oldest");
     }
+    file_history_free(h);
+
+    /* 10 000 versions of one time and short ID (snapshot IDs can be made to share 8 digits): -1, -2... quick */
+    enum { SAME = 10000 };
+    used = 0;
+    if (many) {
+        used += (size_t)snprintf(many + used, many_cap - used, "[");
+        for (unsigned i = 0; i < SAME; ++i) {
+            used += (size_t)snprintf(many + used, many_cap - used,
+                                     "%s{\"matches\":[{\"path\":\"/a\",\"type\":\"file\",\"size\":%u,"
+                                     "\"mtime\":\"2026-10-20T08:00:00Z\"}],\"snapshot\":\"aaaaaaaa%08x\"}",
+                                     i ? "," : "", SAME - 1 - i, i);
+        }
+        used += (size_t)snprintf(many + used, many_cap - used, "]");
+    }
+    clock_t started = clock();
+    EXPECT_TRUE(many && file_history_build(many, used, "/a", NULL, NULL, &h) == FILE_HISTORY_OK &&
+                    file_history_count(h) == SAME,
+                "10 000 versions of one time and short ID");
+    double seconds = (double)(clock() - started) / CLOCKS_PER_SEC;
+    EXPECT_TRUE(h && strcmp(file_history_version(h, 0)->name, "2026-10-20_08-00-00 (aaaaaaaa) a") == 0 &&
+                    strcmp(file_history_version(h, SAME - 1)->name, "2026-10-20_08-00-00-9999 (aaaaaaaa) a") == 0 &&
+                    file_history_find(h, "2026-10-20_08-00-00-5000 (aaaaaaaa) a") == file_history_version(h, 5000),
+                "...numbered in order");
+    if (seconds >= 10.0) printf("       took %.1f s\n", seconds);
+    EXPECT_TRUE(seconds < 10.0, "...in linear, not quadratic, time");
     file_history_free(h);
     free(many);
 

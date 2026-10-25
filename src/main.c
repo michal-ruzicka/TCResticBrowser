@@ -102,6 +102,7 @@ _Static_assert(sizeof(((SessionSlot*)0)->password) == sizeof(((RepoSecrets*)0)->
 
 typedef HRESULT (WINAPI *PFN_WerRegisterExcludedMemoryBlock)(const void*, DWORD);
 typedef HRESULT (WINAPI *PFN_WerUnregisterExcludedMemoryBlock)(const void*);
+static void cancel_go_to(void);
 typedef HANDLE (WINAPI *PFN_SetThreadDpiAwarenessContext)(HANDLE); /* DPI_AWARENESS_CONTEXT, Windows 10 1607+; per-monitor v2 1703+ */
 
 static SessionSlot* g_Sessions         = NULL; /* SESSION_SLOTS slots in locked pages, or NULL */
@@ -1464,8 +1465,23 @@ static ResticResult read_history(const RepoCall* call, const char* snapshot_id, 
     BOOL fresh = FALSE;
     ULONGLONG max_age_ms =
         cache == HISTORY_CACHE_ANY ? ~0ull : (ULONGLONG)call->cfg->snapshot_list_refresh_s * 1000ull;
-    if (!(cache != HISTORY_CACHE_NONE && call->trusted &&
-          repo_cache_get_history(call->repo->alias, call->repo->target, key, max_age_ms, &json, &len))) {
+    BOOL cached = cache != HISTORY_CACHE_NONE && call->trusted &&
+                  repo_cache_get_history(call->repo->alias, call->repo->target, key, max_age_ms, &json, &len);
+    FileHistoryStatus st = FILE_HISTORY_NOT_A_FILE;
+    if (cached) {
+        st = file_history_build(json, len, path, in_snapshot ? snapshot_id : NULL, call->cfg->snapshot_time_format,
+                                out);
+        /*
+         * Searched for before `snapshot_id` was taken (the key does not name the snapshot): a file
+         * there is unknown to that output, so restic is asked again rather than the path refused
+         */
+        if (st == FILE_HISTORY_NOT_A_FILE && in_snapshot && use_restic) {
+            free(json);
+            json   = NULL;
+            cached = FALSE;
+        }
+    }
+    if (!cached) {
         res = RESTIC_ERR_PATH_NOT_FOUND;
         if (!use_restic) goto done;
         ULONGLONG started = GetTickCount64();
@@ -1475,9 +1491,9 @@ static ResticResult read_history(const RepoCall* call, const char* snapshot_id, 
         fresh = TRUE;
         conn_log(FALSE, call->repo->alias, L"%ls: versions searched for by restic in %.1f s", file_subpath,
                  (double)(GetTickCount64() - started) / 1000.0);
+        st = file_history_build(json, len, path, in_snapshot ? snapshot_id : NULL, call->cfg->snapshot_time_format,
+                                out);
     }
-    FileHistoryStatus st = file_history_build(json, len, path, in_snapshot ? snapshot_id : NULL,
-                                              call->cfg->snapshot_time_format, out);
     switch (st) {
         case FILE_HISTORY_OK: res = RESTIC_OK; break;
         case FILE_HISTORY_NOT_A_FILE: res = RESTIC_ERR_PATH_NOT_FOUND; break;
@@ -1754,6 +1770,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
 #endif
     } else if (fdwReason == DLL_PROCESS_DETACH) {
         release_password_session(lpvReserved != NULL);
+        if (lpvReserved == NULL) cancel_go_to(); /* Unloaded, not the process ending: no timer into freed code */
     }
     return TRUE;
 }
@@ -2094,12 +2111,23 @@ typedef struct {
  */
 #define TC_COPYDATA_CD ('C' + 256 * 'D')
 
+/* "\\\<root name><path of up to 1023 units>\" and its NUL */
+#define VERSIONS_FOLDER_CHARS (MAX_PATH + 1024 + 8)
+
 static struct {
     HWND total_cmd;
     UINT_PTR timer;
-    char data[(MAX_PATH * 2 + 8) * 3 + 16];
+    char data[VERSIONS_FOLDER_CHARS * 3 + 16];
     DWORD len;
 } g_GoTo;
+
+/*
+ * Kills a pending timer (DllMain, on unloading). A thread timer can only be killed by its own
+ * thread, the one of Total Commander's window, which is also the one unloading plugins.
+ */
+static void cancel_go_to(void) {
+    if (g_GoTo.timer && KillTimer(NULL, g_GoTo.timer)) g_GoTo.timer = 0;
+}
 
 static void send_go_to(void) {
     COPYDATASTRUCT cds = {TC_COPYDATA_CD, g_GoTo.len, g_GoTo.data};
@@ -2129,8 +2157,7 @@ static BOOL go_to_folder(HWND total_cmd, const WCHAR* folder) {
     memcpy(g_GoTo.data, bom, 3);
     char* end = g_GoTo.data + 3 + bytes - 1;          /* At the path's NUL */
     memcpy(end, "\r\0S", 4);                           /* No other path; then the flags and their NUL */
-    end[4]          = '\0';
-    g_GoTo.len      = (DWORD)(end + 5 - g_GoTo.data);
+    g_GoTo.len       = (DWORD)(end + 4 - g_GoTo.data);
     g_GoTo.total_cmd = total_cmd;
     if (g_GoTo.timer) KillTimer(NULL, g_GoTo.timer);
     g_GoTo.timer = 0;
@@ -2161,7 +2188,7 @@ static INT_PTR CALLBACK versions_folder_proc(HWND dlg, UINT msg, WPARAM wparam, 
             SendMessageW(dlg, DM_SETDEFID, IDC_VERSIONS_COPY, 0);
             first = IDC_VERSIONS_COPY;
         }
-        SetFocus(GetDlgItem(dlg, first)); /* Not the field: a multi-line edit keeps Enter to itself */
+        SetFocus(GetDlgItem(dlg, first)); /* Not the field, which would get its text selected */
         return FALSE;                     /* Focus set here */
     }
     if (msg == WM_COMMAND) {
@@ -2204,6 +2231,46 @@ static INT_PTR show_versions_folder(HWND owner, VersionsFolderDialog* dialog) {
     return shown;
 }
 
+/*
+ * Alt+Enter on a file: the dialog naming the folder of its versions (`remote_name`, a WFX path),
+ * from which Total Commander can be sent there; an FS_EXEC_* code. A function of its own, so that
+ * the long path is not on show_properties()' stack as well.
+ */
+static int show_versions_dialog(HWND main_win, const WCHAR* remote_name) {
+    /*
+     * Total Commander does not go to a path returned with FS_EXEC_SYMLINK from "properties" (with
+     * or without a trailing backslash it shows its own, empty, version information dialog), so
+     * the folder is named for the user to go to: the full path, with a trailing backslash so that
+     * `cd` does not take it for the file, in a dialog of the plugin's own, which can have Total
+     * Commander go there (go_to_folder()) or copy it.
+     * The root is the name FsGetDefRootName() proposes; Total Commander keeps the one it was
+     * given when the plugin was added, which the user may have changed (README, Root Folder Name).
+     */
+    WCHAR root[MAX_PATH], folder[VERSIONS_FOLDER_CHARS], title[MAX_PATH];
+    char root_ansi[MAX_PATH * 4];
+    load_root_name(root, _countof(root));
+    if (!root_name_to_ansi(root, root_ansi, (int)sizeof(root_ansi))) {
+        wcsncpy_s(root, _countof(root), CONFIG_DEFAULT_ROOT_NAME, _TRUNCATE);
+    }
+    if (_snwprintf_s(folder, _countof(folder), _TRUNCATE, L"\\\\\\%ls%ls\\", root, remote_name) < 0) {
+        log_write(L"Properties of %ls: the path of the folder of its versions is too long", remote_name);
+        return FS_EXEC_ERROR;
+    }
+    const WCHAR* last = wcsrchr(remote_name, L'\\');
+    _snwprintf_s(title, _countof(title), _TRUNCATE, L"Versions of %ls", last ? last + 1 : remote_name);
+    log_write(L"Properties of %ls: the folder of its versions named", remote_name);
+    VersionsFolderDialog dialog = {title, folder, main_win ? GetAncestor(main_win, GA_ROOT) : NULL};
+    INT_PTR shown = show_versions_folder(main_win, &dialog);
+    if (shown == IDC_VERSIONS_COPY) log_write(L"The folder of the versions copied to the clipboard");
+    if (shown == IDC_VERSIONS_GO) {
+        BOOL asked = go_to_folder(dialog.total_cmd, folder);
+        log_write(asked ? L"Total Commander asked to go to the folder of the versions"
+                        : L"Total Commander could not be asked to go to the folder of the versions");
+    }
+    if (shown <= 0) log_write(L"The folder of the versions could not be shown (error %lu)", GetLastError());
+    return FS_EXEC_OK;
+}
+
 /* Alt+Enter: see PropertiesContext. Returns an FS_EXEC_* code. */
 static int show_properties(HWND main_win, WCHAR* remote_name) {
     WfxParsedPath parsed;
@@ -2226,34 +2293,7 @@ static int show_properties(HWND main_win, WCHAR* remote_name) {
     ResticResult res = run_with_password(&cfg, repo, &exec_opts, properties_operation, &ctx, err_msg, _countof(err_msg));
     int rc = FS_EXEC_OK;
     if (res == RESTIC_OK && ctx.versions_folder) {
-        /*
-         * Total Commander does not go to a path returned with FS_EXEC_SYMLINK from "properties" (with
-         * or without a trailing backslash it shows its own, empty, version information dialog), so
-         * the folder is named for the user to go to: the full path, with a trailing backslash so that
-         * `cd` does not take it for the file, in a dialog of the plugin's own, which can have Total
-         * Commander go there (go_to_folder()) or copy it.
-         * The root is the name FsGetDefRootName() proposes; Total Commander keeps the one it was
-         * given when the plugin was added, which the user may have changed (README, Root Folder Name).
-         */
-        WCHAR root[MAX_PATH], folder[MAX_PATH * 2 + 8], title[MAX_PATH];
-        char root_ansi[MAX_PATH * 4];
-        load_root_name(root, _countof(root));
-        if (!root_name_to_ansi(root, root_ansi, (int)sizeof(root_ansi))) {
-            wcsncpy_s(root, _countof(root), CONFIG_DEFAULT_ROOT_NAME, _TRUNCATE);
-        }
-        _snwprintf_s(folder, _countof(folder), _TRUNCATE, L"\\\\\\%ls%ls\\", root, remote_name);
-        const WCHAR* last = wcsrchr(remote_name, L'\\');
-        _snwprintf_s(title, _countof(title), _TRUNCATE, L"Versions of %ls", last ? last + 1 : remote_name);
-        log_write(L"Properties of %ls: the folder of its versions named", remote_name);
-        VersionsFolderDialog dialog = {title, folder, main_win ? GetAncestor(main_win, GA_ROOT) : NULL};
-        INT_PTR shown = show_versions_folder(main_win, &dialog);
-        if (shown == IDC_VERSIONS_COPY) log_write(L"The folder of the versions copied to the clipboard");
-        if (shown == IDC_VERSIONS_GO) {
-            BOOL asked = go_to_folder(dialog.total_cmd, folder);
-            log_write(asked ? L"Total Commander asked to go to the folder of the versions"
-                            : L"Total Commander could not be asked to go to the folder of the versions");
-        }
-        if (shown <= 0) log_write(L"The folder of the versions could not be shown (error %lu)", GetLastError());
+        rc = show_versions_dialog(main_win, remote_name);
     } else if (res == RESTIC_OK && ctx.text) {
         int chars = MultiByteToWideChar(CP_UTF8, 0, ctx.text, -1, NULL, 0);
         WCHAR* text = chars > 0 ? (WCHAR*)malloc((size_t)chars * sizeof(WCHAR)) : NULL;

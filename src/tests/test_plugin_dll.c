@@ -1173,8 +1173,8 @@ static void test_e2e_file_history(const Plugin* p, const WCHAR* dir, const WCHAR
     int path_bytes = WideCharToMultiByte(CP_UTF8, 0, answer.path, -1, expected + 3, (int)sizeof(expected) - 8, NULL,
                                          NULL);
     memcpy(expected, "\xEF\xBB\xBF", 3);
-    memcpy(expected + 3 + path_bytes - 1, "\r\0S\0", 5);
-    DWORD expected_len = (DWORD)(3 + path_bytes - 1 + 5);
+    memcpy(expected + 3 + path_bytes - 1, "\r\0S", 4); /* The literal's NUL ends the flags */
+    DWORD expected_len = (DWORD)(3 + path_bytes - 1 + 4);
     EXPECT_TRUE(g_copydata.count == 1 && g_copydata.kind == ('C' + 256 * 'D') && g_copydata.len == expected_len &&
                     memcmp(g_copydata.data, expected, expected_len) == 0,
                 "...then asks it, once, to show the folder in the active panel (WM_COPYDATA \"CD\", UTF-8, flag S)");

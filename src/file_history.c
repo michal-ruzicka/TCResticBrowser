@@ -87,16 +87,43 @@ static int name_versions(FileHistory* h, const char* file_name, const char* time
     size_t slots = 16;
     while (slots < h->count * 2) slots *= 2;
     size_t* taken = (size_t*)calloc(slots, sizeof(size_t));
-    if (!h->names || !taken) {
+    /*
+     * The next -n to try for each "<time> (<short ID>)" (by the version that last took it, + 1, 0:
+     * none yet), so that k versions of one time and short ID are named in O(k), not O(k^2): a
+     * repository can hold many snapshots whose IDs share the first eight digits
+     */
+    size_t* bases  = (size_t*)calloc(slots, sizeof(size_t));
+    unsigned* next = (unsigned*)calloc(h->count ? h->count : 1, sizeof(unsigned));
+    char** when_of = (char**)calloc(h->count ? h->count : 1, sizeof(char*));
+    char* whens    = (char*)malloc((h->count ? h->count : 1) * (SNAPSHOT_TREE_TIME_FORMAT_MAX * 2 + 1));
+    if (!h->names || !taken || !bases || !next || !when_of || !whens) {
         free(taken);
+        free(bases);
+        free(next);
+        free(when_of);
+        free(whens);
         return 0;
     }
     size_t used = 0;
     for (size_t i = 0; i < h->count; ++i) {
-        char when[SNAPSHOT_TREE_TIME_FORMAT_MAX * 2 + 1], prefix[SNAPSHOT_TREE_TIME_FORMAT_MAX * 2 + 40];
+        char prefix[SNAPSHOT_TREE_TIME_FORMAT_MAX * 2 + 40];
+        char* when = whens + i * (SNAPSHOT_TREE_TIME_FORMAT_MAX * 2 + 1);
+        when_of[i] = when;
         snapshot_tree_format_time(&h->versions[i].mtime, time_format, when);
         const char* id = h->versions[i].snapshot_id; /* At least SNAPSHOT_TREE_SHORT_ID_CHARS: checked */
-        for (unsigned n = 0;; ++n) {
+        snprintf(prefix, sizeof(prefix), "%s (%.*s)", when, SNAPSHOT_TREE_SHORT_ID_CHARS, id);
+        size_t base = name_hash(prefix) & (slots - 1);
+        for (; bases[base]; base = (base + 1) & (slots - 1)) {
+            size_t j = bases[base] - 1;
+            if (strcmp(when_of[j], when) == 0 &&
+                memcmp(h->versions[j].snapshot_id, id, SNAPSHOT_TREE_SHORT_ID_CHARS) == 0) {
+                break;
+            }
+        }
+        unsigned first = bases[base] ? next[bases[base] - 1] : 0;
+        bases[base]    = i + 1;
+        for (unsigned n = first;; ++n) {
+            next[i] = n + 1;
             if (n == 0) {
                 snprintf(prefix, sizeof(prefix), "%s (%.*s) ", when, SNAPSHOT_TREE_SHORT_ID_CHARS, id);
             } else {
@@ -126,6 +153,10 @@ static int name_versions(FileHistory* h, const char* file_name, const char* time
         }
     }
     free(taken);
+    free(bases);
+    free(next);
+    free(when_of);
+    free(whens);
     return 1;
 }
 
@@ -226,7 +257,8 @@ FileHistoryStatus file_history_build(const char* json, size_t len, const char* p
             memcpy(v->snapshot_id, h->entries[matches[k].entry].id, sizeof(v->snapshot_id));
             h->entries[matches[k].entry].version = h->count - 1;
         }
-        if (!name_versions(h, strrchr(path, '/') + 1, time_format)) status = FILE_HISTORY_NO_MEMORY;
+        const char* slash = strrchr(path, '/'); /* There: the path starts with one (checked above) */
+        if (!name_versions(h, slash ? slash + 1 : path, time_format)) status = FILE_HISTORY_NO_MEMORY;
     }
     free(matches);
     json_free(doc);

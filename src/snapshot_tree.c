@@ -799,19 +799,35 @@ static void text_printf(CsvText* t, const char* format, ...) {
     if (n > 0) csv_put(t, line, (size_t)n < sizeof(line) ? (size_t)n : sizeof(line) - 1);
 }
 
+/*
+ * `len` bytes of repository content, a control character as '?': a line break in a host or user
+ * name must not make a line of its own that looks like one of the plugin's ("Size: ...")
+ */
+static void text_clean(CsvText* t, const char* text, size_t len) {
+    for (size_t i = 0; i < len; ++i) {
+        unsigned char c = (unsigned char)text[i];
+        csv_put(t, c < 0x20 || c == 0x7F ? "?" : text + i, 1);
+    }
+}
+
 /* "Label: ", a value of any length and the end of the line */
 static void text_value(CsvText* t, const char* label, const char* value) {
     csv_put(t, label, strlen(label));
-    csv_put(t, value, strlen(value));
+    text_clean(t, value, strlen(value));
     csv_put(t, "\n", 1);
 }
 
-/* "Label: " and a text of several lines, each further line indented below the first */
+/* "Label: " and a text of several lines (LF-separated), each further line indented below the first */
 static void text_lines(CsvText* t, const char* label, const char* lines) {
     csv_put(t, label, strlen(label));
-    for (const char* p = lines; *p; ++p) {
-        csv_put(t, p, 1);
-        if (*p == '\n') csv_put(t, "    ", 4);
+    for (const char* p = lines; *p;) {
+        size_t n = strcspn(p, "\n");
+        text_clean(t, p, n);
+        p += n;
+        if (*p == '\n') {
+            csv_put(t, "\n    ", 5);
+            ++p;
+        }
     }
     csv_put(t, "\n", 1);
 }
@@ -834,12 +850,12 @@ char* snapshot_tree_describe(const SnapshotTree* tree, const char* id) {
     CsvText t = {NULL, 0, 0, 0};
     char when[SNAPSHOT_TREE_TIME_FORMAT_MAX * 2 + 1], size[32], packed[32], took[32];
     time_name(&s->time, "YYYY-MM-DD hh:mm:ss zzzz", when);
-    text_printf(&t, "Snapshot %.8s of ", s->id);
+    text_printf(&t, "Snapshot %.8s of ", s->id); /* The ID is lowercase hexadecimal: checked when built */
     text_value(&t, "", s->host[0] ? s->host : "(no host)");
     text_printf(&t, "ID: %s\n", s->id);
     text_printf(&t, "Time: %s\n", when);
     if (s->username[0]) text_value(&t, "User: ", s->username);
-    text_lines(&t, "Paths: ", s->paths);
+    if (s->paths[0]) text_lines(&t, "Paths: ", s->paths);
     if (s->tags[0]) text_lines(&t, "Tags: ", s->tags);
     if (s->has_size) {
         size_text(s->size, size, sizeof(size));
@@ -862,7 +878,11 @@ char* snapshot_tree_describe(const SnapshotTree* tree, const char* id) {
         duration_text(s->backup_end.utc_ticks - s->backup_start.utc_ticks, took, sizeof(took));
         text_printf(&t, "Backup took: %s\n", took);
     }
-    if (s->parent[0]) text_printf(&t, "Parent: %.8s\n", s->parent);
+    if (s->parent[0]) {
+        char parent[SNAPSHOT_TREE_SHORT_ID_CHARS + 1];
+        snprintf(parent, sizeof(parent), "%s", s->parent); /* restic's short form; not checked, so cleaned */
+        text_value(&t, "Parent: ", parent);
+    }
     if (s->program_version[0]) text_value(&t, "Program: ", s->program_version);
     if (t.failed) {
         free(t.data);

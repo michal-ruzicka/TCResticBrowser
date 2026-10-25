@@ -53,7 +53,7 @@ struct IndexEntry {
 #define MAX_HISTORY_BYTES (32u * 1024u * 1024u)    /* Kept per repository together */
 typedef struct HistoryEntry HistoryEntry;
 struct HistoryEntry {
-    char* key;     /* "<host>\n<path>" */
+    char* key;     /* "<host length>:<host>\n<path>" */
     char* json;
     size_t len;
     ULONGLONG at;  /* GetTickCount64() when it was cached */
