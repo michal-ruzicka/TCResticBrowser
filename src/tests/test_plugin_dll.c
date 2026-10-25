@@ -1076,8 +1076,8 @@ static void clipboard_text(const WCHAR* set, WCHAR* out, size_t cap) {
 }
 
 /*
- * Alt+Enter (FsExecuteFileW "properties"): a file opens as the folder of its versions across the
- * snapshots, which copy like files; a version, a snapshot and a folder in it show their properties
+ * Alt+Enter (FsExecuteFileW "properties"): a file names, in a dialog, the folder of its versions
+ * across the snapshots, which copy like files; a version, a snapshot and a folder in it show their properties
  */
 static void test_e2e_file_history(const Plugin* p, const WCHAR* dir, const WCHAR* snap_root, const WCHAR* data_path) {
     static WCHAR remote[MAX_PATH * 2], names[2048], version_path[MAX_PATH * 2], local[MAX_PATH], log_file[MAX_PATH];

@@ -102,7 +102,7 @@ _Static_assert(sizeof(((SessionSlot*)0)->password) == sizeof(((RepoSecrets*)0)->
 
 typedef HRESULT (WINAPI *PFN_WerRegisterExcludedMemoryBlock)(const void*, DWORD);
 typedef HRESULT (WINAPI *PFN_WerUnregisterExcludedMemoryBlock)(const void*);
-typedef HANDLE (WINAPI *PFN_SetThreadDpiAwarenessContext)(HANDLE); /* DPI_AWARENESS_CONTEXT, Windows 10 1607+ */
+typedef HANDLE (WINAPI *PFN_SetThreadDpiAwarenessContext)(HANDLE); /* DPI_AWARENESS_CONTEXT, Windows 10 1607+; per-monitor v2 1703+ */
 
 static SessionSlot* g_Sessions         = NULL; /* SESSION_SLOTS slots in locked pages, or NULL */
 static SIZE_T       g_SessionBytes     = 0;
@@ -620,6 +620,15 @@ static void load_root_name(WCHAR* out, size_t capacity) {
     load_config(&cfg);
     wcsncpy_s(out, capacity, cfg.root_name, _TRUNCATE);
     config_free(&cfg);
+}
+
+/* `name` in the ANSI code page into `ansi`; FALSE when it cannot hold every character (FsGetDefRootName is char*) */
+static BOOL root_name_to_ansi(const WCHAR* name, char* ansi, int capacity) {
+    BOOL lossy    = FALSE;
+    BOOL utf8_acp = (GetACP() == CP_UTF8); /* lpUsedDefaultChar must be NULL for CP_UTF8 */
+    int n = WideCharToMultiByte(CP_ACP, utf8_acp ? 0 : WC_NO_BEST_FIT_CHARS, name, -1, ansi, capacity, NULL,
+                                utf8_acp ? NULL : &lossy);
+    return n > 0 && !lossy;
 }
 
 /* Logs an important error and displays an OK message dialog in Total Commander */
@@ -1665,7 +1674,7 @@ static ResticResult list_operation(const RepoCall* call, void* ctx_ptr) {
                 }
             }
             if (res == RESTIC_ERR_PATH_NOT_FOUND && is_file) {
-                /* A file opened as a folder (Alt+Enter) lists its versions */
+                /* A file opened as a folder (named by Alt+Enter) lists its versions */
                 FileHistory* history = NULL;
                 ResticResult found   = read_history(call, where.snapshot_id, where.subpath, TRUE, HISTORY_CACHE_FRESH,
                                                     TRUE, &history);
@@ -1762,11 +1771,7 @@ void __stdcall FsGetDefRootName(char* DefRootName, int maxlen) {
     load_root_name(name, _countof(name));
 
     char ansi[MAX_PATH * 4];
-    BOOL lossy = FALSE;
-    BOOL utf8_acp = (GetACP() == CP_UTF8); /* lpUsedDefaultChar must be NULL for CP_UTF8 */
-    int n = WideCharToMultiByte(CP_ACP, utf8_acp ? 0 : WC_NO_BEST_FIT_CHARS, name, -1,
-                                ansi, (int)sizeof(ansi), NULL, utf8_acp ? NULL : &lossy);
-    if (n <= 0 || lossy || n > maxlen) {
+    if (!root_name_to_ansi(name, ansi, (int)sizeof(ansi)) || strlen(ansi) >= (size_t)maxlen) {
         WideCharToMultiByte(CP_ACP, 0, CONFIG_DEFAULT_ROOT_NAME, -1, ansi, (int)sizeof(ansi), NULL, NULL);
     }
     strncpy_s(DefRootName, (size_t)maxlen, ansi, _TRUNCATE);
@@ -2154,10 +2159,16 @@ static int show_properties(HWND main_win, WCHAR* remote_name) {
          * Total Commander does not go to a path returned with FS_EXEC_SYMLINK from "properties" (with
          * or without a trailing backslash it shows its own, empty, version information dialog), so
          * the folder is named for the user to go to: the full path, with a trailing backslash so that
-         * `cd` does not take it for the file, in a dialog of the plugin's own, which can copy it
+         * `cd` does not take it for the file, in a dialog of the plugin's own, which can copy it.
+         * The root is the name FsGetDefRootName() proposes; Total Commander keeps the one it was
+         * given when the plugin was added, which the user may have changed (README, Root Folder Name).
          */
         WCHAR root[MAX_PATH], folder[MAX_PATH * 2 + 8], title[MAX_PATH];
+        char root_ansi[MAX_PATH * 4];
         load_root_name(root, _countof(root));
+        if (!root_name_to_ansi(root, root_ansi, (int)sizeof(root_ansi))) {
+            wcsncpy_s(root, _countof(root), CONFIG_DEFAULT_ROOT_NAME, _TRUNCATE);
+        }
         _snwprintf_s(folder, _countof(folder), _TRUNCATE, L"\\\\\\%ls%ls\\", root, remote_name);
         const WCHAR* last = wcsrchr(remote_name, L'\\');
         _snwprintf_s(title, _countof(title), _TRUNCATE, L"Versions of %ls", last ? last + 1 : remote_name);

@@ -17,8 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **File versions (`Alt+Enter` on a file inside a snapshot):** a dialog
   shows the path of a folder to go to (`Copy to clipboard`, its default
-  button, copies it), the file's own path followed by `\` - which can
-  also be typed by hand -, which lists that file's versions across the snapshots of the
+  button, copies it): the file's own path followed by `\`, which can also
+  be typed by hand. The folder lists that file's versions across the snapshots of the
   same host, named by their modification time, the short ID of the
   oldest snapshot that holds the version (the backup it first appeared
   in) and the file's name (`2026-10-17_14-02-11 (1a2b3c4d) report.docx`),

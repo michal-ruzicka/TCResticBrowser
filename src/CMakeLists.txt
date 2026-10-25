@@ -120,7 +120,7 @@ if(NOT RESTIC_WFX_ASAN)
     add_library(TCResticBrowser SHARED
         $<TARGET_OBJECTS:restic_core>
         TCResticBrowser.def
-        TCResticBrowser.rc   # plugin icon (Network Neighborhood) + VERSIONINFO
+        TCResticBrowser.rc   # plugin icon (Network Neighborhood) + VERSIONINFO + versions dialog
     )
     set_target_properties(TCResticBrowser PROPERTIES
         PREFIX ""

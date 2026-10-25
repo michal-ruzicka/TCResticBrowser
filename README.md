@@ -236,7 +236,7 @@ it can, so the same folder can take a moment once and open instantly later:
 | Any folder of that snapshot once the background read is done | Instant, from memory. The read takes from seconds to minutes depending on the number of files, and runs while you browse. |
 | A snapshot with more files than `SnapshotCacheMB=` holds | Every folder waits for its own `restic ls`; it is never read as a whole. |
 | A file you view (`F3`, `Ctrl+Q`) or copy (`F5`) | Always runs `restic dump`, about a second per file plus the transfer. |
-| The versions of a file (`Alt+Enter`) | Waits for one `restic find`, which opens every snapshot of the host along the file's path: longer than a folder, shorter than opening the snapshots one by one. Kept for a minute (`SnapshotListRefreshSeconds=`), so returning to it runs no `restic find` again; copying a version or `Alt+Enter` on one never does once it was listed. |
+| The versions of a file (`Alt+Enter`) | Waits for one `restic find`, which opens every snapshot of the host along the file's path: longer than a folder, shorter than opening the snapshots one by one. Kept for a minute (`SnapshotListRefreshSeconds=`), so returning to it runs no `restic find` again; copying a version or `Alt+Enter` on one does not either, as long as the versions are still remembered (the last eight files looked up per repository). |
 | The details of a snapshot (`Alt+Enter`) | Instant on a snapshot folder, from the snapshot list. On a folder inside a snapshot, one `restic ls` until the snapshot has been read as a whole (to tell a folder from a file). |
 
 After the password timeout (30 minutes by default) or `🗑 Forget N
@@ -381,7 +381,15 @@ the path and closes the dialog, `OK` (or `Esc`) just closes it; go there
 by pasting the path into the path above the panel's file list (click it,
 or the command `cm_EditPath`) or after `cd ` on the command line.
 Total Commander does not let a plugin change the panel's folder from
-*Properties*, so it cannot go there by itself.
+*Properties*, so it cannot go there by itself. Like entering a snapshot,
+`Alt+Enter` asks for the repository's password if none is remembered, and
+restic errors are reported as usual.
+
+The path starts with the name the plugin proposed to Total Commander
+(`RootName=`, see [Root Folder Name](#root-folder-name)). If you renamed
+the plugin's folder in Total Commander, or changed `RootName=` without
+installing the plugin again, replace the first part of the path with the
+name the folder has in Network Neighborhood.
 
 The trailing `\` is what turns the file into a folder: without it,
 Total Commander takes the path for the file itself. The dialog only
@@ -403,7 +411,8 @@ folder, add `\` after a file's name in the path above the file list.
   the Lister or with Enter works as usual). The short ID is the name of
   that snapshot's folder under `ids`, where the files that changed
   together with this version can be found. Two versions with the same
-  time and short ID get `-1`, `-2`... after the time.
+  time and short ID get `-1`, `-2`... after the time. A file that never
+  changed has a single version.
 - View (`F3`, `Ctrl+Q`) or copy (`F5`) a version like any file; it comes
   from the snapshot its name carries. Several selected versions can
   be copied into a folder at once.
@@ -418,7 +427,8 @@ folder, add `\` after a file's name in the path above the file list.
   result is kept as long as the snapshot list (a minute,
   `SnapshotListRefreshSeconds=`) for listing the versions again, and for
   as long as the password for copying a version or `Alt+Enter` on one -
-  a snapshot never changes. Only after `restic forget` removed the
+  a snapshot never changes -, for the last eight files looked up in a
+  repository; an older one is looked up again. Only after `restic forget` removed the
   snapshot a version is named after does copying it fail; `Ctrl+R` in
   the folder of versions looks them up again.
 - `restic find` runs only for a path that is a file in the snapshot you
@@ -433,8 +443,9 @@ full ID, time, host, user, backed-up paths, tags, and for snapshots
 taken with restic 0.17 or later the size, the number of new, changed and
 unmodified files and folders, the data added to the repository, how
 long the backup took, the parent snapshot and the restic version that
-made it. Above the snapshots (`hosts`, `tags\<tag>`, the repository's
-files) `Alt+Enter` shows nothing and asks for no password.
+made it. Above the snapshots (the repository's folder and its files,
+`hosts`, `ids`, `snapshots`, `tags`, a host's or a tag's folder)
+`Alt+Enter` shows nothing and asks for no password.
 
 ### Dates in the Panels
 
@@ -444,6 +455,7 @@ files) `Alt+Enter` shows nothing and asks for no password.
 | `hosts`, `ids`, `snapshots`, `tags`, a host's or a tag's folder | When the newest snapshot in it was taken; none if it holds no snapshot (`tags` when no snapshot has a tag) |
 | A snapshot's folder, also `latest` and `latest → …` | When the snapshot was taken |
 | Files and folders in a snapshot | Their modification time as restic recorded it (none if restic has none); creation and access time from restic's `ctime` and `atime` |
+| The versions of a file (`Alt+Enter`) | The version's modification time |
 | `snapshots.csv`, `snapshots.json` | When restic was asked for the snapshot list it is made from |
 | `repository_id.txt` | When restic was asked for the ID; until then the date of `snapshots.csv` |
 
@@ -573,7 +585,9 @@ entered it.
 
 `SnapshotTimeFormat=` under `[Settings]` sets how the snapshot folders
 under `snapshots`, `hosts\<host>` and `tags\<tag>` are named, like
-`restic mount --time-template` but with simpler placeholders:
+`restic mount --time-template` but with simpler placeholders; the
+versions of a file (`Alt+Enter`) start with their modification time in
+the same format:
 
 | Placeholder | Meaning | Example |
 | --- | --- | --- |
@@ -802,8 +816,9 @@ PasswordCommand=C:\Tools\get-restic-password.cmd
 
 The plugin depends on nothing but what it cannot do without:
 
-- **Windows** — the plugin imports only `KERNEL32.dll` and `CRYPT32.dll`
-  (for `CryptProtectMemory`) and links the C runtime statically, so no
+- **Windows** — the plugin imports only `KERNEL32.dll`, `USER32.dll` (for
+  the dialog naming the folder of a file's versions, and the clipboard) and
+  `CRYPT32.dll` (for `CryptProtectMemory`) and links the C runtime statically, so no
   Visual C++ Redistributable is needed.
 - **[Restic](https://restic.net)** ([github.com/restic/restic](https://github.com/restic/restic),
   BSD 2-Clause License) — run as an external `restic.exe` process, never
@@ -814,8 +829,9 @@ The plugin depends on nothing but what it cannot do without:
 
 ### Why the Plugin Has Its Own JSON Reader
 
-`restic.exe` reports snapshots and directory listings as JSON
-(`restic snapshots --json`, `restic ls --json`), so the plugin has to parse
+`restic.exe` reports snapshots, directory listings and the rest as JSON
+(`restic snapshots --json`, `restic ls --json`, `restic find --json`,
+`restic --json version`, `restic cat config`), so the plugin has to parse
 JSON. Upstream used the [cJSON](https://github.com/DaveGamble/cJSON) library
 as a Git submodule. This fork replaces it with `src/json.c`, a strict,
 read-only JSON reader of about 370 lines, because no component the plugin
@@ -843,9 +859,10 @@ decoded name is a plain C string that cannot be cut short) — and reads file
 sizes as exact 64-bit integers instead of going through floating point.
 
 The reader is generic: it understands any valid JSON, not just a list of
-expected keywords. The plugin looks up the few fields it uses (`id`,
-`time`, `hostname`, `tags`, `paths`, `summary.total_bytes_processed`, `name`, `type`, `size`, `mtime`, `atime`,
-`ctime`, `path`, `message_type`, `message`), so fields and message types that a newer
+expected keywords. The plugin looks up the fields it uses (such as `id`,
+`time`, `hostname`, `tags`, `paths` and the `summary` of a snapshot, `name`,
+`type`, `size`, `mtime`, `atime`, `ctime` and `path` of a file, `snapshot` and
+`matches` of `restic find`, `message_type`, `message`, `version`), so fields and message types that a newer
 Restic adds are simply ignored; a missing field skips the entry or leaves its
 size or time unknown, and a line that is not valid JSON fails the listing
 instead of being guessed at.
