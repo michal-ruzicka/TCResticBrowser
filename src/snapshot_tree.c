@@ -320,7 +320,6 @@ static size_t join_lines(const JsonValue* array, char* out) {
     return o;
 }
 
-/* The snapshot's SnapshotInfo, its strings in the same allocation; NULL when out of memory */
 /* A string member of a snapshot's JSON object, "" when it is missing or not a string */
 static const char* member_text(const JsonValue* object, const char* key) {
     const char* text = json_string(json_object_get(object, key));
@@ -777,7 +776,7 @@ const char* snapshot_tree_snapshot_host(const SnapshotTree* tree, const char* id
     return info ? info->host : NULL;
 }
 
-/* printf into a CsvText, one line of at most 1023 bytes */
+/* printf into a CsvText, at most 1023 bytes: only for text of a known, short length */
 static void text_printf(CsvText* t, const char* format, ...) {
     char line[1024];
     va_list args;
@@ -785,6 +784,13 @@ static void text_printf(CsvText* t, const char* format, ...) {
     int n = vsnprintf(line, sizeof(line), format, args);
     va_end(args);
     if (n > 0) csv_put(t, line, (size_t)n < sizeof(line) ? (size_t)n : sizeof(line) - 1);
+}
+
+/* "Label: ", a value of any length and the end of the line */
+static void text_value(CsvText* t, const char* label, const char* value) {
+    csv_put(t, label, strlen(label));
+    csv_put(t, value, strlen(value));
+    csv_put(t, "\n", 1);
 }
 
 /* "Label: " and a text of several lines, each further line indented below the first */
@@ -815,10 +821,11 @@ char* snapshot_tree_describe(const SnapshotTree* tree, const char* id) {
     CsvText t = {NULL, 0, 0, 0};
     char when[SNAPSHOT_TREE_TIME_FORMAT_MAX * 2 + 1], size[32], packed[32], took[32];
     time_name(&s->time, "YYYY-MM-DD hh:mm:ss zzzz", when);
-    text_printf(&t, "Snapshot %.8s of %s\n", s->id, s->host[0] ? s->host : "(no host)");
+    text_printf(&t, "Snapshot %.8s of ", s->id);
+    text_value(&t, "", s->host[0] ? s->host : "(no host)");
     text_printf(&t, "ID: %s\n", s->id);
     text_printf(&t, "Time: %s\n", when);
-    if (s->username[0]) text_printf(&t, "User: %s\n", s->username);
+    if (s->username[0]) text_value(&t, "User: ", s->username);
     text_lines(&t, "Paths: ", s->paths);
     if (s->tags[0]) text_lines(&t, "Tags: ", s->tags);
     if (s->has_size) {
@@ -843,7 +850,7 @@ char* snapshot_tree_describe(const SnapshotTree* tree, const char* id) {
         text_printf(&t, "Backup took: %s\n", took);
     }
     if (s->parent[0]) text_printf(&t, "Parent: %.8s\n", s->parent);
-    if (s->program_version[0]) text_printf(&t, "Program: %s\n", s->program_version);
+    if (s->program_version[0]) text_value(&t, "Program: ", s->program_version);
     if (t.failed) {
         free(t.data);
         return NULL;

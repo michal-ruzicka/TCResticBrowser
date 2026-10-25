@@ -46,14 +46,18 @@ typedef enum {
 } FileHistoryStatus;
 
 /*
- * Builds the versions of the file at `path` (UTF-8, absolute inside the snapshots: "/C/Users/me/a.txt")
- * from `len` bytes of `restic find --json` output. Matches at other paths (what lies below a folder
- * of that name) and folders are ignored. With `in_snapshot` (a full ID) the path must be a
- * non-folder in that snapshot, otherwise FILE_HISTORY_NOT_A_FILE: a path that is a folder there is
- * listed as a folder, not as a history. Versions are named by `time_format` (NULL or one that
- * snapshot_tree_time_format_valid() refuses: the default of snapshot_tree.h); two versions with the
- * same name (same time and short ID) get "-1", "-2"... after the time; a name is cut
- * so that it stays within 255 UTF-16 units. Release with file_history_free().
+ * Builds the versions of the file at `path` (UTF-8, absolute inside the snapshots:
+ * "/C/Users/me/a.txt") from `len` bytes of `restic find --json` output, in O(n log n) for n
+ * snapshots. Matches at other paths (what lies below a folder of that name) and folders are
+ * ignored; a missing size, or one that is not a whole number, counts as 0. With `in_snapshot` (a
+ * full ID) the path must be a non-folder in that snapshot, otherwise FILE_HISTORY_NOT_A_FILE: a
+ * path that is a folder there is listed as a folder, not as a history; without it, no version at
+ * all is FILE_HISTORY_NOT_A_FILE too. FILE_HISTORY_BAD_JSON also for a NULL argument or a path
+ * that is relative or ends in '/'. Versions are named by `time_format` (NULL or one that
+ * snapshot_tree_time_format_valid() refuses: the default of snapshot_tree.h); two versions with
+ * the same name (same time and short ID) get "-1", "-2"... after the time; a name is cut, without
+ * a trailing dot or space, so that it stays within 255 UTF-16 units. Release with
+ * file_history_free().
  */
 FileHistoryStatus file_history_build(const char* json, size_t len, const char* path, const char* in_snapshot,
                                      const char* time_format, FileHistory** out);

@@ -105,7 +105,7 @@ char* snapshot_tree_csv(const SnapshotTree* tree, char separator, size_t* out_le
 /* The time of the snapshot with this full ID into *out; 0 when the tree has no such snapshot */
 int snapshot_tree_snapshot_time(const SnapshotTree* tree, const char* id, Timestamp* out);
 
-/* The host name of the snapshot with this full ID, as restic recorded it; NULL when there is none */
+/* The host name of the snapshot with this full ID, as restic recorded it ("" without one); NULL when there is no such snapshot */
 const char* snapshot_tree_snapshot_host(const SnapshotTree* tree, const char* id);
 
 /*

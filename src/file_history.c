@@ -22,11 +22,6 @@ struct FileHistory {
     char* names;           /* Every version's name, NUL-terminated one after the other */
 };
 
-static int same_version(const FileVersion* v, const char* type, uint64_t size, const Timestamp* mtime) {
-    return v->size == size && v->mtime.utc_ticks == mtime->utc_ticks && v->mtime.nanosecond == mtime->nanosecond &&
-           strcmp(v->type, type) == 0;
-}
-
 static int compare_versions(const void* a, const void* b) {
     const FileVersion* x = (const FileVersion*)a;
     const FileVersion* y = (const FileVersion*)b;
@@ -75,15 +70,27 @@ static void free_parts(FileHistory* h) {
     free(h);
 }
 
+/* FNV-1a of a NUL-terminated name */
+static size_t name_hash(const char* name) {
+    size_t h = (size_t)2166136261u;
+    for (const unsigned char* p = (const unsigned char*)name; *p; ++p) h = (h ^ *p) * (size_t)16777619u;
+    return h;
+}
+
 /* Names the sorted versions "<time>[-n] (<short ID>) <file name>" into one buffer; 0 when out of memory */
 static int name_versions(FileHistory* h, const char* file_name, const char* time_format) {
     size_t name_units = utf16_units(file_name);
     size_t cap        = 1;
     for (size_t i = 0; i < h->count; ++i) cap += SNAPSHOT_TREE_TIME_FORMAT_MAX * 2 + 40 + strlen(file_name) + 1;
     h->names = (char*)malloc(cap);
-    if (!h->names) return 0;
-    size_t* offsets = (size_t*)malloc((h->count ? h->count : 1) * sizeof(size_t));
-    if (!offsets) return 0;
+    /* The names taken so far, an open-addressing table of offsets + 1 (0: empty), at most half full */
+    size_t slots = 16;
+    while (slots < h->count * 2) slots *= 2;
+    size_t* taken = (size_t*)calloc(slots, sizeof(size_t));
+    if (!h->names || !taken) {
+        free(taken);
+        return 0;
+    }
     size_t used = 0;
     for (size_t i = 0; i < h->count; ++i) {
         char when[SNAPSHOT_TREE_TIME_FORMAT_MAX * 2 + 1], prefix[SNAPSHOT_TREE_TIME_FORMAT_MAX * 2 + 40];
@@ -96,33 +103,52 @@ static int name_versions(FileHistory* h, const char* file_name, const char* time
                 snprintf(prefix, sizeof(prefix), "%s-%u (%.*s) ", when, n, SNAPSHOT_TREE_SHORT_ID_CHARS, id);
             }
             size_t prefix_units = utf16_units(prefix);
-            size_t keep         = prefix_units + name_units <= MAX_COMPONENT_UTF16
-                                      ? strlen(file_name)
-                                      : utf8_prefix(file_name, MAX_COMPONENT_UTF16 - prefix_units);
+            size_t len          = strlen(prefix);
+            size_t keep         = strlen(file_name);
+            if (prefix_units + name_units > MAX_COMPONENT_UTF16) {
+                /* Cut, and no trailing dot or space, which Windows would drop from the name */
+                keep = utf8_prefix(file_name, MAX_COMPONENT_UTF16 - prefix_units);
+                while (keep > 0 && (file_name[keep - 1] == '.' || file_name[keep - 1] == ' ')) keep--;
+                if (keep == 0) len--; /* Nor the space after the short ID */
+            }
             char* candidate = h->names + used;
-            size_t len      = strlen(prefix);
             memcpy(candidate, prefix, len);
             memcpy(candidate + len, file_name, keep);
             candidate[len + keep] = '\0';
-            int taken = 0;
-            for (size_t j = 0; j < i && !taken; ++j) taken = strcmp(h->names + offsets[j], candidate) == 0;
-            if (!taken) {
-                offsets[i] = used;
+            size_t slot = name_hash(candidate) & (slots - 1);
+            while (taken[slot] && strcmp(h->names + taken[slot] - 1, candidate) != 0) slot = (slot + 1) & (slots - 1);
+            if (!taken[slot]) {
+                taken[slot] = used + 1;
+                h->versions[i].name = candidate;
                 used += len + keep + 1;
                 break;
             }
         }
     }
-    for (size_t i = 0; i < h->count; ++i) h->versions[i].name = h->names + offsets[i];
-    free(offsets);
+    free(taken);
     return 1;
+}
+
+/* A match of the file in one snapshot, before the matches are grouped into versions */
+typedef struct {
+    FileVersion v;
+    size_t entry; /* Its HistoryEntry: restic's order, the youngest snapshot first */
+} Match;
+
+/* By version (time, size, type), then the youngest snapshot first */
+static int compare_matches(const void* a, const void* b) {
+    const Match* x = (const Match*)a;
+    const Match* y = (const Match*)b;
+    int c = compare_versions(&x->v, &y->v);
+    if (c != 0) return c;
+    return x->entry < y->entry ? -1 : x->entry > y->entry ? 1 : 0;
 }
 
 FileHistoryStatus file_history_build(const char* json, size_t len, const char* path, const char* in_snapshot,
                                      const char* time_format, FileHistory** out) {
     if (!out) return FILE_HISTORY_BAD_JSON;
     *out = NULL;
-    if (!json || !path || path[0] != '/') return FILE_HISTORY_BAD_JSON;
+    if (!json || !path || path[0] != '/' || path[strlen(path) - 1] == '/') return FILE_HISTORY_BAD_JSON;
     if (!time_format || !snapshot_tree_time_format_valid(time_format)) time_format = SNAPSHOT_TREE_DEFAULT_TIME_FORMAT;
     JsonDoc* doc = json_parse(json, len);
     if (!doc) return FILE_HISTORY_BAD_JSON;
@@ -135,19 +161,21 @@ FileHistoryStatus file_history_build(const char* json, size_t len, const char* p
     size_t snapshots = 0;
     for (const JsonValue* s = root->child; s; s = s->next) ++snapshots;
     FileHistory* h = (FileHistory*)calloc(1, sizeof(FileHistory));
+    Match* matches = snapshots ? (Match*)calloc(snapshots, sizeof(Match)) : NULL;
     if (h && snapshots) {
         h->versions = (FileVersion*)calloc(snapshots, sizeof(FileVersion));
         h->entries  = (HistoryEntry*)calloc(snapshots, sizeof(HistoryEntry));
     }
-    if (!h || (snapshots && (!h->versions || !h->entries))) {
+    if (!h || (snapshots && (!matches || !h->versions || !h->entries))) {
         if (h) free_parts(h);
+        free(matches);
         json_free(doc);
         return FILE_HISTORY_NO_MEMORY;
     }
 
     FileHistoryStatus status = FILE_HISTORY_OK;
     int found_in_snapshot    = 0;
-    for (const JsonValue* s = root->child; s && status == FILE_HISTORY_OK; s = s->next) {
+    for (const JsonValue* s = root->child; s; s = s->next) {
         const char* id        = json_string(json_object_get(s, "snapshot"));
         const JsonValue* list = json_object_get(s, "matches");
         size_t id_len         = id ? strlen(id) : 0;
@@ -172,49 +200,35 @@ FileHistoryStatus file_history_build(const char* json, size_t len, const char* p
         json_u64(json_object_get(match, "size"), &size); /* Missing for some node types: 0 */
         if (in_snapshot && strcmp(id, in_snapshot) == 0) found_in_snapshot = 1;
 
-        size_t v = 0;
-        while (v < h->count && !same_version(&h->versions[v], type, (uint64_t)size, &mtime)) ++v;
-        if (v == h->count) {
-            FileVersion* nv = &h->versions[h->count++];
-            nv->size        = (uint64_t)size;
-            nv->mtime       = mtime;
-            memcpy(nv->type, type, strlen(type) + 1); /* Shorter than the field: checked above */
-        }
-        memcpy(h->versions[v].snapshot_id, id, id_len + 1); /* The last seen is the oldest */
-        h->versions[v].snapshot_count++;
-        HistoryEntry* e = &h->entries[h->entry_count++];
-        memcpy(e->id, id, id_len + 1);
-        e->version = v;
+        Match* m = &matches[h->entry_count];
+        m->v.size  = (uint64_t)size;
+        m->v.mtime = mtime;
+        memcpy(m->v.type, type, strlen(type) + 1); /* Shorter than the field: checked above */
+        m->entry = h->entry_count;
+        memcpy(h->entries[h->entry_count++].id, id, id_len + 1);
     }
     if (status == FILE_HISTORY_OK && in_snapshot && !found_in_snapshot) status = FILE_HISTORY_NOT_A_FILE;
-    if (status == FILE_HISTORY_OK && h->count == 0 && !in_snapshot) status = FILE_HISTORY_NOT_A_FILE;
+    if (status == FILE_HISTORY_OK && h->entry_count == 0 && !in_snapshot) status = FILE_HISTORY_NOT_A_FILE;
 
     if (status == FILE_HISTORY_OK) {
-        /* Sort the versions by time, then point the entries at their new places */
-        size_t* order = (size_t*)malloc((h->count ? h->count : 1) * sizeof(size_t));
-        FileVersion* sorted = (FileVersion*)malloc((h->count ? h->count : 1) * sizeof(FileVersion));
-        if (!order || !sorted) {
-            status = FILE_HISTORY_NO_MEMORY;
-        } else {
-            memcpy(sorted, h->versions, h->count * sizeof(FileVersion));
-            qsort(sorted, h->count, sizeof(FileVersion), compare_versions);
-            for (size_t i = 0; i < h->count; ++i) {
-                for (size_t j = 0; j < h->count; ++j) {
-                    if (same_version(&sorted[j], h->versions[i].type, h->versions[i].size, &h->versions[i].mtime)) {
-                        order[i] = j;
-                    }
-                }
-            }
-            for (size_t k = 0; k < h->entry_count; ++k) h->entries[k].version = order[h->entries[k].version];
-            memcpy(h->versions, sorted, h->count * sizeof(FileVersion));
+        /*
+         * Sorted, the matches of one version lie together, oldest version first and within one the
+         * youngest snapshot first: a version is named after (and dumped from) the last, the oldest.
+         * At most one match per snapshot, so `matches` is there whenever one is (bounded for /analyze).
+         */
+        size_t n = matches && h->entry_count <= snapshots ? h->entry_count : 0;
+        if (n > 0) qsort(matches, n, sizeof(Match), compare_matches);
+        for (size_t k = 0; k < n; ++k) {
+            if (k == 0 || compare_versions(&matches[k - 1].v, &matches[k].v) != 0) h->versions[h->count++] = matches[k].v;
+            FileVersion* v = &h->versions[h->count - 1];
+            v->snapshot_count++;
+            v->mtime = matches[k].v.mtime; /* The same instant; the zone too as the oldest snapshot recorded it */
+            memcpy(v->snapshot_id, h->entries[matches[k].entry].id, sizeof(v->snapshot_id));
+            h->entries[matches[k].entry].version = h->count - 1;
         }
-        free(order);
-        free(sorted);
+        if (!name_versions(h, strrchr(path, '/') + 1, time_format)) status = FILE_HISTORY_NO_MEMORY;
     }
-    if (status == FILE_HISTORY_OK) {
-        const char* slash = strrchr(path, '/');
-        if (!name_versions(h, slash ? slash + 1 : path, time_format)) status = FILE_HISTORY_NO_MEMORY;
-    }
+    free(matches);
     json_free(doc);
     if (status != FILE_HISTORY_OK) {
         free_parts(h);

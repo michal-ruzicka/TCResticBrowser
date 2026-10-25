@@ -165,9 +165,15 @@ static void fuzz_index(const char* data, size_t size, size_t limit) {
     snapshot_index_free(x);
 }
 
-static void fuzz_history(const char* data, size_t size, const char* format, int in_snapshot) {
+/* A file name of 224 characters, then ". tail.docx": a version's name is cut around the dot */
+#define LONG_FILE_PATH "/a/" \
+    "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn" \
+    "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn. tail.docx"
+
+static void fuzz_history(const char* data, size_t size, const char* format, int in_snapshot, int long_name) {
+    const char* path = long_name ? LONG_FILE_PATH : "/a/b.txt";
     FileHistory* h = NULL;
-    FileHistoryStatus st = file_history_build(data, size, "/a/b.txt", NULL, format, &h);
+    FileHistoryStatus st = file_history_build(data, size, path, NULL, format, &h);
     CHECK((st == FILE_HISTORY_OK) == (h != NULL));
     if (!h) return;
     size_t count = file_history_count(h);
@@ -175,14 +181,15 @@ static void fuzz_history(const char* data, size_t size, const char* format, int 
     for (size_t i = 0; i < count; ++i) {
         const FileVersion* v = file_history_version(h, i);
         size_t len = strlen(v->name);
-        CHECK(len > 0 && len <= 255 * 3 && !strpbrk(v->name, "\\/:*?\"<>|"));
+        check_name(v->name);
+        CHECK(len <= 255); /* ASCII: 255 UTF-16 units */
         CHECK(file_history_find(h, v->name) == v);
         if (i > 0) CHECK(timestamp_compare(&file_history_version(h, i - 1)->mtime, &v->mtime) <= 0);
         CHECK(v->snapshot_count > 0 && file_history_snapshot(h, i, v->snapshot_count) == NULL);
         CHECK(strcmp(file_history_snapshot(h, i, v->snapshot_count - 1), v->snapshot_id) == 0); /* The oldest */
-        /* "... (<short ID>) b.txt": the time format may hold " (" itself, the file's name is never cut */
-        CHECK(len > 17 && strcmp(v->name + len - 7, ") b.txt") == 0 && strncmp(v->name + len - 17, " (", 2) == 0 &&
-              strncmp(v->name + len - 15, v->snapshot_id, 8) == 0);
+        /* "... (<short ID>) b.txt": the time format may hold " (" itself, a short file name is never cut */
+        CHECK(long_name || (len > 17 && strcmp(v->name + len - 7, ") b.txt") == 0 &&
+                            strncmp(v->name + len - 17, " (", 2) == 0 && strncmp(v->name + len - 15, v->snapshot_id, 8) == 0));
         for (size_t k = 0; k < v->snapshot_count; ++k) CHECK(strlen(file_history_snapshot(h, i, k)) > 0);
     }
     /* Built again from inside a snapshot that holds a version: the same versions */
@@ -190,7 +197,7 @@ static void fuzz_history(const char* data, size_t size, const char* format, int 
         char id[FILE_HISTORY_ID_CHARS + 1];
         memcpy(id, file_history_version(h, count - 1)->snapshot_id, sizeof(id));
         FileHistory* again = NULL;
-        CHECK(file_history_build(data, size, "/a/b.txt", id, format, &again) == FILE_HISTORY_OK);
+        CHECK(file_history_build(data, size, path, id, format, &again) == FILE_HISTORY_OK);
         CHECK(file_history_count(again) == count);
         file_history_free(again);
     }
@@ -204,7 +211,8 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     if (mode & 1) {
         fuzz_index(text, size - 1, (mode >> 1) & 1 ? 0 : (size_t)(mode >> 2) * 1024u + 4096u);
     } else if (mode & 2) {
-        fuzz_history(text, size - 1, FORMATS[(mode >> 3) % (sizeof(FORMATS) / sizeof(FORMATS[0]))], (mode >> 2) & 1);
+        fuzz_history(text, size - 1, FORMATS[(mode >> 3) % (sizeof(FORMATS) / sizeof(FORMATS[0]))], (mode >> 2) & 1,
+                     (mode >> 7) & 1);
     } else {
         fuzz_tree(text, size - 1, FORMATS[(mode >> 2) % (sizeof(FORMATS) / sizeof(FORMATS[0]))]);
     }

@@ -689,6 +689,22 @@ static void test_describe(void) {
     EXPECT_TRUE(strcmp(snapshot_tree_snapshot_host(tree, ID("b")), "pc1") == 0 && !snapshot_tree_snapshot_host(tree, ID("d")),
                 "A snapshot's host by its ID");
     snapshot_tree_free(tree);
+
+    /* A host name longer than any line buffer stays whole, on its own line */
+    static char long_json[4400];
+    char host[2001];
+    memset(host, 'h', sizeof(host) - 1);
+    host[sizeof(host) - 1] = '\0';
+    snprintf(long_json, sizeof(long_json),
+             "[{\"time\":\"2026-10-23T08:00:00Z\",\"hostname\":\"%s\",\"username\":\"%s\",\"id\":\"" ID("c") "\"}]",
+             host, host);
+    tree = build(long_json);
+    text = snapshot_tree_describe(tree, ID("c"));
+    EXPECT_TRUE(text && strncmp(text, "Snapshot cccccccc of hhh", 24) == 0 && strstr(text, "hhh\nID: ") != NULL &&
+                    strlen(text) > 4000 && strstr(text, "hhh\nTime: ") == NULL,
+                "A long host and user: whole, each line ended");
+    free(text);
+    snapshot_tree_free(tree);
 }
 
 /* One snapshot of restic find --json output with one match */
@@ -769,6 +785,52 @@ static void test_file_history(void) {
     const char* n = file_history_version(h, 0)->name;
     EXPECT_TRUE(strlen(n) == 31 + 224 && strncmp(n, "2026-10-20_08-00-00 (11111111) nnnn", 35) == 0, "Cut to 255 units");
     file_history_free(h);
+
+    /* Cut just after a dot and a space: neither ends the name (Windows would drop them) */
+    memset(name, 'n', 223);
+    memcpy(name + 223, ". tail.docx", 12);
+    snprintf(long_path, sizeof(long_path), "/%s", name);
+    snprintf(long_json, sizeof(long_json),
+             "[{\"matches\":[{\"path\":\"%s\",\"type\":\"file\",\"size\":1,\"mtime\":\"2026-10-20T08:00:00Z\"}],"
+             "\"snapshot\":\"" ID("1") "\"}]", long_path);
+    EXPECT_TRUE(file_history_build(long_json, strlen(long_json), long_path, NULL, NULL, &h) == FILE_HISTORY_OK,
+                "A long name with a dot");
+    n = file_history_version(h, 0)->name;
+    EXPECT_TRUE(strlen(n) == 31 + 223 && n[strlen(n) - 1] == 'n', "Cut before the dot and the space");
+    file_history_free(h);
+    EXPECT_TRUE(file_history_build("[]", 2, "/data/", NULL, NULL, &h) == FILE_HISTORY_BAD_JSON && !h &&
+                    file_history_build("[]", 2, "data/a", NULL, NULL, &h) == FILE_HISTORY_BAD_JSON,
+                "A path that names no file");
+
+    /* 20 000 snapshots, each with its own version, two snapshots per version: quick */
+    enum { MANY = 20000 };
+    size_t many_cap = (size_t)MANY * 2 * 256 + 16;
+    char* many      = (char*)malloc(many_cap);
+    size_t used     = 0;
+    if (many) {
+        used += (size_t)snprintf(many + used, many_cap - used, "[");
+        for (unsigned i = 0; i < MANY * 2; ++i) {
+            unsigned version = (MANY * 2 - 1 - i) / 2; /* Youngest snapshot first, newest version first */
+            used += (size_t)snprintf(many + used, many_cap - used,
+                                     "%s{\"matches\":[{\"path\":\"/a\",\"type\":\"file\",\"size\":%u,"
+                                     "\"mtime\":\"2026-10-20T08:00:00Z\"}],\"snapshot\":\"%08x%056x\"}",
+                                     i ? "," : "", version, MANY * 2 - i, 0u);
+        }
+        used += (size_t)snprintf(many + used, many_cap - used, "]");
+    }
+    EXPECT_TRUE(many && file_history_build(many, used, "/a", NULL, NULL, &h) == FILE_HISTORY_OK &&
+                    file_history_count(h) == MANY,
+                "20 000 versions");
+    if (h) {
+        const FileVersion* last = file_history_version(h, MANY - 1);
+        EXPECT_TRUE(file_history_version(h, 0)->size == 0 && last->size == MANY - 1 && last->snapshot_count == 2 &&
+                        strncmp(last->snapshot_id, "00009c3f", 8) == 0 &&
+                        strncmp(file_history_version(h, 0)->snapshot_id, "00000001", 8) == 0 &&
+                        strcmp(file_history_version(h, 1)->name, "2026-10-20_08-00-00 (00000003) a") == 0,
+                    "...the same second told apart by snapshot, each from its oldest");
+    }
+    file_history_free(h);
+    free(many);
 
     char pattern[64];
     EXPECT_TRUE(file_history_pattern("/a/b*c?d[e]f", pattern, sizeof(pattern)) == 18 &&
