@@ -2078,11 +2078,75 @@ static BOOL copy_to_clipboard(HWND owner, const WCHAR* text) {
 typedef struct {
     const WCHAR* title;
     const WCHAR* folder;
+    HWND total_cmd; /* Total Commander's main window, NULL when unknown: no "Go to folder" */
 } VersionsFolderDialog;
 
 /*
- * IDD_VERSIONS_FOLDER: "Copy to clipboard" (also Enter) copies the path and closes, OK (also Esc)
- * closes; a clipboard that cannot be had keeps the dialog open with a beep
+ * Going to the folder of a file's versions. Total Commander ignores FS_EXEC_SYMLINK from
+ * "properties", but changes a panel's folder on WM_COPYDATA with dwData "CD" ('C' + 256 * 'D'),
+ * the interface tools and scripts drive it with (described by its author on the Total Commander
+ * forum, not in the plugin SDK): "<path>\r<other path>\0<flags>\0", either path may be empty, a
+ * path in UTF-8 after a byte-order mark, flag S: the first path is for the source (active) panel.
+ *
+ * When FsExecuteFileW runs on the thread of Total Commander's window, the message is sent from a
+ * timer once that thread is back in its message loop, so that Total Commander has finished Alt+Enter
+ * first; one going to the folder at a time is enough for one user.
+ */
+#define TC_COPYDATA_CD ('C' + 256 * 'D')
+
+static struct {
+    HWND total_cmd;
+    UINT_PTR timer;
+    char data[(MAX_PATH * 2 + 8) * 3 + 16];
+    DWORD len;
+} g_GoTo;
+
+static void send_go_to(void) {
+    COPYDATASTRUCT cds = {TC_COPYDATA_CD, g_GoTo.len, g_GoTo.data};
+    DWORD_PTR unused   = 0;
+    if (!SendMessageTimeoutW(g_GoTo.total_cmd, WM_COPYDATA, 0, (LPARAM)&cds, SMTO_ABORTIFHUNG, 5000, &unused)) {
+        log_write(L"Total Commander was not asked to go to the folder of the versions (error %lu)", GetLastError());
+    }
+}
+
+static VOID CALLBACK go_to_timer(HWND hwnd, UINT msg, UINT_PTR id, DWORD time) {
+    (void)hwnd;
+    (void)msg;
+    (void)time;
+    KillTimer(NULL, id);
+    if (id == g_GoTo.timer) {
+        g_GoTo.timer = 0;
+        send_go_to();
+    }
+}
+
+/* Asks Total Commander (`total_cmd`) to show `folder` in its active panel; FALSE when it cannot be asked */
+static BOOL go_to_folder(HWND total_cmd, const WCHAR* folder) {
+    static const char bom[] = "\xEF\xBB\xBF";
+    int bytes = WideCharToMultiByte(CP_UTF8, 0, folder, -1, g_GoTo.data + 3, (int)sizeof(g_GoTo.data) - 3 - 4, NULL,
+                                    NULL);
+    if (!total_cmd || bytes <= 1) return FALSE;
+    memcpy(g_GoTo.data, bom, 3);
+    char* end = g_GoTo.data + 3 + bytes - 1;          /* At the path's NUL */
+    memcpy(end, "\r\0S", 4);                           /* No other path; then the flags and their NUL */
+    end[4]          = '\0';
+    g_GoTo.len      = (DWORD)(end + 5 - g_GoTo.data);
+    g_GoTo.total_cmd = total_cmd;
+    if (g_GoTo.timer) KillTimer(NULL, g_GoTo.timer);
+    g_GoTo.timer = 0;
+    if (GetWindowThreadProcessId(total_cmd, NULL) == GetCurrentThreadId()) {
+        g_GoTo.timer = SetTimer(NULL, 0, USER_TIMER_MINIMUM, go_to_timer);
+        if (g_GoTo.timer) return TRUE;
+    }
+    send_go_to();
+    return TRUE;
+}
+
+/*
+ * IDD_VERSIONS_FOLDER: "Go to folder" (also Enter) closes and has Total Commander go there,
+ * "Copy to clipboard" copies the path and closes, Close (also Esc) closes; a clipboard that cannot
+ * be had keeps the dialog open with a beep. Without Total Commander's window "Go to folder" is
+ * disabled and "Copy to clipboard" the default.
  */
 static INT_PTR CALLBACK versions_folder_proc(HWND dlg, UINT msg, WPARAM wparam, LPARAM lparam) {
     if (msg == WM_INITDIALOG) {
@@ -2090,12 +2154,19 @@ static INT_PTR CALLBACK versions_folder_proc(HWND dlg, UINT msg, WPARAM wparam, 
         SetWindowLongPtrW(dlg, DWLP_USER, lparam);
         SetWindowTextW(dlg, d->title);
         SetDlgItemTextW(dlg, IDC_VERSIONS_PATH, d->folder);
-        SetFocus(GetDlgItem(dlg, IDC_VERSIONS_COPY)); /* Not the field: a multi-line edit keeps Enter to itself */
-        return FALSE;                    /* Focus set here */
+        int first = IDC_VERSIONS_GO;
+        if (!d->total_cmd) {
+            EnableWindow(GetDlgItem(dlg, IDC_VERSIONS_GO), FALSE);
+            SendDlgItemMessageW(dlg, IDC_VERSIONS_GO, BM_SETSTYLE, BS_PUSHBUTTON, TRUE);
+            SendMessageW(dlg, DM_SETDEFID, IDC_VERSIONS_COPY, 0);
+            first = IDC_VERSIONS_COPY;
+        }
+        SetFocus(GetDlgItem(dlg, first)); /* Not the field: a multi-line edit keeps Enter to itself */
+        return FALSE;                     /* Focus set here */
     }
     if (msg == WM_COMMAND) {
         WORD id = LOWORD(wparam);
-        if (id == IDOK || id == IDCANCEL) {
+        if (id == IDOK || id == IDCANCEL || id == IDC_VERSIONS_GO) { /* IDOK: Enter where no button is default */
             EndDialog(dlg, id);
             return TRUE;
         }
@@ -2159,7 +2230,8 @@ static int show_properties(HWND main_win, WCHAR* remote_name) {
          * Total Commander does not go to a path returned with FS_EXEC_SYMLINK from "properties" (with
          * or without a trailing backslash it shows its own, empty, version information dialog), so
          * the folder is named for the user to go to: the full path, with a trailing backslash so that
-         * `cd` does not take it for the file, in a dialog of the plugin's own, which can copy it.
+         * `cd` does not take it for the file, in a dialog of the plugin's own, which can have Total
+         * Commander go there (go_to_folder()) or copy it.
          * The root is the name FsGetDefRootName() proposes; Total Commander keeps the one it was
          * given when the plugin was added, which the user may have changed (README, Root Folder Name).
          */
@@ -2173,9 +2245,14 @@ static int show_properties(HWND main_win, WCHAR* remote_name) {
         const WCHAR* last = wcsrchr(remote_name, L'\\');
         _snwprintf_s(title, _countof(title), _TRUNCATE, L"Versions of %ls", last ? last + 1 : remote_name);
         log_write(L"Properties of %ls: the folder of its versions named", remote_name);
-        VersionsFolderDialog dialog = {title, folder};
+        VersionsFolderDialog dialog = {title, folder, main_win ? GetAncestor(main_win, GA_ROOT) : NULL};
         INT_PTR shown = show_versions_folder(main_win, &dialog);
         if (shown == IDC_VERSIONS_COPY) log_write(L"The folder of the versions copied to the clipboard");
+        if (shown == IDC_VERSIONS_GO) {
+            BOOL asked = go_to_folder(dialog.total_cmd, folder);
+            log_write(asked ? L"Total Commander asked to go to the folder of the versions"
+                            : L"Total Commander could not be asked to go to the folder of the versions");
+        }
         if (shown <= 0) log_write(L"The folder of the versions could not be shown (error %lu)", GetLastError());
     } else if (res == RESTIC_OK && ctx.text) {
         int chars = MultiByteToWideChar(CP_UTF8, 0, ctx.text, -1, NULL, 0);

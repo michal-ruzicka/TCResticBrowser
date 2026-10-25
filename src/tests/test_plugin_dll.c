@@ -1009,7 +1009,7 @@ static long long local_size(const WCHAR* path) {
  */
 typedef struct {
     const WCHAR* caption;
-    WORD button; /* IDOK or 1002, "Copy to clipboard" */
+    WORD button; /* IDCANCEL ("Close"), 1002 ("Copy to clipboard") or 1003 ("Go to folder") */
     BOOL found;
     WCHAR path[MAX_PATH * 2];
     int default_id, focus_id; /* Control IDs, 0 when unknown */
@@ -1034,15 +1034,65 @@ static DWORD WINAPI answer_dialog(LPVOID param) {
     return 0;
 }
 
-/* Alt+Enter on `remote` with the dialog answered by `button`: FS_EXEC_* */
-static int properties_with_dialog(const Plugin* p, WCHAR* remote, DialogAnswer* a, WORD button) {
+/*
+ * A stand-in for Total Commander's main window, on the thread calling the plugin: keeps what a
+ * WM_COPYDATA brought (Total Commander's "CD" request)
+ */
+static struct {
+    ULONG_PTR kind;
+    DWORD len;
+    char data[4096];
+    int count;
+} g_copydata;
+
+static LRESULT CALLBACK fake_total_cmd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    if (msg == WM_COPYDATA) {
+        const COPYDATASTRUCT* cds = (const COPYDATASTRUCT*)lparam;
+        g_copydata.kind = cds->dwData;
+        g_copydata.len  = cds->cbData < sizeof(g_copydata.data) ? cds->cbData : (DWORD)sizeof(g_copydata.data);
+        memcpy(g_copydata.data, cds->lpData, g_copydata.len);
+        g_copydata.count++;
+        return TRUE;
+    }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+static HWND fake_total_cmd(void) {
+    static HWND window;
+    if (!window) {
+        WNDCLASSW wc     = {0};
+        wc.lpfnWndProc   = fake_total_cmd_proc;
+        wc.hInstance     = GetModuleHandleW(NULL);
+        wc.lpszClassName = L"TCResticBrowserTestTotalCmd";
+        RegisterClassW(&wc);
+        window = CreateWindowW(wc.lpszClassName, L"Total Commander stand-in", WS_OVERLAPPEDWINDOW, 0, 0, 100, 100,
+                               NULL, NULL, wc.hInstance, NULL);
+    }
+    return window;
+}
+
+/* Lets the calling thread's message loop run for `ms` milliseconds, as Total Commander's would */
+static void pump_messages(DWORD ms) {
+    ULONGLONG start = GetTickCount64();
+    while (GetTickCount64() - start < ms) {
+        MSG msg;
+        while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        Sleep(5);
+    }
+}
+
+/* Alt+Enter on `remote` from `main_win` with the dialog answered by `button`: FS_EXEC_* */
+static int properties_with_dialog(const Plugin* p, HWND main_win, WCHAR* remote, DialogAnswer* a, WORD button) {
     WCHAR properties[] = L"properties";
     a->button = button;
     a->found  = FALSE;
     a->path[0] = L'\0';
     a->default_id = a->focus_id = 0;
     HANDLE t = CreateThread(NULL, 0, answer_dialog, a, 0, NULL);
-    int rc   = p->execute_w(NULL, remote, properties);
+    int rc   = p->execute_w(main_win, remote, properties);
     if (t) {
         WaitForSingleObject(t, INFINITE);
         CloseHandle(t);
@@ -1088,14 +1138,17 @@ static void test_e2e_file_history(const Plugin* p, const WCHAR* dir, const WCHAR
 
     /* with space.txt was changed between the two fixture snapshots: two versions */
     swprintf_s(remote, _countof(remote), L"%ls\\with space.txt", data_path);
-    static DialogAnswer answer = {L"Versions of with space.txt", IDOK, FALSE, {0}, 0, 0};
+    static DialogAnswer answer = {L"Versions of with space.txt", IDCANCEL, FALSE, {0}, 0, 0};
     static WCHAR clip[MAX_PATH * 2];
+    HWND total_cmd = fake_total_cmd();
+    EXPECT_TRUE(total_cmd != NULL, "A stand-in for Total Commander's window");
     clipboard_text(L"before", clip, _countof(clip));
-    EXPECT_TRUE(properties_with_dialog(p, remote, &answer, IDOK) == FS_EXEC_OK && g_e2e_msg_dialogs == 0 &&
-                    answer.found,
+    g_copydata.count = 0;
+    EXPECT_TRUE(properties_with_dialog(p, total_cmd, remote, &answer, IDCANCEL) == FS_EXEC_OK &&
+                    g_e2e_msg_dialogs == 0 && answer.found,
                 "Alt+Enter on a file names the folder of its versions in a dialog");
-    EXPECT_TRUE(answer.default_id == 1002 && answer.focus_id == 1002,
-                "...whose default button, focused, is Copy to clipboard");
+    EXPECT_TRUE(answer.default_id == 1003 && answer.focus_id == 1003,
+                "...whose default button, focused, is Go to folder");
     size_t value_len = wcslen(answer.path), remote_len = wcslen(remote);
     EXPECT_TRUE(wcsncmp(answer.path, L"\\\\\\", 3) == 0 && value_len > remote_len + 1 &&
                     wcsncmp(answer.path + value_len - remote_len - 1, remote, remote_len) == 0 &&
@@ -1103,11 +1156,28 @@ static void test_e2e_file_history(const Plugin* p, const WCHAR* dir, const WCHAR
                     wcschr(answer.path + 3, L'\\') == answer.path + value_len - remote_len - 1,
                 "...the file's own full path, with a trailing backslash");
     clipboard_text(NULL, clip, _countof(clip));
-    EXPECT_TRUE(wcscmp(clip, L"before") == 0, "...which OK leaves off the clipboard");
-    EXPECT_TRUE(properties_with_dialog(p, remote, &answer, 1002) == FS_EXEC_OK && answer.found,
+    pump_messages(200);
+    EXPECT_TRUE(wcscmp(clip, L"before") == 0 && g_copydata.count == 0,
+                "...which Close leaves off the clipboard, without going there");
+    EXPECT_TRUE(properties_with_dialog(p, NULL, remote, &answer, 1002) == FS_EXEC_OK && answer.found,
                 "...and Copy to clipboard");
+    EXPECT_TRUE(answer.default_id == 1002 && answer.focus_id == 1002,
+                "...the default without Total Commander's window, Go to folder disabled");
     clipboard_text(NULL, clip, _countof(clip));
     EXPECT_TRUE(wcscmp(clip, answer.path) == 0, "...puts there");
+    EXPECT_TRUE(properties_with_dialog(p, total_cmd, remote, &answer, 1003) == FS_EXEC_OK && answer.found,
+                "...and Go to folder");
+    EXPECT_TRUE(g_copydata.count == 0, "...asks Total Commander only once Alt+Enter has returned");
+    pump_messages(500);
+    static char expected[4096];
+    int path_bytes = WideCharToMultiByte(CP_UTF8, 0, answer.path, -1, expected + 3, (int)sizeof(expected) - 8, NULL,
+                                         NULL);
+    memcpy(expected, "\xEF\xBB\xBF", 3);
+    memcpy(expected + 3 + path_bytes - 1, "\r\0S\0", 5);
+    DWORD expected_len = (DWORD)(3 + path_bytes - 1 + 5);
+    EXPECT_TRUE(g_copydata.count == 1 && g_copydata.kind == ('C' + 256 * 'D') && g_copydata.len == expected_len &&
+                    memcmp(g_copydata.data, expected, expected_len) == 0,
+                "...then asks it, once, to show the folder in the active panel (WM_COPYDATA \"CD\", UTF-8, flag S)");
     swprintf_s(remote, _countof(remote), L"%ls\\with space.txt\\", data_path);
     WIN32_FIND_DATAW fd;
     WCHAR older[MAX_PATH] = {0}, newer[MAX_PATH] = {0};
