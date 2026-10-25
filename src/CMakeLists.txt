@@ -59,8 +59,8 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 if(MSVC)
     # Drop CMake's default list of Win32 import libraries: the plugin imports
-    # only KERNEL32.dll and CRYPT32.dll (AGENT.md, section 8.5), and every other
-    # system library is named explicitly on the target that needs it.
+    # only KERNEL32.dll, USER32.dll and CRYPT32.dll (AGENT.md, section 8.5), and
+    # every other system library is named explicitly on the target that needs it.
     set(CMAKE_C_STANDARD_LIBRARIES "kernel32.lib")
 
     # C-only options: rc.exe shares the compile options but rejects these.
@@ -126,7 +126,7 @@ if(NOT RESTIC_WFX_ASAN)
         PREFIX ""
         SUFFIX "${RESTIC_WFX_SUFFIX}"
     )
-    target_link_libraries(TCResticBrowser PRIVATE crypt32)  # CryptProtectMemory
+    target_link_libraries(TCResticBrowser PRIVATE user32 crypt32)  # A dialog and the clipboard; CryptProtectMemory
 endif()
 
 # ---------------------------------------------------------------------------
@@ -140,10 +140,10 @@ add_executable(test_json tests/test_json.c json.c)
 add_executable(test_snapshot_tree tests/test_snapshot_tree.c snapshot_tree.c snapshot_index.c file_history.c timestamp.c json.c)
 
 add_executable(test_config tests/test_config.c $<TARGET_OBJECTS:restic_core>)
-target_link_libraries(test_config PRIVATE crypt32)
+target_link_libraries(test_config PRIVATE user32 crypt32)
 
 add_executable(test_restic_cli tests/test_restic_cli.c $<TARGET_OBJECTS:restic_core>)
-target_link_libraries(test_restic_cli PRIVATE shell32 crypt32)  # CommandLineToArgvW, CryptProtectMemory
+target_link_libraries(test_restic_cli PRIVATE user32 shell32 crypt32)  # CommandLineToArgvW, CryptProtectMemory
 # Stand-in for restic.exe, started by test_restic_cli from its own folder
 add_executable(fake_restic tests/fake_restic.c)
 add_dependencies(test_restic_cli fake_restic)
@@ -151,3 +151,4 @@ add_dependencies(test_restic_cli fake_restic)
 # Black-box smoke test: loads the plugin like Total Commander does and links
 # no plugin code.
 add_executable(test_plugin_dll tests/test_plugin_dll.c)
+target_link_libraries(test_plugin_dll PRIVATE user32)  # Answers the plugin's dialog, reads the clipboard

@@ -1004,6 +1004,71 @@ static long long local_size(const WCHAR* path) {
 }
 
 /*
+ * The plugin's own dialog naming the folder of a file's versions (IDD_VERSIONS_FOLDER in
+ * resource.h): found by its caption, its path read, then a button pressed
+ */
+typedef struct {
+    const WCHAR* caption;
+    WORD button; /* IDOK or 1002, "Copy to clipboard" */
+    BOOL found;
+    WCHAR path[MAX_PATH * 2];
+} DialogAnswer;
+
+static DWORD WINAPI answer_dialog(LPVOID param) {
+    DialogAnswer* a = (DialogAnswer*)param;
+    for (int i = 0; i < 1000; ++i) { /* Up to 10 s */
+        HWND dlg = FindWindowW(L"#32770", a->caption);
+        if (dlg) {
+            a->found = GetDlgItemTextW(dlg, 1001, a->path, _countof(a->path)) > 0;
+            PostMessageW(dlg, WM_COMMAND, MAKEWPARAM(a->button, BN_CLICKED), 0);
+            return 0;
+        }
+        Sleep(10);
+    }
+    return 0;
+}
+
+/* Alt+Enter on `remote` with the dialog answered by `button`: FS_EXEC_* */
+static int properties_with_dialog(const Plugin* p, WCHAR* remote, DialogAnswer* a, WORD button) {
+    WCHAR properties[] = L"properties";
+    a->button = button;
+    a->found  = FALSE;
+    a->path[0] = L'\0';
+    HANDLE t = CreateThread(NULL, 0, answer_dialog, a, 0, NULL);
+    int rc   = p->execute_w(NULL, remote, properties);
+    if (t) {
+        WaitForSingleObject(t, INFINITE);
+        CloseHandle(t);
+    }
+    return rc;
+}
+
+/* The clipboard's text into `out` ("" when it holds none); `set` non-NULL: puts that there first */
+static void clipboard_text(const WCHAR* set, WCHAR* out, size_t cap) {
+    out[0] = L'\0';
+    if (!OpenClipboard(NULL)) return;
+    if (set) {
+        size_t bytes = (wcslen(set) + 1) * sizeof(WCHAR);
+        HGLOBAL mem  = GlobalAlloc(GMEM_MOVEABLE, bytes);
+        void* data   = mem ? GlobalLock(mem) : NULL;
+        if (data) {
+            memcpy(data, set, bytes);
+            GlobalUnlock(mem);
+            if (!EmptyClipboard() || !SetClipboardData(CF_UNICODETEXT, mem)) GlobalFree(mem);
+        } else if (mem) {
+            GlobalFree(mem);
+        }
+    }
+    HANDLE clip       = GetClipboardData(CF_UNICODETEXT);
+    const WCHAR* text = clip ? (const WCHAR*)GlobalLock(clip) : NULL;
+    if (text) {
+        wcsncpy_s(out, cap, text, _TRUNCATE);
+        GlobalUnlock(clip);
+    }
+    CloseClipboard();
+}
+
+/*
  * Alt+Enter (FsExecuteFileW "properties"): a file opens as the folder of its versions across the
  * snapshots, which copy like files; a version, a snapshot and a folder in it show their properties
  */
@@ -1016,10 +1081,25 @@ static void test_e2e_file_history(const Plugin* p, const WCHAR* dir, const WCHAR
 
     /* with space.txt was changed between the two fixture snapshots: two versions */
     swprintf_s(remote, _countof(remote), L"%ls\\with space.txt", data_path);
-    EXPECT_TRUE(p->execute_w(NULL, remote, properties) == FS_EXEC_SYMLINK && g_e2e_msg_dialogs == 0,
-                "Alt+Enter on a file opens it as a folder");
-    EXPECT_TRUE(wcsncmp(remote, data_path, wcslen(data_path)) == 0 && wcscmp(remote + wcslen(data_path), L"\\with space.txt\\") == 0,
-                "...the file's own path, as a folder");
+    static DialogAnswer answer = {L"Versions of with space.txt", IDOK, FALSE, {0}};
+    static WCHAR clip[MAX_PATH * 2];
+    clipboard_text(L"before", clip, _countof(clip));
+    EXPECT_TRUE(properties_with_dialog(p, remote, &answer, IDOK) == FS_EXEC_OK && g_e2e_msg_dialogs == 0 &&
+                    answer.found,
+                "Alt+Enter on a file names the folder of its versions in a dialog");
+    size_t value_len = wcslen(answer.path), remote_len = wcslen(remote);
+    EXPECT_TRUE(wcsncmp(answer.path, L"\\\\\\", 3) == 0 && value_len > remote_len + 1 &&
+                    wcsncmp(answer.path + value_len - remote_len - 1, remote, remote_len) == 0 &&
+                    answer.path[value_len - 1] == L'\\' &&
+                    wcschr(answer.path + 3, L'\\') == answer.path + value_len - remote_len - 1,
+                "...the file's own full path, with a trailing backslash");
+    clipboard_text(NULL, clip, _countof(clip));
+    EXPECT_TRUE(wcscmp(clip, L"before") == 0, "...which OK leaves off the clipboard");
+    EXPECT_TRUE(properties_with_dialog(p, remote, &answer, 1002) == FS_EXEC_OK && answer.found,
+                "...and Copy to clipboard");
+    clipboard_text(NULL, clip, _countof(clip));
+    EXPECT_TRUE(wcscmp(clip, answer.path) == 0, "...puts there");
+    swprintf_s(remote, _countof(remote), L"%ls\\with space.txt\\", data_path);
     WIN32_FIND_DATAW fd;
     WCHAR older[MAX_PATH] = {0}, newer[MAX_PATH] = {0};
     long long older_size = -1, newer_size = -1;

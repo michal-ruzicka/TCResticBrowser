@@ -30,6 +30,7 @@
 #include "repo_cache.h"
 #include "snapshot_tree.h"
 #include "log.h"
+#include "resource.h"
 #include "version.h"
 
 #define SESSION_MAX_PASSWORD  REPO_SECRET_CHARS
@@ -50,6 +51,7 @@ static int            g_PluginNr     = 0;
 static tProgressProcW g_ProgressProc = NULL;
 static tLogProcW      g_LogProc      = NULL;
 static tRequestProcW  g_RequestProc  = NULL;
+static HMODULE        g_Module       = NULL; /* This DLL, for its dialog resource (DllMain) */
 
 /* Total Commander's connection log (see connection_announce) */
 static volatile LONG g_ConnectionLogOn = FALSE; /* [Settings] ConnectionLog, applied by load_config */
@@ -1344,10 +1346,10 @@ static ResticResult resolve_repo_path(const RepoCall* call, const WCHAR* rest, B
 /*
  * The versions of a file (file_history.h)
  *
- * A file inside a snapshot opened as a folder (Alt+Enter on it, FsExecuteFileW "properties") lists
- * its versions across the snapshots of the same host: one `restic find` for exactly its path. A
- * version is named after and copied from the oldest snapshot that holds it; Alt+Enter on one lists
- * those snapshots.
+ * A file inside a snapshot opened as a folder (its path followed by '\', which Alt+Enter on it,
+ * FsExecuteFileW "properties", names) lists its versions across the snapshots of the same host:
+ * one `restic find` for exactly its path. A version is named after and copied from the oldest
+ * snapshot that holds it; Alt+Enter on one lists those snapshots.
  */
 
 #define HISTORY_PATH_BYTES (1024 * 3 + 1) /* A WFX path (MAX_WFX_PATH in restic_cli.c) as UTF-8 */
@@ -1713,6 +1715,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
     (void)lpvReserved;
     if (fdwReason == DLL_PROCESS_ATTACH) {
         /* No DisableThreadLibraryCalls: Microsoft advises against it with the static CRT (/MT) */
+        g_Module = (HMODULE)hinstDLL;
         config_set_plugin_dir_from_module((HMODULE)hinstDLL);
 #if defined(_DEBUG) && !defined(__SANITIZE_ADDRESS__)
         /*
@@ -1889,12 +1892,12 @@ static HANDLE enumerate_root_repositories(WIN32_FIND_DATAW* FindData) {
 /*
  * FsExecuteFileW "properties" (Alt+Enter) below a repository alias: a snapshot, or a folder inside
  * one, shows the snapshot's properties; a version of a file the snapshots holding it; a file inside
- * a snapshot opens as the folder of its versions (`symlink`)
+ * a snapshot names the folder of its versions, its own path, to go to (`versions_folder`)
  */
 typedef struct {
     const WCHAR* rest;
     char* text;   /* Heap: what to show (UTF-8) */
-    BOOL symlink; /* Open the path as a folder */
+    BOOL versions_folder; /* A file: its path lists its versions */
 } PropertiesContext;
 
 /* The properties of a snapshot from the cached tree (heap text), or NULL */
@@ -2008,7 +2011,7 @@ static ResticResult properties_operation(const RepoCall* call, void* ctx_ptr) {
     free(parent);
     if (!two_levels && (res = path_kind(call, where.snapshot_id, where.subpath, &kind)) != RESTIC_OK) return res;
     if (kind == PATH_FOLDER) ctx->text = describe_snapshot(call, where.snapshot_id);
-    ctx->symlink = kind == PATH_FILE; /* Opened as the folder of its versions */
+    ctx->versions_folder = kind == PATH_FILE;
     return RESTIC_OK;                 /* Nothing there: nothing to show */
 }
 
@@ -2033,8 +2036,67 @@ static BOOL may_be_inside_snapshot(const WCHAR* rest) {
     return FALSE;
 }
 
+/* Puts `text` on the clipboard as Unicode text, owned by `owner`; FALSE when the clipboard cannot be had */
+static BOOL copy_to_clipboard(HWND owner, const WCHAR* text) {
+    size_t bytes = (wcslen(text) + 1) * sizeof(WCHAR);
+    HGLOBAL mem  = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    void* data   = mem ? GlobalLock(mem) : NULL;
+    if (!data) {
+        if (mem) GlobalFree(mem);
+        return FALSE;
+    }
+    memcpy(data, text, bytes);
+    GlobalUnlock(mem);
+    if (!OpenClipboard(owner)) {
+        GlobalFree(mem);
+        return FALSE;
+    }
+    BOOL ok = EmptyClipboard() && SetClipboardData(CF_UNICODETEXT, mem) != NULL; /* Then owned by the system */
+    CloseClipboard();
+    if (!ok) GlobalFree(mem);
+    return ok;
+}
+
+typedef struct {
+    const WCHAR* title;
+    const WCHAR* folder;
+} VersionsFolderDialog;
+
+/*
+ * IDD_VERSIONS_FOLDER: OK (also Enter and Esc) closes, "Copy to clipboard" copies the path and
+ * closes; a clipboard that cannot be had keeps the dialog open with a beep
+ */
+static INT_PTR CALLBACK versions_folder_proc(HWND dlg, UINT msg, WPARAM wparam, LPARAM lparam) {
+    if (msg == WM_INITDIALOG) {
+        const VersionsFolderDialog* d = (const VersionsFolderDialog*)lparam;
+        SetWindowLongPtrW(dlg, DWLP_USER, lparam);
+        SetWindowTextW(dlg, d->title);
+        SetDlgItemTextW(dlg, IDC_VERSIONS_PATH, d->folder);
+        SetFocus(GetDlgItem(dlg, IDOK)); /* Not the field: a multi-line edit keeps Enter to itself */
+        return FALSE;                    /* Focus set here */
+    }
+    if (msg == WM_COMMAND) {
+        WORD id = LOWORD(wparam);
+        if (id == IDOK || id == IDCANCEL) {
+            EndDialog(dlg, id);
+            return TRUE;
+        }
+        if (id == IDC_VERSIONS_COPY) {
+            const VersionsFolderDialog* d = (const VersionsFolderDialog*)GetWindowLongPtrW(dlg, DWLP_USER);
+            if (d && copy_to_clipboard(dlg, d->folder)) {
+                EndDialog(dlg, id);
+            } else {
+                log_write(L"The clipboard could not be set");
+                MessageBeep(MB_ICONWARNING);
+            }
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 /* Alt+Enter: see PropertiesContext. Returns an FS_EXEC_* code. */
-static int show_properties(WCHAR* remote_name) {
+static int show_properties(HWND main_win, WCHAR* remote_name) {
     WfxParsedPath parsed;
     if (!parse_wfx_path(remote_name, &parsed) || parsed.level != WFX_PATH_REPO ||
         is_forget_entry_name(parsed.repo_alias) || !may_be_inside_snapshot(parsed.rest)) {
@@ -2054,16 +2116,24 @@ static int show_properties(WCHAR* remote_name) {
     WCHAR err_msg[512]    = {0};
     ResticResult res = run_with_password(&cfg, repo, &exec_opts, properties_operation, &ctx, err_msg, _countof(err_msg));
     int rc = FS_EXEC_OK;
-    size_t len = wcslen(remote_name);
-    if (res == RESTIC_OK && ctx.symlink && len + 1 < MAX_PATH) {
+    if (res == RESTIC_OK && ctx.versions_folder) {
         /*
-         * `remote_name` itself, with a trailing backslash: for the bare path of a file, Total Commander
-         * was seen showing its own (empty) version information dialog instead of opening a folder
+         * Total Commander does not go to a path returned with FS_EXEC_SYMLINK from "properties" (with
+         * or without a trailing backslash it shows its own, empty, version information dialog), so
+         * the folder is named for the user to go to: the full path, with a trailing backslash so that
+         * `cd` does not take it for the file, in a dialog of the plugin's own, which can copy it
          */
-        log_write(L"Properties of %ls: opened as the folder of its versions", remote_name);
-        remote_name[len]     = L'\\';
-        remote_name[len + 1] = L'\0';
-        rc                   = FS_EXEC_SYMLINK;
+        WCHAR root[MAX_PATH], folder[MAX_PATH * 2 + 8], title[MAX_PATH];
+        load_root_name(root, _countof(root));
+        _snwprintf_s(folder, _countof(folder), _TRUNCATE, L"\\\\\\%ls%ls\\", root, remote_name);
+        const WCHAR* last = wcsrchr(remote_name, L'\\');
+        _snwprintf_s(title, _countof(title), _TRUNCATE, L"Versions of %ls", last ? last + 1 : remote_name);
+        log_write(L"Properties of %ls: the folder of its versions named", remote_name);
+        VersionsFolderDialog dialog = {title, folder};
+        INT_PTR shown = DialogBoxParamW(g_Module, MAKEINTRESOURCEW(IDD_VERSIONS_FOLDER), main_win,
+                                        versions_folder_proc, (LPARAM)&dialog);
+        if (shown == IDC_VERSIONS_COPY) log_write(L"The folder of the versions copied to the clipboard");
+        if (shown <= 0) log_write(L"The folder of the versions could not be shown (error %lu)", GetLastError());
     } else if (res == RESTIC_OK && ctx.text) {
         int chars = MultiByteToWideChar(CP_UTF8, 0, ctx.text, -1, NULL, 0);
         WCHAR* text = chars > 0 ? (WCHAR*)malloc((size_t)chars * sizeof(WCHAR)) : NULL;
@@ -2092,7 +2162,6 @@ static int show_properties(WCHAR* remote_name) {
  * read-only plugin.
  */
 int __stdcall FsExecuteFileW(HWND MainWin, WCHAR* RemoteName, WCHAR* Verb) {
-    (void)MainWin;
     if (!RemoteName || !Verb) return FS_EXEC_ERROR;
     BOOL is_forget = RemoteName[0] == L'\\' && wcschr(RemoteName + 1, L'\\') == NULL &&
                      is_forget_entry_name(RemoteName + 1);
@@ -2117,7 +2186,7 @@ int __stdcall FsExecuteFileW(HWND MainWin, WCHAR* RemoteName, WCHAR* Verb) {
         wcscpy_s(RemoteName, MAX_PATH, L"\\");
         return FS_EXEC_SYMLINK;
     }
-    if (_wcsicmp(Verb, L"properties") == 0) return is_forget ? FS_EXEC_OK : show_properties(RemoteName);
+    if (_wcsicmp(Verb, L"properties") == 0) return is_forget ? FS_EXEC_OK : show_properties(MainWin, RemoteName);
     /*
      * The transfer mode of the connections toolbar (undocumented verb "MODE I", "MODE A", or
      * "MODE X <text-file extensions>" for automatic): Total Commander only tells the plugin, and

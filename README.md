@@ -106,7 +106,7 @@ entries pointing there need to be recreated.
   - Copy individual files or entire directory trees out of any snapshot using **`F5`** (preserving original modification timestamps and 64-bit file sizes).
   - Inspect files directly with Total Commander's **Lister (`F3`)** or **Quick View (`Ctrl+Q`)**.
   - Constant-memory streaming (`64 KB` chunks via `restic dump --no-lock`) into a temporary file with **atomic replacement** on completion: an interrupted or failed overwrite never corrupts or deletes your existing local file.
-- **File Versions and Snapshot Properties (`Alt+Enter`):** `Alt+Enter` on a file inside a snapshot opens it as a folder that lists every version of that file in the snapshots of the same host, named by its modification time and the short ID of the snapshot it was first backed up in (`2026-10-17_14-02-11 (1a2b3c4d) report.docx`), to view (`F3`) or copy (`F5`) like any file - one `restic find` instead of opening snapshot after snapshot. `Alt+Enter` on a snapshot or a folder in it shows the snapshot's details (host, user, paths, tags, size, files new and changed, data added, how long the backup took), and on a version the snapshots that hold it. See [File Versions and Snapshot Properties](#file-versions-and-snapshot-properties-altenter).
+- **File Versions and Snapshot Properties (`Alt+Enter`):** `Alt+Enter` on a file inside a snapshot names a folder - the file's own path followed by `\` - that lists every version of that file in the snapshots of the same host, named by its modification time and the short ID of the snapshot it was first backed up in (`2026-10-17_14-02-11 (1a2b3c4d) report.docx`), to view (`F3`) or copy (`F5`) like any file - one `restic find` instead of opening snapshot after snapshot. `Alt+Enter` on a snapshot or a folder in it shows the snapshot's details (host, user, paths, tags, size, files new and changed, data added, how long the backup took), and on a version the snapshots that hold it. See [File Versions and Snapshot Properties](#file-versions-and-snapshot-properties-altenter).
 - **Strictly Read-Only by Design:** Every Restic command runs with `--no-lock`. Repository modification entry points (`FsPutFile`, `FsDeleteFile`, `FsRemoveDir`, `FsMkDir`, `FsRenMovFile`) are intentionally not exported, and `F6` (Move) is rejected.
 - **Zero Passwords on Disk:** Repository passwords are requested interactively via Total Commander's native password dialog (`RequestProcW`), kept only in RAM per repository alias for 30 minutes by default (see [Password Timeout](#password-timeout)), passed to `restic.exe` via an isolated environment block (`RESTIC_PASSWORD`), and wiped with `SecureZeroMemory`. Cached passwords are encrypted in memory (`CryptProtectMemory`), in pages locked out of the page file and excluded from Windows Error Reporting crash dumps, so a memory dump or the hibernation file does not reveal them. A repository can instead take its password from a file or a password manager's command, which restic reads itself, and S3 repositories can have their own access key, whose secret key is asked for and kept like a password (see [Repository Settings](#repository-settings-password-file-password-command-s3-credentials)).
 - **Responsive Cancellation (`ESC`):** Long operations on remote backends can be aborted with `ESC`. Extraction uses a 30-minute **inactivity** timeout (so slow multi-gigabyte transfers are never cut off as long as bytes keep flowing); a folder listing is stopped after 30 minutes in total.
@@ -216,7 +216,7 @@ documentation.
 | **Forget Passwords** | While passwords are remembered, the plugin's root folder starts with **`🗑 Forget N Passwords`** (N is their number; `🗑 Forget 1 Password` for one). Press **Enter** on it to wipe them all at once; a message says how many were forgotten, the root folder is then re-read without the entry, and the next access asks again. The entry is not removed by itself when the passwords expire; it disappears the next time the root folder is read (`Ctrl+R`). |
 | **Explore Files** | Enter a snapshot through `snapshots`, `ids`, `hosts` or `tags` (or `latest`) and navigate the backed-up directory tree. The snapshot list is read once and then shown at once from memory; when it is older than a minute (`SnapshotListRefreshSeconds=`), as `restic mount` would re-read it, restic reads a new one in the background and the next listing (`Ctrl+R`) shows any new snapshots (see [Snapshot List Refresh](#snapshot-list-refresh)). |
 | **View File (`F3` / `Ctrl+Q`)** | Press **`F3`** (Lister) or **`Ctrl+Q`** (Quick View) on any file to stream it to a temporary location and view its contents. |
-| **File Versions (`Alt+Enter`)** | Press **`Alt+Enter`** on a file inside a snapshot: the panel changes into a folder of that file's versions across the snapshots of the same host, oldest first, to view or copy; `Backspace` returns. `Alt+Enter` on a snapshot or a folder shows the snapshot's details. See [File Versions and Snapshot Properties](#file-versions-and-snapshot-properties-altenter). |
+| **File Versions (`Alt+Enter`)** | Press **`Alt+Enter`** on a file inside a snapshot: a dialog names the folder of that file's versions across the snapshots of the same host (`Copy to clipboard` copies its path); go there to view or copy them, oldest first. `Backspace` returns. `Alt+Enter` on a snapshot or a folder shows the snapshot's details. See [File Versions and Snapshot Properties](#file-versions-and-snapshot-properties-altenter). |
 | **Restore / Extract (`F5`)** | Select one or more files or directories and press **`F5`** to copy them to the target panel, preserving original `LastWriteTime` timestamps. Standard Total Commander overwrite prompts are supported. |
 | **Cancel Operation (`ESC`)** | Press **`ESC`** in Total Commander's progress dialog to terminate the underlying `restic.exe` child process, together with any `rclone`, `ssh` or password command it started, and clean up any temporary file. Closing Total Commander ends restic runs still working in the background the same way. |
 
@@ -361,9 +361,14 @@ the date of `snapshots.csv`.
 ### File Versions and Snapshot Properties (`Alt+Enter`)
 
 `Alt+Enter` (or *Properties* in the context menu) on a **file inside a
-snapshot** turns the file into a folder: the panel changes into
-`...\report.docx\`, which lists the versions of that file in all
-snapshots of the same host as the snapshot you came from:
+snapshot** shows the full path of a folder, the file's own path followed
+by `\` (`\\\TCResticBrowser\...\report.docx\`), which lists the versions of
+that file in all snapshots of the same host as the snapshot you came
+from. `Copy to clipboard` copies the path and closes the dialog, `OK`
+just closes it; go there by pasting the path into the panel's path or
+after `cd ` on the command line. Total Commander does not let a plugin
+change the panel's folder from *Properties*, so it cannot go there by
+itself.
 
 ```text
 2026-09-30_08-15-02 (5e6f7a8b) report.docx      48 213   30.09.2026 08:15
