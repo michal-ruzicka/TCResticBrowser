@@ -102,6 +102,7 @@ _Static_assert(sizeof(((SessionSlot*)0)->password) == sizeof(((RepoSecrets*)0)->
 
 typedef HRESULT (WINAPI *PFN_WerRegisterExcludedMemoryBlock)(const void*, DWORD);
 typedef HRESULT (WINAPI *PFN_WerUnregisterExcludedMemoryBlock)(const void*);
+typedef HANDLE (WINAPI *PFN_SetThreadDpiAwarenessContext)(HANDLE); /* DPI_AWARENESS_CONTEXT, Windows 10 1607+ */
 
 static SessionSlot* g_Sessions         = NULL; /* SESSION_SLOTS slots in locked pages, or NULL */
 static SIZE_T       g_SessionBytes     = 0;
@@ -2075,7 +2076,7 @@ typedef struct {
 } VersionsFolderDialog;
 
 /*
- * IDD_VERSIONS_FOLDER: OK (also Enter and Esc) closes, "Copy to clipboard" copies the path and
+ * IDD_VERSIONS_FOLDER: "Copy to clipboard" (also Enter) copies the path and closes, OK (also Esc)
  * closes; a clipboard that cannot be had keeps the dialog open with a beep
  */
 static INT_PTR CALLBACK versions_folder_proc(HWND dlg, UINT msg, WPARAM wparam, LPARAM lparam) {
@@ -2084,7 +2085,7 @@ static INT_PTR CALLBACK versions_folder_proc(HWND dlg, UINT msg, WPARAM wparam, 
         SetWindowLongPtrW(dlg, DWLP_USER, lparam);
         SetWindowTextW(dlg, d->title);
         SetDlgItemTextW(dlg, IDC_VERSIONS_PATH, d->folder);
-        SetFocus(GetDlgItem(dlg, IDOK)); /* Not the field: a multi-line edit keeps Enter to itself */
+        SetFocus(GetDlgItem(dlg, IDC_VERSIONS_COPY)); /* Not the field: a multi-line edit keeps Enter to itself */
         return FALSE;                    /* Focus set here */
     }
     if (msg == WM_COMMAND) {
@@ -2105,6 +2106,26 @@ static INT_PTR CALLBACK versions_folder_proc(HWND dlg, UINT msg, WPARAM wparam, 
         }
     }
     return FALSE;
+}
+
+/*
+ * Shows IDD_VERSIONS_FOLDER per-monitor DPI aware (v2) where Windows offers it (10 1703 and later):
+ * Windows then sizes its font and layout for the DPI of the monitor it is on, and again when it is
+ * moved to another, also when Total Commander itself is aware of the system DPI only - otherwise
+ * Windows would stretch the dialog drawn for the primary monitor, blurred. The thread's own
+ * awareness is restored after. Elsewhere (and where v2 is refused) the dialog is as the thread is.
+ */
+static INT_PTR show_versions_folder(HWND owner, VersionsFolderDialog* dialog) {
+    HMODULE user = GetModuleHandleW(L"user32.dll");
+    PFN_SetThreadDpiAwarenessContext set_dpi =
+        user ? (PFN_SetThreadDpiAwarenessContext)(void*)GetProcAddress(user, "SetThreadDpiAwarenessContext") : NULL;
+    HANDLE previous = set_dpi ? set_dpi((HANDLE)(INT_PTR)-4) : NULL; /* DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 */
+    INT_PTR shown = DialogBoxParamW(g_Module, MAKEINTRESOURCEW(IDD_VERSIONS_FOLDER), owner, versions_folder_proc,
+                                    (LPARAM)dialog);
+    DWORD error = GetLastError();
+    if (previous) set_dpi(previous);
+    SetLastError(error);
+    return shown;
 }
 
 /* Alt+Enter: see PropertiesContext. Returns an FS_EXEC_* code. */
@@ -2142,8 +2163,7 @@ static int show_properties(HWND main_win, WCHAR* remote_name) {
         _snwprintf_s(title, _countof(title), _TRUNCATE, L"Versions of %ls", last ? last + 1 : remote_name);
         log_write(L"Properties of %ls: the folder of its versions named", remote_name);
         VersionsFolderDialog dialog = {title, folder};
-        INT_PTR shown = DialogBoxParamW(g_Module, MAKEINTRESOURCEW(IDD_VERSIONS_FOLDER), main_win,
-                                        versions_folder_proc, (LPARAM)&dialog);
+        INT_PTR shown = show_versions_folder(main_win, &dialog);
         if (shown == IDC_VERSIONS_COPY) log_write(L"The folder of the versions copied to the clipboard");
         if (shown <= 0) log_write(L"The folder of the versions could not be shown (error %lu)", GetLastError());
     } else if (res == RESTIC_OK && ctx.text) {

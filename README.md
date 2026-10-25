@@ -376,11 +376,17 @@ the date of `snapshots.csv`.
 snapshot** shows the full path of a folder, the file's own path followed
 by `\` (`\\\TCResticBrowser\...\report.docx\`), which lists the versions of
 that file in all snapshots of the same host as the snapshot you came
-from. `Copy to clipboard` copies the path and closes the dialog, `OK`
-just closes it; go there by pasting the path into the panel's path or
-after `cd ` on the command line. Total Commander does not let a plugin
-change the panel's folder from *Properties*, so it cannot go there by
-itself.
+from. `Copy to clipboard` (the default button, so also `Enter`) copies
+the path and closes the dialog, `OK` (or `Esc`) just closes it; go there
+by pasting the path into the path above the panel's file list (click it,
+or the command `cm_EditPath`) or after `cd ` on the command line.
+Total Commander does not let a plugin change the panel's folder from
+*Properties*, so it cannot go there by itself.
+
+The trailing `\` is what turns the file into a folder: without it,
+Total Commander takes the path for the file itself. The dialog only
+names that folder, so you can also type it yourself: in a snapshot's
+folder, add `\` after a file's name in the path above the file list.
 
 ```text
 2026-09-30_08-15-02 (5e6f7a8b) report.docx      48 213   30.09.2026 08:15

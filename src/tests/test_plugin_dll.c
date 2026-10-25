@@ -1005,13 +1005,14 @@ static long long local_size(const WCHAR* path) {
 
 /*
  * The plugin's own dialog naming the folder of a file's versions (IDD_VERSIONS_FOLDER in
- * resource.h): found by its caption, its path read, then a button pressed
+ * resource.h): found by its caption, its path, default button and focus read, then a button pressed
  */
 typedef struct {
     const WCHAR* caption;
     WORD button; /* IDOK or 1002, "Copy to clipboard" */
     BOOL found;
     WCHAR path[MAX_PATH * 2];
+    int default_id, focus_id; /* Control IDs, 0 when unknown */
 } DialogAnswer;
 
 static DWORD WINAPI answer_dialog(LPVOID param) {
@@ -1020,6 +1021,11 @@ static DWORD WINAPI answer_dialog(LPVOID param) {
         HWND dlg = FindWindowW(L"#32770", a->caption);
         if (dlg) {
             a->found = GetDlgItemTextW(dlg, 1001, a->path, _countof(a->path)) > 0;
+            LRESULT def = SendMessageW(dlg, DM_GETDEFID, 0, 0);
+            a->default_id = HIWORD(def) == DC_HASDEFID ? LOWORD(def) : 0;
+            GUITHREADINFO gui = {sizeof(gui)};
+            a->focus_id = GetGUIThreadInfo(GetWindowThreadProcessId(dlg, NULL), &gui) && gui.hwndFocus
+                              ? GetDlgCtrlID(gui.hwndFocus) : 0;
             PostMessageW(dlg, WM_COMMAND, MAKEWPARAM(a->button, BN_CLICKED), 0);
             return 0;
         }
@@ -1034,6 +1040,7 @@ static int properties_with_dialog(const Plugin* p, WCHAR* remote, DialogAnswer* 
     a->button = button;
     a->found  = FALSE;
     a->path[0] = L'\0';
+    a->default_id = a->focus_id = 0;
     HANDLE t = CreateThread(NULL, 0, answer_dialog, a, 0, NULL);
     int rc   = p->execute_w(NULL, remote, properties);
     if (t) {
@@ -1081,12 +1088,14 @@ static void test_e2e_file_history(const Plugin* p, const WCHAR* dir, const WCHAR
 
     /* with space.txt was changed between the two fixture snapshots: two versions */
     swprintf_s(remote, _countof(remote), L"%ls\\with space.txt", data_path);
-    static DialogAnswer answer = {L"Versions of with space.txt", IDOK, FALSE, {0}};
+    static DialogAnswer answer = {L"Versions of with space.txt", IDOK, FALSE, {0}, 0, 0};
     static WCHAR clip[MAX_PATH * 2];
     clipboard_text(L"before", clip, _countof(clip));
     EXPECT_TRUE(properties_with_dialog(p, remote, &answer, IDOK) == FS_EXEC_OK && g_e2e_msg_dialogs == 0 &&
                     answer.found,
                 "Alt+Enter on a file names the folder of its versions in a dialog");
+    EXPECT_TRUE(answer.default_id == 1002 && answer.focus_id == 1002,
+                "...whose default button, focused, is Copy to clipboard");
     size_t value_len = wcslen(answer.path), remote_len = wcslen(remote);
     EXPECT_TRUE(wcsncmp(answer.path, L"\\\\\\", 3) == 0 && value_len > remote_len + 1 &&
                     wcsncmp(answer.path + value_len - remote_len - 1, remote, remote_len) == 0 &&

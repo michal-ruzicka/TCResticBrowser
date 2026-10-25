@@ -18,16 +18,22 @@
 
 1 ICON "TCResticBrowser.ico"
 
-/* The path wraps in the multi-line field; the caption ("Versions of <file>") is set at run time */
+/*
+ * The path wraps in the multi-line field; the caption ("Versions of <file>") is set at run time.
+ * Segoe UI 9 is the message font of Windows since Vista ("MS Shell Dlg" 8 maps to the smaller
+ * Tahoma 8); the dialog's size in dialog units grows with it, and with the DPI the dialog is
+ * created for (see show_versions_folder() in main.c). Copy to clipboard is what the dialog is
+ * for, so it is the default button, first, as Windows places a dialog's commit button.
+ */
 IDD_VERSIONS_FOLDER DIALOGEX 0, 0, 320, 96
-STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Versions"
-FONT 8, "MS Shell Dlg", 400, 0, 0x1
+FONT 9, "Segoe UI", 400, 0, 0x1
 BEGIN
     LTEXT           "The versions of this file are listed in this folder:", -1, 7, 7, 306, 10
     EDITTEXT        IDC_VERSIONS_PATH, 7, 20, 306, 46, ES_MULTILINE | ES_READONLY | WS_VSCROLL
-    DEFPUSHBUTTON   "OK", IDOK, 183, 75, 50, 14
-    PUSHBUTTON      "&Copy to clipboard", IDC_VERSIONS_COPY, 237, 75, 76, 14
+    DEFPUSHBUTTON   "&Copy to clipboard", IDC_VERSIONS_COPY, 183, 75, 76, 14
+    PUSHBUTTON      "OK", IDOK, 263, 75, 50, 14
 END
 
 #ifdef _DEBUG
