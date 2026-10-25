@@ -150,13 +150,15 @@ BOOL restic_describe_password(const WCHAR* password, WCHAR* out, size_t cap);
  * Parses the NDJSON stream printed by `restic ls --json <snapshot> <filter_path>` into the
  * direct children of `filter_path` (a normalized forward-slash path such as "/" or "/C/Users").
  * Returns RESTIC_ERR_PATH_NOT_FOUND when `filter_path` (other than "/") is absent from the stream
- * or is not a directory. Caller must free `*out_items` with `free()`.
+ * or is not a directory; `out_not_a_folder` (optional) then tells which: TRUE when the path is
+ * there as a file, symlink or other non-folder. Caller must free `*out_items` with `free()`.
  */
 ResticResult restic_parse_ls_ndjson(
     const char* ndjson_text,
     const char* filter_path,
     WIN32_FIND_DATAW** out_items,
-    size_t* out_count
+    size_t* out_count,
+    BOOL* out_not_a_folder
 );
 
 /**
@@ -251,8 +253,9 @@ ResticResult restic_list_snapshots(
 
 /**
  * Runs `restic ls --json --no-lock <snapshot_id> <subpath>` and returns Level 2 directory
- * entries. `snapshot_id` must be hexadecimal. On failure `out_error_msg` (optional) receives
- * the reason reported by Restic.
+ * entries. `snapshot_id` must be hexadecimal. RESTIC_ERR_PATH_NOT_FOUND when `subpath` is no
+ * folder, with `out_not_a_folder` (optional) as for restic_parse_ls_ndjson(). On failure
+ * `out_error_msg` (optional) receives the reason reported by Restic.
  */
 ResticResult restic_list_directory(
     const WCHAR* restic_exe,
@@ -262,6 +265,7 @@ ResticResult restic_list_directory(
     const ResticExecOptions* options,
     WIN32_FIND_DATAW** out_items,
     size_t* out_count,
+    BOOL* out_not_a_folder,
     WCHAR* out_error_msg,
     size_t err_capacity
 );
@@ -285,13 +289,14 @@ ResticResult restic_list_snapshot_index(
 );
 
 /**
- * Runs `restic find --json --no-lock [--host=<host>] <pattern>` for exactly the path `subpath_w`
+ * Runs `restic find --json --no-lock --host=<host> <pattern>` for exactly the path `subpath_w`
  * (the WFX form, as for restic_list_directory(); wildcards in it are matched literally) and returns
  * restic's output in `*out_json` (`*out_len` bytes, NUL-terminated; release with free()), to build
- * the versions of a file from (file_history.h). `host_utf8` (NULL or empty: every host) limits the
- * search to the snapshots of one host. A folder at that path prints everything below it, so the
- * output is limited: beyond 16 MiB it fails with RESTIC_ERR_OUT_OF_MEMORY. On failure
- * `out_error_msg` (optional) receives the reason reported by Restic.
+ * the versions of a file from (file_history.h). `host_utf8` limits the search to the snapshots of
+ * one host; "" searches every host (restic's `--host=`, which also overrides RESTIC_HOST). A folder
+ * at that path prints everything below it, so the output is limited: beyond 16 MiB it fails with
+ * RESTIC_ERR_OUT_OF_MEMORY. On failure `out_error_msg` (optional) receives the reason reported by
+ * Restic.
  */
 ResticResult restic_find_file(
     const WCHAR* restic_exe,

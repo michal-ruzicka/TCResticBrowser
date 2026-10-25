@@ -235,8 +235,8 @@ it can, so the same folder can take a moment once and open instantly later:
 | Any folder of that snapshot once the background read is done | Instant, from memory. The read takes from seconds to minutes depending on the number of files, and runs while you browse. |
 | A snapshot with more files than `SnapshotCacheMB=` holds | Every folder waits for its own `restic ls`; it is never read as a whole. |
 | A file you view (`F3`, `Ctrl+Q`) or copy (`F5`) | Always runs `restic dump`, about a second per file plus the transfer. |
-| The versions of a file (`Alt+Enter`) | Waits for one `restic find`, which opens every snapshot of the host along the file's path: longer than a folder, shorter than opening the snapshots one by one. Kept for a minute (`SnapshotListRefreshSeconds=`), so returning to it, copying a version or `Alt+Enter` on one runs no `restic find` again. |
-| The details of a snapshot (`Alt+Enter`) | Instant, from the snapshot list. |
+| The versions of a file (`Alt+Enter`) | Waits for one `restic find`, which opens every snapshot of the host along the file's path: longer than a folder, shorter than opening the snapshots one by one. Kept for a minute (`SnapshotListRefreshSeconds=`), so returning to it runs no `restic find` again; copying a version or `Alt+Enter` on one never does once it was listed. |
+| The details of a snapshot (`Alt+Enter`) | Instant on a snapshot folder, from the snapshot list. On a folder inside a snapshot, one `restic ls` until the snapshot has been read as a whole (to tell a folder from a file). |
 
 After the password timeout (30 minutes by default) or `🗑 Forget N
 Passwords`, everything read from that repository is dropped, so the next
@@ -393,16 +393,25 @@ snapshots of the same host as the snapshot you came from:
   opens every snapshot of the host only along that path; on a big remote
   repository with many snapshots that takes a while (`ESC` cancels). The
   result is kept as long as the snapshot list (a minute,
-  `SnapshotListRefreshSeconds=`).
+  `SnapshotListRefreshSeconds=`) for listing the versions again, and for
+  as long as the password for copying a version or `Alt+Enter` on one -
+  a snapshot never changes. Only after `restic forget` removed the
+  snapshot a version is named after does copying it fail; `Ctrl+R` in
+  the folder of versions looks them up again.
+- `restic find` runs only for a path that is a file in the snapshot you
+  came from: a mistyped or deleted path stays "not found" at once, as
+  before.
 
 `Alt+Enter` on a **snapshot folder** (in `snapshots`, `ids`, `hosts` or
 `tags`, also `latest`) or on any **folder inside a snapshot** shows the
-snapshot's details from the snapshot list, without running restic: its
+snapshot's details from the snapshot list (on a folder inside a snapshot
+after one `restic ls`, until the snapshot has been read as a whole): its
 full ID, time, host, user, backed-up paths, tags, and for snapshots
 taken with restic 0.17 or later the size, the number of new, changed and
 unmodified files and folders, the data added to the repository, how
 long the backup took, the parent snapshot and the restic version that
-made it.
+made it. Above the snapshots (`hosts`, `tags\<tag>`, the repository's
+files) `Alt+Enter` shows nothing and asks for no password.
 
 ### Dates in the Panels
 

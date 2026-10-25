@@ -1354,19 +1354,25 @@ static ResticResult resolve_repo_path(const RepoCall* call, const WCHAR* rest, B
 #define HISTORY_TIME_FORMAT "YYYY-MM-DD hh:mm:ss zzzz" /* Times in the properties dialogs */
 #define HISTORY_DIALOG_SNAPSHOTS 25 /* Snapshots named in the dialog of a version; the rest counted */
 
-/* The host of a snapshot from the cached tree (heap; "" when unknown: every host); NULL without memory */
-static char* snapshot_host_of(const RepoCall* call, const char* snapshot_id) {
+/*
+ * The host of a snapshot from the cached tree into `*out` (heap; "" for a snapshot without one).
+ * RESTIC_ERR_PATH_NOT_FOUND when the tree is not cached or no longer has the snapshot: its versions
+ * are not searched for in the snapshots of every host instead.
+ */
+static ResticResult snapshot_host_of(const RepoCall* call, const char* snapshot_id, char** out) {
+    *out = NULL;
     const SnapshotTree* tree =
         repo_cache_lock_tree(call->repo->alias, call->repo->target, call->cfg->snapshot_time_format, NULL);
     const char* host = tree ? snapshot_tree_snapshot_host(tree, snapshot_id) : NULL;
-    size_t len       = host ? strlen(host) : 0;
-    char* copy       = (char*)malloc(len + 1);
-    if (copy) {
-        if (len) memcpy(copy, host, len);
-        copy[len] = '\0';
+    ResticResult res = RESTIC_ERR_PATH_NOT_FOUND;
+    if (host) {
+        size_t len = strlen(host);
+        *out       = (char*)malloc(len + 1);
+        if (*out) memcpy(*out, host, len + 1);
+        res = *out ? RESTIC_OK : RESTIC_ERR_OUT_OF_MEMORY;
     }
     if (tree) repo_cache_unlock();
-    return copy;
+    return res;
 }
 
 /*
@@ -1395,34 +1401,46 @@ static BOOL split_subpath(const WCHAR* subpath, WCHAR** out_parent, const WCHAR*
     return TRUE;
 }
 
+/* Which cached versions read_history() takes */
+typedef enum {
+    HISTORY_CACHE_NONE,  /* None: restic is asked */
+    HISTORY_CACHE_FRESH, /* Younger than SnapshotListRefreshSeconds, as the snapshot list */
+    HISTORY_CACHE_ANY    /* Any age: to find a version listed before (snapshots do not change) */
+} HistoryCache;
+
 /*
  * Reads the versions of the file at `file_subpath` (a WFX subpath) across the snapshots of the
- * host of `snapshot_id`: from the cache (`use_cache`, trusted credentials only, younger than
- * SnapshotListRefreshSeconds) or else (`use_restic`) one `restic find`, whose output is then cached.
- * With `in_snapshot` the path must be a file in `snapshot_id`. RESTIC_ERR_PATH_NOT_FOUND when it is
- * not, or when the versions are neither cached nor to be searched for.
+ * host of `snapshot_id`: from the cache (`cache`, trusted credentials only) or else (`use_restic`)
+ * one `restic find`, whose output is then cached. With `in_snapshot` the path must be a file in
+ * `snapshot_id`. RESTIC_ERR_PATH_NOT_FOUND when it is not, when the snapshot's host is not known,
+ * or when the versions are neither cached nor to be searched for.
  */
 static ResticResult read_history(const RepoCall* call, const char* snapshot_id, const WCHAR* file_subpath,
-                                 BOOL in_snapshot, BOOL use_cache, BOOL use_restic, FileHistory** out) {
+                                 BOOL in_snapshot, HistoryCache cache, BOOL use_restic, FileHistory** out) {
     *out = NULL;
     char* path = (char*)malloc(HISTORY_PATH_BYTES);
-    char* host = snapshot_host_of(call, snapshot_id);
+    char* host = NULL;
     char* key  = NULL;
     char* json = NULL;
     size_t len = 0;
     ResticResult res = RESTIC_ERR_OUT_OF_MEMORY;
-    if (!path || !host) goto done;
+    if (!path) goto done;
     if (!restic_normalize_filter_path(file_subpath, path, HISTORY_PATH_BYTES) || strcmp(path, "/") == 0) {
         res = RESTIC_ERR_PATH_NOT_FOUND;
         goto done;
     }
-    size_t key_bytes = strlen(host) + strlen(path) + 2;
+    res = snapshot_host_of(call, snapshot_id, &host);
+    if (res != RESTIC_OK) goto done;
+    /* The host's length first: a host and a path cannot run into each other */
+    size_t key_bytes = strlen(host) + strlen(path) + 24;
+    res = RESTIC_ERR_OUT_OF_MEMORY;
     if (!(key = (char*)malloc(key_bytes))) goto done;
-    _snprintf_s(key, key_bytes, _TRUNCATE, "%s\n%s", host, path);
+    _snprintf_s(key, key_bytes, _TRUNCATE, "%u:%s\n%s", (unsigned)strlen(host), host, path);
 
     BOOL fresh = FALSE;
-    ULONGLONG max_age_ms = (ULONGLONG)call->cfg->snapshot_list_refresh_s * 1000ull;
-    if (!(use_cache && call->trusted &&
+    ULONGLONG max_age_ms =
+        cache == HISTORY_CACHE_ANY ? ~0ull : (ULONGLONG)call->cfg->snapshot_list_refresh_s * 1000ull;
+    if (!(cache != HISTORY_CACHE_NONE && call->trusted &&
           repo_cache_get_history(call->repo->alias, call->repo->target, key, max_age_ms, &json, &len))) {
         res = RESTIC_ERR_PATH_NOT_FOUND;
         if (!use_restic) goto done;
@@ -1456,17 +1474,26 @@ done:
 }
 
 /*
- * FALSE when the snapshot's cached listing `index` shows no file at `subpath` (a WFX subpath), so
- * that a missing path is not searched for with restic; TRUE when it does, or cannot tell
+ * TRUE when the snapshot's cached listing `index` shows a file (or other non-folder) at `subpath`
+ * (a WFX subpath), also in the snapshot's root (`restic backup --stdin` puts one there)
  */
-static BOOL index_may_hold_file(const SnapshotIndex* index, const WCHAR* subpath) {
+static BOOL index_holds_file(const SnapshotIndex* index, const WCHAR* subpath) {
     WCHAR* parent = NULL;
     const WCHAR* name = NULL;
     if (!split_subpath(subpath, &parent, &name)) {
-        /* One component: a file in the snapshot's root, which only holds folders */
+        /* One component: a name in the snapshot's root */
         const WCHAR* p = subpath;
         while (*p == L'\\') p++;
-        return *p == L'\0';
+        size_t len = wcslen(p);
+        while (len > 0 && p[len - 1] == L'\\') len--;
+        if (len == 0) return FALSE; /* The snapshot's root itself */
+        parent = (WCHAR*)malloc((len + 3) * sizeof(WCHAR));
+        if (!parent) return FALSE;
+        parent[0] = L'\\';
+        parent[1] = L'\0';
+        memcpy(parent + 2, p, len * sizeof(WCHAR));
+        parent[len + 2] = L'\0';
+        name            = parent + 2;
     }
     WIN32_FIND_DATAW* items = NULL;
     size_t count            = 0;
@@ -1479,6 +1506,36 @@ static BOOL index_may_hold_file(const SnapshotIndex* index, const WCHAR* subpath
     free(items);
     free(parent);
     return found;
+}
+
+/* What lies at a path inside a snapshot */
+typedef enum { PATH_MISSING, PATH_FOLDER, PATH_FILE } PathKind;
+
+/*
+ * What lies at `subpath` of the snapshot: from its cached listing, or else one `restic ls`. Only a
+ * file has versions, so only for one is restic find run: a missing path, or a folder in other
+ * snapshots, would print everything below it in each.
+ */
+static ResticResult path_kind(const RepoCall* call, const char* snapshot_id, const WCHAR* subpath, PathKind* out) {
+    *out = PATH_MISSING;
+    WIN32_FIND_DATAW* items = NULL;
+    size_t count            = 0;
+    BOOL not_a_folder       = FALSE;
+    ResticResult res;
+    const SnapshotIndex* index =
+        call->trusted ? repo_cache_lock_index(call->repo->alias, call->repo->target, snapshot_id) : NULL;
+    if (index) {
+        res          = restic_list_index_directory(index, subpath, &items, &count);
+        not_a_folder = res == RESTIC_ERR_PATH_NOT_FOUND && index_holds_file(index, subpath);
+        repo_cache_unlock();
+    } else {
+        res = restic_list_directory(call->cfg->restic_path, call->access, snapshot_id, subpath, call->exec, &items,
+                                    &count, &not_a_folder, call->err, call->err_cap);
+    }
+    free(items);
+    if (res == RESTIC_OK) *out = PATH_FOLDER;
+    if (res == RESTIC_ERR_PATH_NOT_FOUND && not_a_folder) *out = PATH_FILE;
+    return res == RESTIC_ERR_PATH_NOT_FOUND ? RESTIC_OK : res;
 }
 
 /* The versions of a file as Total Commander directory entries (heap array) */
@@ -1507,9 +1564,11 @@ static ResticResult history_items(const FileHistory* history, WIN32_FIND_DATAW**
 }
 
 /*
- * The version named `name` (a WFX component) of the file at `file_subpath`: its snapshot ID into
- * `out_snapshot_id`, from the cached versions first (`allow_restic` FALSE: only from there), else
- * from a `restic find` run now; RESTIC_ERR_PATH_NOT_FOUND when there is no such version
+ * The version named `name` (a WFX component) of the file at `file_subpath`, from the cached
+ * versions of any age first (`allow_restic` FALSE: only from there), else - unless cached versions
+ * younger than SnapshotListRefreshSeconds show there is none - from a `restic find` run now, which
+ * the caller allows only for a path known to be a file; RESTIC_ERR_PATH_NOT_FOUND when there is no
+ * such version
  */
 static ResticResult find_version(const RepoCall* call, const char* snapshot_id, const WCHAR* file_subpath,
                                  const WCHAR* name, BOOL allow_restic, FileHistory** out_history,
@@ -1518,12 +1577,16 @@ static ResticResult find_version(const RepoCall* call, const char* snapshot_id, 
     *out_version = NULL;
     char name_utf8[MAX_PATH * 3 + 1];
     if (!component_to_utf8(name, wcslen(name), name_utf8, sizeof(name_utf8))) return RESTIC_ERR_PATH_NOT_FOUND;
-    for (int from_cache = 1; from_cache >= 0; --from_cache) {
-        if (!from_cache && !allow_restic) break;
-        if (from_cache && !call->trusted) continue;
+    /* The cache of any age, then (a fresh cache without that name is the answer) restic */
+    static const HistoryCache passes[] = {HISTORY_CACHE_ANY, HISTORY_CACHE_FRESH, HISTORY_CACHE_NONE};
+    for (size_t pass = 0; pass < _countof(passes); ++pass) {
+        HistoryCache cache = passes[pass];
+        if (cache != HISTORY_CACHE_ANY && !allow_restic) break;
+        if (cache != HISTORY_CACHE_NONE && !call->trusted) continue;
         FileHistory* history = NULL;
-        ResticResult res = read_history(call, snapshot_id, file_subpath, TRUE, from_cache, !from_cache, &history);
-        if (res != RESTIC_OK && !(res == RESTIC_ERR_PATH_NOT_FOUND && from_cache)) return res;
+        ResticResult res = read_history(call, snapshot_id, file_subpath, TRUE, cache, cache == HISTORY_CACHE_NONE,
+                                        &history);
+        if (res != RESTIC_OK && !(res == RESTIC_ERR_PATH_NOT_FOUND && cache != HISTORY_CACHE_NONE)) return res;
         const FileVersion* v = history ? file_history_find(history, name_utf8) : NULL;
         if (v) {
             *out_history = history;
@@ -1531,6 +1594,7 @@ static ResticResult find_version(const RepoCall* call, const char* snapshot_id, 
             return RESTIC_OK;
         }
         file_history_free(history);
+        if (cache == HISTORY_CACHE_FRESH && res == RESTIC_OK) break;
     }
     return RESTIC_ERR_PATH_NOT_FOUND;
 }
@@ -1568,10 +1632,10 @@ static ResticResult list_operation(const RepoCall* call, void* ctx_ptr) {
             /* The whole snapshot read before: no restic at all */
             const SnapshotIndex* index =
                 call->trusted ? repo_cache_lock_index(call->repo->alias, call->repo->target, where.snapshot_id) : NULL;
-            BOOL may_be_file = TRUE;
+            BOOL is_file = FALSE; /* No folder there, but a file: its versions (path_kind()) */
             if (index) {
                 res = restic_list_index_directory(index, where.subpath, &ctx->items, &ctx->count);
-                if (res == RESTIC_ERR_PATH_NOT_FOUND) may_be_file = index_may_hold_file(index, where.subpath);
+                if (res == RESTIC_ERR_PATH_NOT_FOUND) is_file = index_holds_file(index, where.subpath);
                 repo_cache_unlock();
             }
             if (!index) {
@@ -1579,16 +1643,17 @@ static ResticResult list_operation(const RepoCall* call, void* ctx_ptr) {
                 ULONGLONG started = GetTickCount64();
                 res = restic_list_directory(call->cfg->restic_path, call->access,
                                             where.snapshot_id, where.subpath, call->exec, &ctx->items, &ctx->count,
-                                            call->err, call->err_cap);
+                                            &is_file, call->err, call->err_cap);
                 if (res == RESTIC_OK) {
                     conn_log(FALSE, call->repo->alias, L"%ls: %u entries listed by restic in %.1f s", ctx->rest,
                              (unsigned)ctx->count, (double)(GetTickCount64() - started) / 1000.0);
                 }
             }
-            if (res == RESTIC_ERR_PATH_NOT_FOUND && may_be_file) {
-                /* No folder there: a file opened as one (Alt+Enter) lists its versions */
+            if (res == RESTIC_ERR_PATH_NOT_FOUND && is_file) {
+                /* A file opened as a folder (Alt+Enter) lists its versions */
                 FileHistory* history = NULL;
-                ResticResult found   = read_history(call, where.snapshot_id, where.subpath, TRUE, TRUE, TRUE, &history);
+                ResticResult found   = read_history(call, where.snapshot_id, where.subpath, TRUE, HISTORY_CACHE_FRESH,
+                                                    TRUE, &history);
                 if (found == RESTIC_OK) {
                     res = history_items(history, &ctx->items, &ctx->count);
                     file_history_free(history);
@@ -1822,13 +1887,6 @@ static HANDLE enumerate_root_repositories(WIN32_FIND_DATAW* FindData) {
 }
 
 /*
- * Enter on a file ("open"): the root forget entry wipes every cached password, says how many
- * there were and sends Total Commander back to the root (FS_EXEC_SYMLINK to "\\"), which re-reads
- * it, so the entry disappears without Ctrl+R; any other file is downloaded and opened by
- * Total Commander itself, as before this function was exported. "properties" has nothing to show; "chmod" and "quote"
- * commands are not supported by this read-only plugin.
- */
-/*
  * FsExecuteFileW "properties" (Alt+Enter) below a repository alias: a snapshot, or a folder inside
  * one, shows the snapshot's properties; a version of a file the snapshots holding it; a file inside
  * a snapshot opens as the folder of its versions (`symlink`)
@@ -1889,27 +1947,6 @@ static char* describe_version(const RepoCall* call, const FileHistory* history, 
     return text;
 }
 
-/* TRUE when `subpath` is a folder of the snapshot: from its cached listing, or else `restic ls` */
-static ResticResult is_snapshot_folder(const RepoCall* call, const char* snapshot_id, const WCHAR* subpath,
-                                       BOOL* out_folder) {
-    *out_folder = FALSE;
-    WIN32_FIND_DATAW* items = NULL;
-    size_t count            = 0;
-    ResticResult res        = RESTIC_ERR_PATH_NOT_FOUND;
-    const SnapshotIndex* index =
-        call->trusted ? repo_cache_lock_index(call->repo->alias, call->repo->target, snapshot_id) : NULL;
-    if (index) {
-        res = restic_list_index_directory(index, subpath, &items, &count);
-        repo_cache_unlock();
-    } else {
-        res = restic_list_directory(call->cfg->restic_path, call->access, snapshot_id, subpath, call->exec, &items,
-                                    &count, call->err, call->err_cap);
-    }
-    free(items);
-    *out_folder = res == RESTIC_OK;
-    return res == RESTIC_ERR_PATH_NOT_FOUND ? RESTIC_OK : res;
-}
-
 static ResticResult properties_operation(const RepoCall* call, void* ctx_ptr) {
     PropertiesContext* ctx = (PropertiesContext*)ctx_ptr;
     RepoPath where;
@@ -1920,14 +1957,36 @@ static ResticResult properties_operation(const RepoCall* call, void* ctx_ptr) {
 
     const WCHAR* sp = where.subpath;
     while (*sp == L'\\') sp++;
-    BOOL folder = *sp == L'\0';
+    if (*sp == L'\0') {
+        ctx->text = describe_snapshot(call, where.snapshot_id); /* The snapshot itself */
+        return RESTIC_OK;
+    }
     WCHAR* parent = NULL;
     const WCHAR* name = NULL;
-    if (!folder && split_subpath(where.subpath, &parent, &name)) {
-        /* A version of a file listed before: its versions are cached (no restic for a file's own path) */
+    BOOL two_levels   = split_subpath(where.subpath, &parent, &name);
+    PathKind kind     = PATH_MISSING;
+    for (int pass = 0; two_levels && pass < 2; ++pass) {
+        /*
+         * A version of a file listed before: its versions are cached, of any age. Else, when the
+         * path is nothing in the snapshot but its parent a file, searched for (the cache was not
+         * trusted or is gone)
+         */
+        if (pass == 1) {
+            res = path_kind(call, where.snapshot_id, where.subpath, &kind);
+            if (res == RESTIC_OK && kind == PATH_MISSING) {
+                PathKind parent_kind = PATH_MISSING;
+                res = path_kind(call, where.snapshot_id, parent, &parent_kind);
+                if (res == RESTIC_OK && parent_kind != PATH_FILE) break;
+            }
+            if (res != RESTIC_OK) {
+                free(parent);
+                return res;
+            }
+            if (kind != PATH_MISSING) break;
+        }
         FileHistory* history = NULL;
         const FileVersion* v = NULL;
-        res = find_version(call, where.snapshot_id, parent, name, FALSE, &history, &v);
+        res = find_version(call, where.snapshot_id, parent, name, pass == 1, &history, &v);
         if (res == RESTIC_OK) {
             size_t i = 0;
             while (file_history_version(history, i) != v) ++i;
@@ -1941,27 +2000,45 @@ static ResticResult properties_operation(const RepoCall* call, void* ctx_ptr) {
             free(parent);
             return ctx->text ? RESTIC_OK : RESTIC_ERR_OUT_OF_MEMORY;
         }
-        free(parent);
-        if (res != RESTIC_ERR_PATH_NOT_FOUND) return res;
+        if (res != RESTIC_ERR_PATH_NOT_FOUND) {
+            free(parent);
+            return res;
+        }
     }
-    if (!folder) {
-        res = is_snapshot_folder(call, where.snapshot_id, where.subpath, &folder);
-        if (res != RESTIC_OK) return res;
+    free(parent);
+    if (!two_levels && (res = path_kind(call, where.snapshot_id, where.subpath, &kind)) != RESTIC_OK) return res;
+    if (kind == PATH_FOLDER) ctx->text = describe_snapshot(call, where.snapshot_id);
+    ctx->symlink = kind == PATH_FILE; /* Opened as the folder of its versions */
+    return RESTIC_OK;                 /* Nothing there: nothing to show */
+}
+
+/*
+ * FALSE when `rest` (below a repository alias) lies above the snapshots: `hosts\<host>`,
+ * `tags\<tag>`, the four folders and the two files beside them, where Alt+Enter has nothing to
+ * show, so it does not ask for a password either
+ */
+static BOOL may_be_inside_snapshot(const WCHAR* rest) {
+    size_t parts = 0;
+    WCHAR first[16] = {0};
+    for (const WCHAR* p = rest; *p;) {
+        while (*p == L'\\') p++;
+        if (*p == L'\0') break;
+        const WCHAR* start = p;
+        while (*p != L'\0' && *p != L'\\') p++;
+        size_t len = (size_t)(p - start);
+        if (parts++ == 0 && len < _countof(first)) wcsncpy_s(first, _countof(first), start, len);
     }
-    if (!folder) {
-        ctx->symlink = TRUE; /* Listing it as a folder tells whether it is a file */
-        return RESTIC_OK;
-    }
-    ctx->text = describe_snapshot(call, where.snapshot_id);
-    return RESTIC_OK;
+    if (_wcsicmp(first, L"hosts") == 0 || _wcsicmp(first, L"tags") == 0) return parts >= 3;
+    if (_wcsicmp(first, L"ids") == 0 || _wcsicmp(first, L"snapshots") == 0) return parts >= 2;
+    return FALSE;
 }
 
 /* Alt+Enter: see PropertiesContext. Returns an FS_EXEC_* code. */
 static int show_properties(WCHAR* remote_name) {
     WfxParsedPath parsed;
-    if (!parse_wfx_path(remote_name, &parsed) || parsed.level != WFX_PATH_REPO || parsed.rest[0] == L'\0' ||
-        is_forget_entry_name(parsed.repo_alias)) {
-        return FS_EXEC_OK; /* The root, a repository's folder: nothing more than Total Commander shows */
+    if (!parse_wfx_path(remote_name, &parsed) || parsed.level != WFX_PATH_REPO ||
+        is_forget_entry_name(parsed.repo_alias) || !may_be_inside_snapshot(parsed.rest)) {
+        return FS_EXEC_OK; /* Above the snapshots: nothing more than Total Commander shows */
     }
     ResticConfig cfg;
     const ResticRepoEntry* repo = load_config(&cfg) ? config_find_repo(&cfg, parsed.repo_alias) : NULL;
@@ -2006,6 +2083,14 @@ static int show_properties(WCHAR* remote_name) {
     return rc;
 }
 
+/*
+ * Enter on a file ("open"): the root forget entry wipes every cached password, says how many
+ * there were and sends Total Commander back to the root (FS_EXEC_SYMLINK to "\\"), which re-reads
+ * it, so the entry disappears without Ctrl+R; any other file is downloaded and opened by
+ * Total Commander itself, as before this function was exported. "properties" (Alt+Enter) inside a
+ * snapshot: see show_properties(). "chmod" and "quote" commands are not supported by this
+ * read-only plugin.
+ */
 int __stdcall FsExecuteFileW(HWND MainWin, WCHAR* RemoteName, WCHAR* Verb) {
     (void)MainWin;
     if (!RemoteName || !Verb) return FS_EXEC_ERROR;
@@ -2249,8 +2334,9 @@ static ResticResult get_file_operation(const RepoCall* call, void* ctx_ptr) {
     }
     /*
      * A version of a file (`<file>\<version>`): the file, from the oldest snapshot holding that
-     * version (the one its name carries). Known from the cached versions without restic; otherwise the path is tried as it is
-     * first, and its versions are searched for only when the snapshot has no such path.
+     * version (the one its name carries). Known from the cached versions without restic; otherwise
+     * the path is tried as it is first, and its versions are searched for only when the snapshot
+     * has no such path and a file where its parent is.
      */
     WCHAR* parent = NULL;
     const WCHAR* name = NULL;
@@ -2262,7 +2348,12 @@ static ResticResult get_file_operation(const RepoCall* call, void* ctx_ptr) {
                                where.subpath, ctx->local_name, ctx->overwrite, ctx->mtime, WFX_RESTIC_TIMEOUT_MS,
                                wfx_dump_progress_callback, ctx->progress, call->err, call->err_cap);
         if (res == RESTIC_ERR_PATH_NOT_FOUND) {
-            res = find_version(call, where.snapshot_id, parent, name, TRUE, &history, &version);
+            PathKind kind = PATH_MISSING;
+            res = path_kind(call, where.snapshot_id, parent, &kind);
+            if (res == RESTIC_OK) {
+                res = kind == PATH_FILE ? find_version(call, where.snapshot_id, parent, name, TRUE, &history, &version)
+                                        : RESTIC_ERR_PATH_NOT_FOUND;
+            }
         }
         if (!version) {
             free(parent);

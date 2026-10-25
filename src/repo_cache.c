@@ -754,9 +754,11 @@ void repo_cache_put_history(const WCHAR* alias, const WCHAR* target, const char*
         add          = NULL;
         /* The same key again replaces the older one; beyond the count or the bytes, the oldest go */
         size_t count = 1, bytes = r->histories->len;
+        BOOL full    = FALSE;
         for (HistoryEntry** link = &r->histories->next; *link;) {
             HistoryEntry* h = *link;
-            if (strcmp(h->key, key) == 0 || count >= MAX_HISTORIES || bytes + h->len > MAX_HISTORY_BYTES) {
+            if (!full && strcmp(h->key, key) != 0) full = count >= MAX_HISTORIES || bytes + h->len > MAX_HISTORY_BYTES;
+            if (full || strcmp(h->key, key) == 0) {
                 *link = h->next;
                 free_history(h);
             } else {

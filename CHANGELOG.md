@@ -15,15 +15,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   oldest snapshot that holds the version (the backup it first appeared
   in) and the file's name (`2026-10-17_14-02-11 (1a2b3c4d) report.docx`),
   oldest first, which can be viewed and copied like files; a version is
-  copied from the snapshot its name carries. One `restic find --json` for exactly the file's path
-  finds them; its output is kept as long as the snapshot list.
+  copied from the snapshot its name carries. One `restic find --json`
+  for exactly the file's path finds them, only for a path that is a file
+  in the snapshot; its output is kept as long as the snapshot list for
+  listing, and as long as the password for copying a version.
   `Alt+Enter` on a version lists the snapshots that hold it.
 - **Snapshot details (`Alt+Enter` on a snapshot or a folder in it):** a
   dialog with the snapshot's ID, time, host, user, paths, tags, and from
   its summary the size, files and folders new, changed and unmodified,
   data added (and stored), the backup's duration, the parent snapshot
-  and the restic version, all from the snapshot list without a restic
-  run.
+  and the restic version, from the snapshot list (a folder inside a
+  snapshot takes one `restic ls` until the snapshot has been read).
+
+### Changed
+
+- `Alt+Enter` (and *Properties* in the context menu) inside a snapshot
+  may now ask for the repository's password and run restic; above the
+  snapshots it still does nothing and asks for nothing.
+- A file inside a snapshot opened as a folder (its path followed by `\`)
+  lists the file's versions instead of failing with "not found".
 
 ## [v2.2.0] – 2026-10-24
 

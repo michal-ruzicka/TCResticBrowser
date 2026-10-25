@@ -926,13 +926,18 @@ static BOOL descend_to_fixture_data(
     return descend_to_fixture_data(p, next_path, depth + 1, out_data_path, out_cap);
 }
 
-/* Number of restic processes the plugin started so far, as its diagnostic log records them */
-static int count_restic_runs(const WCHAR* log_file) {
+/* Number of times `what` occurs in the plugin's diagnostic log */
+static int count_in_log(const WCHAR* log_file, const char* what) {
     char* text = read_text_file(log_file);
     int n = 0;
-    for (const char* p = text; p && (p = strstr(p, "restic run: ")) != NULL; p++) n++;
+    for (const char* p = text; p && (p = strstr(p, what)) != NULL; p++) n++;
     free(text);
     return n;
+}
+
+/* Number of restic processes the plugin started so far, as its diagnostic log records them */
+static int count_restic_runs(const WCHAR* log_file) {
+    return count_in_log(log_file, "restic run: ");
 }
 
 /*
@@ -1003,8 +1008,9 @@ static long long local_size(const WCHAR* path) {
  * snapshots, which copy like files; a version, a snapshot and a folder in it show their properties
  */
 static void test_e2e_file_history(const Plugin* p, const WCHAR* dir, const WCHAR* snap_root, const WCHAR* data_path) {
-    static WCHAR remote[MAX_PATH * 2], names[2048], version_path[MAX_PATH * 2], local[MAX_PATH];
+    static WCHAR remote[MAX_PATH * 2], names[2048], version_path[MAX_PATH * 2], local[MAX_PATH], log_file[MAX_PATH];
     WCHAR properties[] = L"properties";
+    swprintf_s(log_file, _countof(log_file), L"%ls\\log dir\\e2e.log", dir);
     g_e2e_pwd_prompts = 0;
     g_e2e_msg_dialogs = 0;
 
@@ -1035,6 +1041,8 @@ static void test_e2e_file_history(const Plugin* p, const WCHAR* dir, const WCHAR
     EXPECT_TRUE(versions == 2 && older_size == 5 && newer_size == 12 && wcscmp(older, newer) < 0,
                 "Two versions, oldest first: 5 bytes, then 12");
     EXPECT_TRUE(older[4] == L'-' && older[10] == L'T' && older[13] == L'.', "Named by SnapshotTimeFormat");
+    int finds = count_in_log(log_file, " find --json ");
+    EXPECT_TRUE(finds == 1, "...found by one restic find");
     EXPECT_TRUE(wcsncmp(older + 19, L" (", 2) == 0 && wcsspn(older + 21, L"0123456789abcdef") == 8 &&
                     wcsncmp(older + 29, L") with space.txt", 16) == 0 && wcsncmp(older + 19, newer + 19, 10) != 0,
                 "...then the short ID of the snapshot holding the version, a different one for each");
@@ -1076,6 +1084,9 @@ static void test_e2e_file_history(const Plugin* p, const WCHAR* dir, const WCHAR
                     wcsstr(g_e2e_last_msg, L"In 2 snapshots:\n") != NULL,
                 "...held by both snapshots");
 
+    EXPECT_TRUE(count_in_log(log_file, " find --json ") == finds + 1,
+                "Copying the versions and Alt+Enter on them ran no restic find again (one for readme.txt)");
+
     /* A snapshot, or a folder in it: the snapshot's properties */
     EXPECT_TRUE(p->execute_w(NULL, (WCHAR*)snap_root, properties) == FS_EXEC_OK && g_e2e_msg_dialogs == 3 &&
                     wcsncmp(g_e2e_last_msg, L"Snapshot ", 9) == 0 && wcsstr(g_e2e_last_msg, L"\nPaths: ") != NULL &&
@@ -1097,6 +1108,30 @@ static void test_e2e_file_history(const Plugin* p, const WCHAR* dir, const WCHAR
     EXPECT_TRUE(p->find_first_w(remote, &fd) == INVALID_HANDLE_VALUE && GetLastError() == ERROR_PATH_NOT_FOUND,
                 "A missing file has no versions");
     EXPECT_TRUE(g_e2e_pwd_prompts == 0 && g_e2e_msg_dialogs == 4, "No password asked, no error shown");
+    swprintf_s(local, _countof(local), L"%ls\\nothing.txt", dir);
+    swprintf_s(remote, _countof(remote), L"%ls\\no_such_file.txt\\2026-01-01T00.00.00 (00000000) no_such_file.txt",
+               data_path);
+    EXPECT_TRUE(p->get_file_w(remote, local, 0, &ri) == FS_FILE_NOTFOUND, "A version of a missing file: not found");
+    swprintf_s(remote, _countof(remote), L"%ls\\many\\no_such_file.txt", data_path);
+    EXPECT_TRUE(p->get_file_w(remote, local, 0, &ri) == FS_FILE_NOTFOUND, "A missing file in a folder: not found");
+    EXPECT_TRUE(count_in_log(log_file, " find --json ") == finds + 1 && g_e2e_msg_dialogs == 4,
+                "...and its folder or a missing path searched for by no restic find");
+
+    /* Without a password, Alt+Enter above the snapshots asks for none: there is nothing to show */
+    WCHAR forget[] = L"\\\U0001F5D1 Forget 1 Password", open_verb[] = L"open";
+    EXPECT_TRUE(p->execute_w(NULL, forget, open_verb) == FS_EXEC_SYMLINK, "Forget the password");
+    int runs = count_restic_runs(log_file);
+    static const WCHAR* const above[] = {L"\\MainRepo\\hosts", L"\\MainRepo\\snapshots", L"\\MainRepo\\snapshots.csv",
+                                         L"\\MainRepo\\ids\\", L"\\MainRepo\\tags\\daily"};
+    for (size_t i = 0; i < _countof(above); ++i) {
+        wcscpy_s(remote, _countof(remote), above[i]);
+        EXPECT_TRUE(p->execute_w(NULL, remote, properties) == FS_EXEC_OK, "Alt+Enter above the snapshots");
+    }
+    EXPECT_TRUE(g_e2e_pwd_prompts == 0 && count_restic_runs(log_file) == runs && g_e2e_msg_dialogs == 5,
+                "...asked for no password and ran no restic (only the forget entry's message)");
+    g_e2e_pwd_mode = 1;
+    EXPECT_TRUE(list_names(p, data_path, names, _countof(names)), "The password given again");
+    g_e2e_pwd_prompts = 0;
     g_e2e_msg_dialogs = 0;
 }
 
