@@ -1255,7 +1255,7 @@ ResticResult restic_list_snapshots(
         return RESTIC_ERR_INVALID_ARG;
     }
 
-    FILETIME now; /* When restic was asked: the time of what is made from its answer (snapshots.csv) */
+    FILETIME now; /* When restic was asked: the time of what is made from its answer (snapshots.csv, .json) */
     GetSystemTimeAsFileTime(&now);
     ResticCommandOutput cmd_out;
     ResticResult res = run_and_check(restic_exe, repo, L"snapshots --json --no-lock",

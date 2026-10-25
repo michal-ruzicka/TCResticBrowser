@@ -66,6 +66,7 @@ to list and extract data and never modifies a repository.
 │   │       ├── latest → 2026-10-18_09-30-00\
 │   │       └── latest → a1b2c3d4\
 │   ├── snapshots.csv                       <-- All snapshots, for a spreadsheet
+│   ├── snapshots.json                      <-- All snapshots, as restic lists them
 │   └── repository_id.txt                   <-- The repository's ID
 └── CloudS3Backup\
 ```
@@ -212,7 +213,7 @@ documentation.
 | **List Repositories** | Open **Network Neighborhood** (`\\\`) -> **`TCResticBrowser`**. Changes to `TCResticBrowser.ini` take effect immediately on panel refresh (`Ctrl+R` / `F2`). |
 | **Browse Snapshots** | Enter a repository folder (`\<Alias>`). Prompted once for the repository password; once restic accepts it, it is kept in RAM (encrypted) for that alias across both panels for 30 minutes (see [Password Timeout](#password-timeout)). Up to 3 password attempts are allowed. The dialog's title starts with the repository alias (`MyLocalBackup - Restic repository password`), so a password manager that picks an entry by the title of the active window, such as KeePassXC Auto-Type, can offer the right password. |
 | **Connection Log** | Total Commander's FTP connections toolbar (unless `ConnectionLog=no`), whose log window shows what the plugin is doing in the background - reading a whole snapshot (with progress every few seconds) or re-reading the snapshot list - and whose **Disconnect** forgets all passwords and everything read with them. See [Connection Log](#connection-log). |
-| **Snapshot List (`snapshots.csv`)** | Every repository folder also holds the file **`snapshots.csv`**: all snapshots with host, paths, size, time, tags and full ID, for Excel or another spreadsheet (`F3` to view, `F5` to copy, or open it). See [Snapshot List as a Spreadsheet](#snapshot-list-as-a-spreadsheet). Next to it, **`repository_id.txt`** holds the repository's ID (see [Repository ID](#repository-id)). |
+| **Snapshot List (`snapshots.csv`)** | Every repository folder also holds the file **`snapshots.csv`**: all snapshots with host, paths, size, time, tags and full ID, for Excel or another spreadsheet (`F3` to view, `F5` to copy, or open it). See [Snapshot List as a Spreadsheet](#snapshot-list-as-a-spreadsheet). Next to it, **`snapshots.json`** holds the same list as restic itself prints it (see [Snapshot List as JSON](#snapshot-list-as-json)), and **`repository_id.txt`** holds the repository's ID (see [Repository ID](#repository-id)). |
 | **Forget Passwords** | While passwords are remembered, the plugin's root folder starts with **`🗑 Forget N Passwords`** (N is their number; `🗑 Forget 1 Password` for one). Press **Enter** on it to wipe them all at once; a message says how many were forgotten, the root folder is then re-read without the entry, and the next access asks again. The entry is not removed by itself when the passwords expire; it disappears the next time the root folder is read (`Ctrl+R`). |
 | **Explore Files** | Enter a snapshot through `snapshots`, `ids`, `hosts` or `tags` (or `latest`) and navigate the backed-up directory tree. The snapshot list is read once and then shown at once from memory; when it is older than a minute (`SnapshotListRefreshSeconds=`), as `restic mount` would re-read it, restic reads a new one in the background and the next listing (`Ctrl+R`) shows any new snapshots (see [Snapshot List Refresh](#snapshot-list-refresh)). |
 | **View File (`F3` / `Ctrl+Q`)** | Press **`F3`** (Lister) or **`Ctrl+Q`** (Quick View) on any file to stream it to a temporary location and view its contents. |
@@ -343,6 +344,17 @@ list at the time of the listing; the file copied is made from the list
 cached at the time of the copy and carries that list's date, so after a
 background refresh it may already include newer snapshots.
 
+### Snapshot List as JSON
+
+Every repository folder also holds `snapshots.json`: the output of
+`restic snapshots --json` the plugin read to build `hosts`, `ids`,
+`snapshots` and `tags`, byte for byte (no extra restic run). It has
+everything restic records about each snapshot - full ID, time, host,
+user, paths, tags, parent, the program version and the summary of the
+backup - for `jq`, a script or any other JSON tool, and also the
+snapshots the plugin itself cannot show (one without a valid time or
+ID). Its date, and when it is refreshed, are those of `snapshots.csv`.
+
 ### Repository ID
 
 Every repository folder also holds `repository_id.txt`: one line with
@@ -426,7 +438,7 @@ files) `Alt+Enter` shows nothing and asks for no password.
 | `hosts`, `ids`, `snapshots`, `tags`, a host's or a tag's folder | When the newest snapshot in it was taken; none if it holds no snapshot (`tags` when no snapshot has a tag) |
 | A snapshot's folder, also `latest` and `latest → …` | When the snapshot was taken |
 | Files and folders in a snapshot | Their modification time as restic recorded it (none if restic has none); creation and access time from restic's `ctime` and `atime` |
-| `snapshots.csv` | When restic was asked for the snapshot list it is made from |
+| `snapshots.csv`, `snapshots.json` | When restic was asked for the snapshot list it is made from |
 | `repository_id.txt` | When restic was asked for the ID; until then the date of `snapshots.csv` |
 
 Total Commander shows every date in your local time zone, while a

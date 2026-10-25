@@ -79,8 +79,8 @@ typedef struct SnapshotTree SnapshotTree;
 /*
  * Builds the tree from `len` bytes of `restic snapshots --json` output (a literal null is an empty
  * repository), naming the snapshot folders by `time_format` (NULL: the default). Entries without
- * a valid time or a lowercase hexadecimal ID of 8 to 64 characters are skipped. Release the tree with
- * snapshot_tree_free().
+ * a valid time or a lowercase hexadecimal ID of 8 to 64 characters are skipped. The tree keeps a
+ * copy of the output (snapshot_tree_json). Release the tree with snapshot_tree_free().
  */
 SnapshotTreeStatus snapshot_tree_build(const char* json, size_t len, const char* time_format, SnapshotTree** out);
 
@@ -101,6 +101,15 @@ SnapshotTreeStatus snapshot_tree_build(const char* json, size_t len, const char*
  * reader, also one splitting at another separator, could start a cell with it.
  */
 char* snapshot_tree_csv(const SnapshotTree* tree, char separator, size_t* out_len);
+
+/* The file holding restic's own list of the snapshots, beside SNAPSHOT_TREE_CSV_NAME */
+#define SNAPSHOT_TREE_JSON_NAME "snapshots.json"
+
+/*
+ * The `restic snapshots --json` output the tree was built from, byte for byte (`*out_len` bytes,
+ * followed by a NUL), owned by the tree; every snapshot restic listed, also those the tree skips
+ */
+const char* snapshot_tree_json(const SnapshotTree* tree, size_t* out_len);
 
 /* The time of the snapshot with this full ID into *out; 0 when the tree has no such snapshot */
 int snapshot_tree_snapshot_time(const SnapshotTree* tree, const char* id, Timestamp* out);

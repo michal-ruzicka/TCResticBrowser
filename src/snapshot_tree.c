@@ -69,6 +69,8 @@ struct SnapshotTree {
     char** ids;          /* Owned copies of the full IDs the nodes point to */
     SnapshotInfo** info; /* snapshot_count entries, in the order of the IDs */
     uint64_t listed_at;  /* snapshot_tree_set_listed_at() */
+    char* json;          /* A copy of what the tree was built from (snapshot_tree_json) */
+    size_t json_len;
 };
 
 static uint64_t hash_key(const BuildNode* parent, const char* name) {
@@ -574,7 +576,12 @@ SnapshotTreeStatus snapshot_tree_build(const char* json, size_t len, const char*
     SnapshotRecord* records = n ? (SnapshotRecord*)calloc(n, sizeof(SnapshotRecord)) : NULL;
     SnapshotTree* tree = (SnapshotTree*)calloc(1, sizeof(SnapshotTree));
     SnapshotTreeStatus status = SNAPSHOT_TREE_NO_MEMORY;
-    if (tree && (n == 0 || records)) {
+    if (tree && (tree->json = (char*)malloc(len + 1)) != NULL) {
+        memcpy(tree->json, json, len);
+        tree->json[len] = '\0';
+        tree->json_len  = len;
+    }
+    if (tree && tree->json && (n == 0 || records)) {
         size_t count = n ? collect_records(root, records) : 0;
         status = build_from_records(records, count, time_format, tree);
     }
@@ -595,6 +602,7 @@ void snapshot_tree_free(SnapshotTree* tree) {
     free(tree->ids);
     for (size_t i = 0; i < tree->snapshot_count; ++i) free(tree->info[i]);
     free(tree->info);
+    free(tree->json);
     free(tree);
 }
 
@@ -612,6 +620,11 @@ void snapshot_tree_set_listed_at(SnapshotTree* tree, uint64_t time) {
 
 uint64_t snapshot_tree_listed_at(const SnapshotTree* tree) {
     return tree ? tree->listed_at : 0;
+}
+
+const char* snapshot_tree_json(const SnapshotTree* tree, size_t* out_len) {
+    if (out_len) *out_len = tree ? tree->json_len : 0;
+    return tree ? tree->json : NULL;
 }
 
 static int ascii_casecmp(const char* a, const char* b);

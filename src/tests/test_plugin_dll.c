@@ -1202,7 +1202,7 @@ static void test_e2e_file_history(const Plugin* p, const WCHAR* dir, const WCHAR
     EXPECT_TRUE(p->execute_w(NULL, forget, open_verb) == FS_EXEC_SYMLINK, "Forget the password");
     int runs = count_restic_runs(log_file);
     static const WCHAR* const above[] = {L"\\MainRepo\\hosts", L"\\MainRepo\\snapshots", L"\\MainRepo\\snapshots.csv",
-                                         L"\\MainRepo\\ids\\", L"\\MainRepo\\tags\\daily"};
+                                         L"\\MainRepo\\snapshots.json", L"\\MainRepo\\ids\\", L"\\MainRepo\\tags\\daily"};
     for (size_t i = 0; i < _countof(above); ++i) {
         wcscpy_s(remote, _countof(remote), above[i]);
         EXPECT_TRUE(p->execute_w(NULL, remote, properties) == FS_EXEC_OK, "Alt+Enter above the snapshots");
@@ -1366,6 +1366,62 @@ static int read_small_file(const WCHAR* path, char* text, DWORD cap) {
 }
 
 /*
+ * snapshots.json beside snapshots.csv: restic's own `snapshots --json` output, listed as a read-only
+ * file of its exact size with the time of snapshots.csv, copied byte for byte, never a folder
+ */
+static void test_snapshots_json(const Plugin* p, const WCHAR* dir, const WCHAR* some_id, const WCHAR* latest_id) {
+    WIN32_FIND_DATAW fd;
+    RemoteInfo ri;
+    memset(&ri, 0, sizeof(ri));
+    BOOL listed  = FALSE;
+    FILETIME csv = {0, 0};
+    HANDLE h     = p->find_first_w(L"\\MainRepo", &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (wcscmp(fd.cFileName, L"snapshots.csv") == 0) csv = fd.ftLastWriteTime;
+            if (wcscmp(fd.cFileName, L"snapshots.json") != 0) continue;
+            listed = (fd.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY)) ==
+                         FILE_ATTRIBUTE_READONLY && fd.nFileSizeHigh == 0 && fd.nFileSizeLow > 0;
+            ri.SizeLow       = fd.nFileSizeLow;
+            ri.LastWriteTime = fd.ftLastWriteTime;
+            ri.Attr          = (int)fd.dwFileAttributes;
+        } while (p->find_next_w(h, &fd));
+        p->find_close(h);
+    }
+    EXPECT_TRUE(listed, "snapshots.json is listed as a read-only file with a size");
+    EXPECT_TRUE(csv.dwHighDateTime != 0 && CompareFileTime(&ri.LastWriteTime, &csv) == 0,
+                "...dated like snapshots.csv: when restic listed the snapshots");
+
+    WCHAR local[MAX_PATH];
+    swprintf_s(local, MAX_PATH, L"%ls\\snapshots.json", dir);
+    DeleteFileW(local);
+    EXPECT_TRUE(p->get_file_w(L"\\MainRepo\\snapshots.json", local, 0, &ri) == FS_FILE_OK, "snapshots.json copied");
+    static char text[65536];
+    int got = read_small_file(local, text, sizeof(text));
+    EXPECT_TRUE(got > 0 && (DWORD)got == ri.SizeLow, "The copy has exactly the listed size");
+    char some_a[16] = {0}, latest_a[16] = {0}, key[64];
+    WideCharToMultiByte(CP_UTF8, 0, some_id, -1, some_a, sizeof(some_a), NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, latest_id, -1, latest_a, sizeof(latest_a), NULL, NULL);
+    snprintf(key, sizeof(key), "\"short_id\":\"%s\"", latest_a);
+    BOOL has_latest = strstr(text, key) != NULL;
+    snprintf(key, sizeof(key), "\"short_id\":\"%s\"", some_a);
+    EXPECT_TRUE(got > 0 && text[0] == '[' && has_latest && strstr(text, key) != NULL &&
+                    strstr(text, "\"summary\":") != NULL,
+                "...restic's JSON array of the snapshots, summaries included");
+
+    EXPECT_TRUE(p->get_file_w(L"\\MainRepo\\snapshots.json", local, 0, &ri) == FS_FILE_EXISTS &&
+                    p->get_file_w(L"\\MainRepo\\Snapshots.JSON", local, FS_COPYFLAGS_OVERWRITE, &ri) == FS_FILE_OK,
+                "The overwrite protocol, the name ignoring case");
+    SetLastError(0);
+    EXPECT_TRUE(p->find_first_w(L"\\MainRepo\\snapshots.json", &fd) == INVALID_HANDLE_VALUE &&
+                    GetLastError() == ERROR_PATH_NOT_FOUND &&
+                    p->get_file_w(L"\\MainRepo\\snapshots.json\\x", local, FS_COPYFLAGS_OVERWRITE, &ri) == FS_FILE_NOTFOUND &&
+                    p->get_file_w(L"\\MainRepo\\tags\\snapshots.json", local, FS_COPYFLAGS_OVERWRITE, &ri) == FS_FILE_NOTFOUND,
+                "snapshots.json is a file, only in the repository's folder");
+    DeleteFileW(local);
+}
+
+/*
  * repository_id.txt beside snapshots.csv: listed with its fixed size (64 hexadecimal characters and
  * CRLF), read by restic once and then taken from the cache, never a folder
  */
@@ -1497,8 +1553,8 @@ static void test_live_end_to_end_navigation(void) {
     WIN32_FIND_DATAW fd;
     static WCHAR names[1024];
     EXPECT_TRUE(list_names(&p, L"\\MainRepo", names, _countof(names)) &&
-                    wcscmp(names, L"hosts|ids|snapshots|tags|snapshots.csv|repository_id.txt") == 0,
-                "Level 1 shows restic mount's folders, snapshots.csv and repository_id.txt after a password retry");
+                    wcscmp(names, L"hosts|ids|snapshots|tags|snapshots.csv|snapshots.json|repository_id.txt") == 0,
+                "Level 1 shows restic mount's folders, snapshots.csv, snapshots.json and repository_id.txt after a password retry");
     EXPECT_TRUE(g_e2e_pwd_prompts == 2, "Prompted twice (initial + 1 retry after wrong password)");
     EXPECT_TRUE(wcsstr(g_e2e_last_prompt, L"Wrong password") != NULL, "Retry prompt tells the user the password was wrong");
     EXPECT_TRUE(wcscmp(g_e2e_last_title, L"MainRepo - Restic repository password") == 0,
@@ -1554,6 +1610,7 @@ static void test_live_end_to_end_navigation(void) {
                 GetLastError() == ERROR_PATH_NOT_FOUND, "Unknown snapshot -> ERROR_PATH_NOT_FOUND");
     EXPECT_TRUE(g_e2e_pwd_prompts == 0 && g_e2e_msg_dialogs == 0, "No prompt and no dialog while browsing the tree");
     test_snapshots_csv(&p, dir, short_id, latest_link + 9);
+    test_snapshots_json(&p, dir, short_id, latest_link + 9);
     test_repository_id(&p, dir);
 
     /* The snapshot root is the same through latest and ids/ */

@@ -114,6 +114,9 @@ static void fuzz_tree(const char* data, size_t size, const char* format) {
     if (!tree) return;
     const SnapshotNode* root = snapshot_tree_root(tree);
     CHECK(root->child_count == 4);
+    size_t json_len  = 0;
+    const char* json = snapshot_tree_json(tree, &json_len);
+    CHECK(json && json_len == size && memcmp(json, data, size) == 0 && json[size] == '\0'); /* snapshots.json */
     g_tree = tree;
     walk_tree(root, 0);
     static const char SEPARATORS[] = {',', ';', '|', '\t'};

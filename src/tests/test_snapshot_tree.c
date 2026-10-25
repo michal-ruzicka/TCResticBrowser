@@ -465,6 +465,26 @@ static void test_skipped_entries(void) {
     snapshot_tree_free(tree);
 }
 
+/* snapshots.json: the output the tree was built from, byte for byte, skipped entries included */
+static void test_json_copy(void) {
+    static const char json[] = "[{\"time\":\"2026-10-18T10:00:00Z\",\"id\":\"deadbeef\"},\n"
+                               " {\"time\":\"bad\",\"id\":\"12345678\",\"x\":\"\\u00e9\"}]\n";
+    SnapshotTree* tree = NULL;
+    EXPECT_TRUE(snapshot_tree_build(json, sizeof(json) - 1, NULL, &tree) == SNAPSHOT_TREE_OK, "Built");
+    size_t len        = 0;
+    const char* copy  = snapshot_tree_json(tree, &len);
+    EXPECT_TRUE(copy && copy != json && len == sizeof(json) - 1 && memcmp(copy, json, len) == 0 && copy[len] == '\0',
+                "The very bytes restic printed, NUL-terminated, the skipped entry too");
+    EXPECT_TRUE(snapshot_tree_snapshot_count(tree) == 1, "...while the tree holds the usable snapshot only");
+    snapshot_tree_free(tree);
+    EXPECT_TRUE(snapshot_tree_build("null", 4, NULL, &tree) == SNAPSHOT_TREE_OK, "An empty repository");
+    copy = snapshot_tree_json(tree, &len);
+    EXPECT_TRUE(copy && len == 4 && strcmp(copy, "null") == 0, "...keeps its null");
+    snapshot_tree_free(tree);
+    len = 7;
+    EXPECT_TRUE(snapshot_tree_json(NULL, &len) == NULL && len == 0, "No tree, no JSON");
+}
+
 /* 20 000 snapshots: insertion stays fast (hash index) and every name stays unique */
 static void test_many_snapshots(void) {
     size_t n = 20000, cap = n * 200 + 16;
@@ -856,6 +876,7 @@ int main(void) {
     test_file_history();
     test_csv_size();
     test_skipped_entries();
+    test_json_copy();
     test_many_snapshots();
     test_index_listing();
     test_index_errors();

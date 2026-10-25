@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`snapshots.json` in every repository folder**, beside
+  `snapshots.csv`: the `restic snapshots --json` output the folders were
+  built from, byte for byte, for `jq` or a script; no extra restic run.
+  It is kept with the cached snapshot list, which takes that much more
+  memory.
+
 - **File versions (`Alt+Enter` on a file inside a snapshot):** a dialog
   shows the path of a folder to go to (and copies it to the clipboard on
   request), the file's own path followed by `\`, which lists that file's versions across the snapshots of the
