@@ -32,8 +32,8 @@ REM Visual Studio Build Tools release: the fixed-version bootstrapper and its
 REM SHA-256, the same as VS_BUILDTOOLS_URL / VS_BUILDTOOLS_SHA256 in
 REM .github\workflows\build.yml. Keep the two files in step.
 REM ---------------------------------------------------------------------------
-set VS_BUILDTOOLS_URL=https://download.visualstudio.microsoft.com/download/pr/e07fb79d-d4ec-45bc-b19d-200bc819ee8d/3b21743cfbd0458e7f4dba87981fb8b99602a974c7439b857878cfa3e9fba5f2/vs_BuildTools.exe
-set VS_BUILDTOOLS_SHA256=3b21743cfbd0458e7f4dba87981fb8b99602a974c7439b857878cfa3e9fba5f2
+set VS_BUILDTOOLS_URL=https://download.visualstudio.microsoft.com/download/pr/9a3f23c2-cc94-49a0-88c0-f9f19f2ac9df/c217be69e6547c77c62d870394cd649a7a85ab86fcaa526a6ff629d1ec043e77/vs_BuildTools.exe
+set VS_BUILDTOOLS_SHA256=c217be69e6547c77c62d870394cd649a7a85ab86fcaa526a6ff629d1ec043e77
 
 REM GitHub archives a branch as <repo>-<branch>/ inside the ZIP, with every
 REM "/" in the branch name replaced by "-".
