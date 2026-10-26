@@ -2154,7 +2154,7 @@ static void check_unc_listings(const Plugin* p, const WCHAR* snap, const char* h
     snprintf(what, sizeof(what), "The snapshot's root holds C and UNC, no volume of a share (%s)", how);
     EXPECT_TRUE(list_names(p, snap, names, _countof(names)) && wcscmp(names, L"C|UNC") == 0, what);
     swprintf_s(path, _countof(path), L"%ls\\UNC", snap);
-    snprintf(what, sizeof(what), "UNC lists the servers, not .. (%s)", how);
+    snprintf(what, sizeof(what), "UNC lists the servers, not .. nor the device path's (%s)", how);
     EXPECT_TRUE(list_names(p, path, names, _countof(names)) && wcscmp(names, L"srv|nas") == 0, what);
     swprintf_s(path, _countof(path), L"%ls\\UNC\\srv", snap);
     snprintf(what, sizeof(what), "UNC\\srv lists its share, not .. (%s)", how);
@@ -2170,10 +2170,11 @@ static void check_unc_listings(const Plugin* p, const WCHAR* snap, const char* h
     snprintf(what, sizeof(what), "... also typed in another case (%s)", how);
     EXPECT_TRUE(list_names(p, path, names, _countof(names)) && wcscmp(names, L"a.txt") == 0, what);
     swprintf_s(path, _countof(path), L"%ls\\UNC\\nas\\backup", snap);
-    snprintf(what, sizeof(what), "\\\\?\\UNC\\nas\\backup is UNC\\nas\\backup (%s)", how);
+    snprintf(what, sizeof(what), "\\\\nas\\backup is UNC\\nas\\backup (%s)", how);
     EXPECT_TRUE(list_names(p, path, names, _countof(names)) && wcscmp(names, L"b.txt") == 0, what);
-    static const WCHAR* const hidden[] = {L"\\UNC\\..", L"\\UNC\\..\\..", L"\\UNC\\srv\\..", L"\\UNC\\nas\\none",
-                                          L"\\UNC\\none", L"\\UNC\\srv\\share\\none"};
+    static const WCHAR* const hidden[] = {L"\\UNC\\..",        L"\\UNC\\..\\..",  L"\\UNC\\srv\\..",
+                                          L"\\UNC\\nas\\none", L"\\UNC\\dev",      L"\\UNC\\?",
+                                          L"\\UNC\\none",      L"\\UNC\\srv\\share\\none"};
     for (size_t i = 0; i < _countof(hidden); ++i) {
         swprintf_s(path, _countof(path), L"%ls%ls", snap, hidden[i]);
         snprintf(what, sizeof(what), "%ls is not found (%s)", hidden[i], how);
@@ -2202,7 +2203,7 @@ static void unc_shares_scenario(const Plugin* pp, const WCHAR* dir, const WCHAR*
     swprintf_s(path, MAX_PATH, L"%ls\\srv\\share\\dir\\a.txt", local);
     EXPECT_TRUE(file_has_text(path, "share"), "... the file on \\\\srv\\share from restic's /\\\\srv\\share/dir/a.txt");
     swprintf_s(path, MAX_PATH, L"%ls\\nas\\backup\\b.txt", local);
-    EXPECT_TRUE(file_has_text(path, "nas"), "... the one on \\\\?\\UNC\\nas\\backup from its own folder");
+    EXPECT_TRUE(file_has_text(path, "nas"), "... the one on \\\\nas\\backup from its own folder");
     swprintf_s(path, MAX_PATH, L"%ls\\evil", dir);
     WCHAR up[MAX_PATH];
     swprintf_s(up, MAX_PATH, L"%ls\\up", local);
@@ -2221,6 +2222,22 @@ static void unc_shares_scenario(const Plugin* pp, const WCHAR* dir, const WCHAR*
     EXPECT_TRUE(p.execute_w(NULL, path, properties) == FS_EXEC_OK && g_e2e_msg_dialogs == 1 &&
                     wcsstr(g_e2e_last_msg, L"\\\\srv\\share\\dir") != NULL,
                 "Alt+Enter on UNC\\srv shows the snapshot's details, its paths among them");
+
+    /* The versions of a file on a share: restic find, with a pattern that does not walk every snapshot */
+    static WCHAR names[512];
+    swprintf_s(path, MAX_PATH, L"%ls\\UNC\\srv\\share\\dir\\a.txt\\", snap);
+    EXPECT_TRUE(list_names(&p, path, names, _countof(names)) &&
+                    wcscmp(names, L"2026-10-20_09-00-00 (01234567) a.txt") == 0,
+                "A file on \\\\srv\\share lists its version, not the file of that name below C\\Users");
+    swprintf_s(path, MAX_PATH, L"%ls\\UNC\\srv\\share\\dir\\a.txt\\2026-10-20_09-00-00 (01234567) a.txt", snap);
+    swprintf_s(up, MAX_PATH, L"%ls\\version.txt", dir);
+    memset(&ri, 0, sizeof(ri));
+    EXPECT_TRUE(p.get_file_w(path, up, FS_COPYFLAGS_OVERWRITE, &ri) == FS_FILE_OK && file_has_text(up, "share"),
+                "...which copies from the share");
+    swprintf_s(path, MAX_PATH, L"%ls\\UNC\\nas\\backup\\b.txt\\", snap);
+    EXPECT_TRUE(list_names(&p, path, names, _countof(names)) &&
+                    wcscmp(names, L"2026-10-20_09-00-00 (01234567) b.txt") == 0,
+                "...also on \\\\nas\\backup");
 
     /* The same once the whole snapshot is read */
     BOOL read = FALSE;

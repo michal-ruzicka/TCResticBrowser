@@ -64,7 +64,7 @@ typedef struct {
     size_t server_len;
 } UncWalk;
 
-/* "UNC/<server>/<share>/x" maps to restic's "/<volume>/x" */
+/* "UNC/<server>/<share>/x" maps to restic's "/<volume>/x", two bytes shorter (UNC_SUBPATH_CHARS in main.c) */
 static void check_unc_share(void* ctx, const char* name, size_t len) {
     const UncWalk* w = (const UncWalk*)ctx;
     check_unc_name(name, len);
@@ -79,7 +79,7 @@ static void check_unc_share(void* ctx, const char* name, size_t len) {
     memcpy(path + 6 + w->server_len + len, "/x", 3);
     CHECK(snapshot_tree_unc_path(g_tree, w->id, path, out, cap + 16) == SNAPSHOT_UNC_MAPPED);
     size_t volume = snapshot_tree_unc_volume(out + 1, strlen(out + 1));
-    CHECK(out[0] == '/' && volume > 0 && strcmp(out + 1 + volume, "/x") == 0);
+    CHECK(out[0] == '/' && volume > 0 && strcmp(out + 1 + volume, "/x") == 0 && strlen(out) + 2 == strlen(path));
     free(path);
     free(out);
 }

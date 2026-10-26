@@ -30,21 +30,25 @@ static void put_err(const char* text) {
  * With FAKE_RESTIC_UNC set: a repository of one Windows snapshot that backed up network shares, as
  * restic names them (test_unc_shares in test_plugin_dll.c). restic under Wine cannot make one: it
  * opens a share as "\\?\UNC\...", which Wine does not resolve. The snapshot holds "C:\Users",
- * "\\srv\share\dir", "\\?\UNC\nas\backup" and volumes no folder may be made of
- * ("\\..\..\evil", "\\srv\..\up"); `ls` prints the whole snapshot whatever path it is given
+ * "\\srv\share\dir", "\\nas\backup", volumes no folder may be made of ("\\..\..\evil",
+ * "\\srv\..\up") and a device path ("\\?\UNC\dev\x", whose volume is "\\?\UNC"); `ls` prints the whole snapshot whatever path it is given
  * (the plugin keeps what is below the path, and finds nothing for a path restic would not know),
- * `dump` knows the two files on the shares.
+ * `dump` knows the two files on the shares, and `find` answers only the patterns that keep restic
+ * from walking every snapshot whole (file_history_pattern), the one of a.txt also with a file of
+ * the same name below two other folders, as restic would.
  */
 #define UNC_SNAPSHOT_ID "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 #define UNC_NODE(name, type, path, extra)                                                                    \
     "{\"name\":\"" name "\",\"type\":\"" type "\",\"path\":\"" path "\"" extra                                 \
     ",\"mtime\":\"2026-10-20T09:00:00+02:00\",\"message_type\":\"node\",\"struct_type\":\"node\"}\n"
+#define UNC_MATCH(path, size) \
+    "{\"path\":\"" path "\",\"type\":\"file\",\"size\":" size ",\"mtime\":\"2026-10-20T09:00:00+02:00\"}"
 
 static int fake_unc_repository(int argc, char** argv) {
     const char* cmd = argc > 1 ? argv[1] : "";
     if (strcmp(cmd, "snapshots") == 0) {
         put_out("[{\"time\":\"2026-10-20T10:00:00+02:00\",\"tree\":\"00\",\"paths\":[\"C:\\\\Users\","
-                "\"\\\\\\\\srv\\\\share\\\\dir\",\"\\\\\\\\?\\\\UNC\\\\nas\\\\backup\","
+                "\"\\\\\\\\srv\\\\share\\\\dir\",\"\\\\\\\\nas\\\\backup\",\"\\\\\\\\?\\\\UNC\\\\dev\\\\x\","
                 "\"\\\\\\\\..\\\\..\\\\evil\",\"\\\\\\\\srv\\\\..\\\\up\"],"
                 "\"hostname\":\"pc\",\"username\":\"me\",\"id\":\"" UNC_SNAPSHOT_ID "\",\"short_id\":\"01234567\"}]\n");
         return 0;
@@ -58,8 +62,12 @@ static int fake_unc_repository(int argc, char** argv) {
         put_out(UNC_NODE("\\\\\\\\srv\\\\share", "dir", "/\\\\\\\\srv\\\\share", ""));
         put_out(UNC_NODE("dir", "dir", "/\\\\\\\\srv\\\\share/dir", ""));
         put_out(UNC_NODE("a.txt", "file", "/\\\\\\\\srv\\\\share/dir/a.txt", ",\"size\":5"));
-        put_out(UNC_NODE("\\\\\\\\?\\\\UNC\\\\nas\\\\backup", "dir", "/\\\\\\\\?\\\\UNC\\\\nas\\\\backup", ""));
-        put_out(UNC_NODE("b.txt", "file", "/\\\\\\\\?\\\\UNC\\\\nas\\\\backup/b.txt", ",\"size\":3"));
+        put_out(UNC_NODE("\\\\\\\\nas\\\\backup", "dir", "/\\\\\\\\nas\\\\backup", ""));
+        put_out(UNC_NODE("b.txt", "file", "/\\\\\\\\nas\\\\backup/b.txt", ",\"size\":3"));
+        put_out(UNC_NODE("\\\\\\\\?\\\\UNC", "dir", "/\\\\\\\\?\\\\UNC", ""));
+        put_out(UNC_NODE("dev", "dir", "/\\\\\\\\?\\\\UNC/dev", ""));
+        put_out(UNC_NODE("x", "dir", "/\\\\\\\\?\\\\UNC/dev/x", ""));
+        put_out(UNC_NODE("c.txt", "file", "/\\\\\\\\?\\\\UNC/dev/x/c.txt", ",\"size\":3"));
         put_out(UNC_NODE("\\\\\\\\..\\\\..", "dir", "/\\\\\\\\..\\\\..", ""));
         put_out(UNC_NODE("evil", "file", "/\\\\\\\\..\\\\../evil", ",\"size\":4"));
         put_out(UNC_NODE("\\\\\\\\srv\\\\..", "dir", "/\\\\\\\\srv\\\\..", ""));
@@ -67,11 +75,23 @@ static int fake_unc_repository(int argc, char** argv) {
         return 0;
     }
     const char* path = argv[argc - 1];
+    if (strcmp(cmd, "find") == 0) {
+        if (strcmp(path, "/*/*/srv\\share/dir/a.txt") == 0) {
+            put_out("[{\"matches\":[" UNC_MATCH("/\\\\\\\\srv\\\\share/dir/a.txt", "5") ","
+                    UNC_MATCH("/C/Users/srv/share/dir/a.txt", "9") "],\"hits\":2,\"snapshot\":\"" UNC_SNAPSHOT_ID "\"}]\n");
+        } else if (strcmp(path, "/*/*/nas\\backup/b.txt") == 0) {
+            put_out("[{\"matches\":[" UNC_MATCH("/\\\\\\\\nas\\\\backup/b.txt", "3")
+                    "],\"hits\":1,\"snapshot\":\"" UNC_SNAPSHOT_ID "\"}]\n");
+        } else {
+            put_out("[]\n");
+        }
+        return 0;
+    }
     if (strcmp(cmd, "dump") == 0 && strcmp(path, "/\\\\srv\\share/dir/a.txt") == 0) {
         put_out("share");
         return 0;
     }
-    if (strcmp(cmd, "dump") == 0 && strcmp(path, "/\\\\?\\UNC\\nas\\backup/b.txt") == 0) {
+    if (strcmp(cmd, "dump") == 0 && strcmp(path, "/\\\\nas\\backup/b.txt") == 0) {
         put_out("nas");
         return 0;
     }

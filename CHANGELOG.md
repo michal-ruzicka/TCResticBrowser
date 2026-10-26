@@ -13,11 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   backed up by its UNC path (`\\nas\media\Documents`, also given as
   `//nas/media/Documents`) below one folder named `\\nas\media`,
   backslashes included, which the plugin hid as not a single path
-  component (since v2.0.0), so such a snapshot looked empty. It is now
-  shown as `UNC\nas\media`, next to the drive letters, and browsed,
-  copied and searched for versions like a drive. A server or share name
-  that could not be one folder (`..`, `/`, `:` and the like) still hides
-  its share. restic's own `restore` fails on such snapshots, see
+  component (since v2.0.0), so such a snapshot looked empty or showed
+  only its drive letters. It is now shown as `UNC\nas\media`, next to
+  the drive letters, and browsed, copied and searched for versions like
+  a drive. A server or share name that could not be one folder (`..`,
+  `/`, `:` and the like) still hides its share. restic's own `restore`
+  fails on such snapshots on Windows, see
   [restic issue #2807](https://github.com/restic/restic/issues/2807).
 
 ## [v2.3.0] – 2026-10-26

@@ -944,18 +944,13 @@ static int unc_component(const char* p, size_t len, size_t* i, Span* out) {
 }
 
 /*
- * The volume `p` (`len` bytes) starts with, as Go's filepath.VolumeName finds it in the backslash
- * form restic stores (a device path, "\\?\" or "\\.\", only with "UNC\" after it), followed by
- * a separator or nothing: its length, or 0
+ * The "\\server\share" volume `p` (`len` bytes) starts with, as Go's filepath.VolumeName finds it in
+ * the backslash form restic stores, followed by a separator or nothing: its length, or 0. A device
+ * path ("\\?\UNC\server\share", "\\.\UNC\...") is none: its server "?" or "." is refused
  */
 static size_t parse_unc(const char* p, size_t len, UncVolume* v) {
     if (len < 3 || p[0] != '\\' || p[1] != '\\') return 0;
     size_t i = 2;
-    if (p[2] == '?' || p[2] == '.') {
-        static const Span unc = {"UNC\\", 4};
-        if (len < 8 || p[3] != '\\' || !span_eq((Span){p + 4, 4}, unc, 0)) return 0;
-        i = 8;
-    }
     if (!unc_component(p, len, &i, &v->server) || i >= len || p[i] != '\\') return 0;
     ++i;
     if (!unc_component(p, len, &i, &v->share)) return 0;
@@ -968,14 +963,18 @@ size_t snapshot_tree_unc_volume(const char* path, size_t len) {
     return path ? parse_unc(path, len, &v) : 0;
 }
 
-/* The next network share volume of a snapshot's paths (one per line) from *line on, *line moved past it */
-static int next_unc_volume(const char** line, UncVolume* v, const char** text) {
-    while (**line != '\0') {
+/*
+ * The next network share volume of a snapshot's paths (one per line) from *line on, *line moved
+ * past it; *seen counts the volumes found, none beyond SNAPSHOT_TREE_UNC_MAX_VOLUMES
+ */
+static int next_unc_volume(const char** line, UncVolume* v, const char** text, size_t* seen) {
+    while (**line != '\0' && *seen < SNAPSHOT_TREE_UNC_MAX_VOLUMES) {
         const char* start = *line;
         size_t n          = strcspn(start, "\n");
         *line             = start + n + (start[n] == '\n');
         if (parse_unc(start, n, v)) {
             *text = start;
+            ++*seen;
             return 1;
         }
     }
@@ -989,8 +988,9 @@ static int next_unc_volume(const char** line, UncVolume* v, const char** text) {
 static int find_unc(const SnapshotInfo* info, Span server, Span share, const char** text, size_t* len) {
     for (int exact = 1; exact >= 0; --exact) {
         const char* line = info->paths;
+        size_t seen      = 0;
         UncVolume v;
-        while (next_unc_volume(&line, &v, text)) {
+        while (next_unc_volume(&line, &v, text, &seen)) {
             if ((!server.p || span_eq(v.server, server, exact)) && (!share.p || span_eq(v.share, share, exact))) {
                 *len = v.len;
                 return 1;
@@ -1059,25 +1059,24 @@ size_t snapshot_tree_unc_list(const SnapshotTree* tree, const char* id, const ch
     Span server, share;
     const char* rest = NULL;
     if (!info || !path || !split_unc_path(path, &server, &share, &rest) || share.p) return 0;
+    /* Each name once, for the first volume of that name: quadratic in the names, hence their limit */
+    Span* names = (Span*)malloc(SNAPSHOT_TREE_UNC_MAX_VOLUMES * sizeof(Span));
+    if (!names) return 0;
     size_t count     = 0;
+    size_t seen      = 0;
     const char* line = info->paths;
     const char* text = NULL;
     UncVolume v;
-    while (next_unc_volume(&line, &v, &text)) {
+    while (next_unc_volume(&line, &v, &text, &seen)) {
         if (server.p && !span_eq(v.server, server, 0)) continue;
-        Span name = server.p ? v.share : v.server;
-        /* Listed once, for the first volume of that name */
-        int seen           = 0;
-        const char* before = info->paths;
-        const char* other  = NULL;
-        UncVolume w;
-        while (!seen && next_unc_volume(&before, &w, &other) && other != text) {
-            if (!server.p || span_eq(w.server, server, 0)) seen = span_eq(server.p ? w.share : w.server, name, 0);
-        }
-        if (seen) continue;
+        Span name  = server.p ? v.share : v.server;
+        int listed = 0;
+        for (size_t i = 0; i < count && !listed; ++i) listed = span_eq(names[i], name, 0);
+        if (listed) continue;
+        names[count++] = name;
         if (add) add(ctx, name.p, name.len);
-        count++;
     }
+    free(names);
     return count;
 }
 

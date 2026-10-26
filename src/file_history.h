@@ -83,7 +83,14 @@ const char* file_history_snapshot(const FileHistory* history, size_t i, size_t k
 /*
  * `path` as a restic find pattern that matches exactly that path: every '*', '?' and '[' put into
  * a character class ("[*]"), the only escape restic's patterns have on Windows, where a backslash
- * separates path components. Returns the bytes written without the NUL, or 0 when `cap` is too
- * small (the result is at most three times as long as `path`).
+ * separates path components. A network share ("/\\\\srv\\share/dir", snapshot_tree.h) gets two
+ * components "*" in place of its two leading backslashes ("/" "*" "/" "*" "/srv\\share/dir"):
+ * restic.exe splits the pattern and every path at both '/' and '\\', so the backslashes are two
+ * empty components, and an empty pattern component means "**" to restic, which would match any
+ * path ending the same way and make restic walk every snapshot whole; '*' matches the empty
+ * component and keeps the walk to two levels. The pattern then also matches the same path below
+ * any two folders ("/C/x/srv/share/dir"), which file_history_build() ignores. Returns the bytes
+ * written without the NUL, or 0 when `cap` is too small (the result is at most three times as long
+ * as `path`).
  */
 size_t file_history_pattern(const char* path, char* out, size_t cap);

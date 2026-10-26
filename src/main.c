@@ -213,9 +213,9 @@ typedef struct {
 #define REPOSITORY_ID_FILE_NAME  "repository_id.txt"
 #define REPOSITORY_ID_FILE_BYTES (RESTIC_REPOSITORY_ID_CHARS + 2)
 
-/* A subpath mapped from "\UNC\server\share\..." (a WFX path: MAX_WFX_PATH in restic_cli.c) to "/" and
-   the volume restic named, which "\\?\UNC\" makes up to four characters longer */
-#define UNC_SUBPATH_CHARS (1024 + 4)
+/* A subpath mapped from "\UNC\server\share\..." (a WFX path: MAX_WFX_PATH in restic_cli.c) to the
+   volume restic named after a '/', "/\\server\share\...": two characters shorter */
+#define UNC_SUBPATH_CHARS 1024
 #define UNC_PATH_BYTES    (UNC_SUBPATH_CHARS * 3 + 1)
 
 /* Where a path below a repository alias leads (resolve_repo_path) */
@@ -1273,7 +1273,7 @@ static void add_unc_item(void* ctx, const char* name, size_t len) {
     if (u->count >= u->cap) return;
     WIN32_FIND_DATAW* fd = &u->items[u->count];
     memset(fd, 0, sizeof(*fd));
-    int n = len < MAX_PATH ? MultiByteToWideChar(CP_UTF8, 0, name, (int)len, fd->cFileName, MAX_PATH - 1) : 0;
+    int n = len < 4 * MAX_PATH ? MultiByteToWideChar(CP_UTF8, 0, name, (int)len, fd->cFileName, MAX_PATH - 1) : 0;
     if (n <= 0) return; /* Not listed: longer than a Windows name can be */
     fd->cFileName[n]     = L'\0';
     fd->dwFileAttributes = FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY;
@@ -2098,7 +2098,7 @@ static ResticResult properties_operation(const RepoCall* call, void* ctx_ptr) {
     const WCHAR* sp = where.subpath;
     while (*sp == L'\\') sp++;
     if (*sp == L'\0' || where.unc == SNAPSHOT_UNC_FOLDER) {
-        ctx->text = describe_snapshot(call, where.snapshot_id); /* The snapshot itself, or a folder in it */
+        ctx->text = describe_snapshot(call, where.snapshot_id); /* The snapshot itself, UNC or a server */
         return RESTIC_OK;
     }
     WCHAR* parent = NULL;
@@ -2661,7 +2661,7 @@ static ResticResult get_file_operation(const RepoCall* call, void* ctx_ptr) {
     const WCHAR* sp = where.subpath;
     while (*sp == L'\\') sp++;
     if (where.kind != REPO_PATH_SNAPSHOT || *sp == L'\0' || where.unc == SNAPSHOT_UNC_FOLDER) {
-        return RESTIC_ERR_PATH_NOT_FOUND; /* A folder above the snapshots, a snapshot itself, or "UNC" in it */
+        return RESTIC_ERR_PATH_NOT_FOUND; /* Above the snapshots, a snapshot itself, UNC or a server */
     }
     /*
      * A version of a file (`<file>\<version>`): the file, from the oldest snapshot holding that

@@ -159,8 +159,8 @@ static void test_path_and_quote_helpers(void) {
     /* A network share as main.c maps it, after a '/', and paths that only look like one */
     EXPECT_TRUE(restic_normalize_filter_path(L"/\\\\srv\\share\\dir\\", norm, sizeof(norm)), "Mapped share");
     EXPECT_STR_EQ(norm, "/\\\\srv\\share/dir", "The share's volume stays one component, as restic names it");
-    EXPECT_TRUE(restic_normalize_filter_path(L"/\\\\?\\UNC\\srv\\share", norm, sizeof(norm)), "Mapped \\\\?\\UNC\\ share");
-    EXPECT_STR_EQ(norm, "/\\\\?\\UNC\\srv\\share", "... with its prefix");
+    EXPECT_TRUE(restic_normalize_filter_path(L"/\\\\?\\UNC\\srv\\share", norm, sizeof(norm)), "A device path");
+    EXPECT_STR_EQ(norm, "/?/UNC/srv/share", "... is no share: never mapped to");
     EXPECT_TRUE(restic_normalize_filter_path(L"\\\\Z\\home\\x", norm, sizeof(norm)), "Doubled leading backslash");
     EXPECT_STR_EQ(norm, "/Z/home/x", "... is no share: Total Commander's paths start with a backslash");
     EXPECT_TRUE(restic_normalize_filter_path(L"/\\\\..\\..\\x", norm, sizeof(norm)), "A share named ..");
