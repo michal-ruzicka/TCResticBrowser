@@ -100,6 +100,8 @@ Paths saved by version 2.0 (`2026-10-18_09-30-00_[a1b2c3d4]` directly in
 the repository) no longer exist; Total Commander's history and hotlist
 entries pointing there need to be recreated.
 
+![TCResticBrowser shown on demo restic repository browsing snapshots and file version history](TCResticBrowser.gif)
+
 ### Key Features
 
 - **Fast Browsing of Large and Remote Repositories:** Every `restic` run costs about a second before it prints anything (deriving the key from the password and loading the repository index), more for big or remote (e.g. S3) repositories. The plugin therefore reads each repository's snapshot list once and answers from it at once, re-reading it in the background once it is a minute old (as often as `restic mount` does), and when you enter a snapshot it reads the list of *all* its files and folders in the background with a single `restic ls`. Until that is done, each folder is listed on its own (`restic ls <snapshot> <path>`), as fast as before; afterwards every folder of the snapshot opens instantly and `restic` runs only to copy or view files. See [What Is Instant and What Takes a While](#what-is-instant-and-what-takes-a-while) and [Snapshot Cache](#snapshot-cache).
