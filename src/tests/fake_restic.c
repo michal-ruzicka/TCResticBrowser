@@ -26,6 +26,59 @@ static void put_err(const char* text) {
     fflush(stderr);
 }
 
+/*
+ * With FAKE_RESTIC_UNC set: a repository of one Windows snapshot that backed up network shares, as
+ * restic names them (test_unc_shares in test_plugin_dll.c). restic under Wine cannot make one: it
+ * opens a share as "\\?\UNC\...", which Wine does not resolve. The snapshot holds "C:\Users",
+ * "\\srv\share\dir", "\\?\UNC\nas\backup" and volumes no folder may be made of
+ * ("\\..\..\evil", "\\srv\..\up"); `ls` prints the whole snapshot whatever path it is given
+ * (the plugin keeps what is below the path, and finds nothing for a path restic would not know),
+ * `dump` knows the two files on the shares.
+ */
+#define UNC_SNAPSHOT_ID "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+#define UNC_NODE(name, type, path, extra)                                                                    \
+    "{\"name\":\"" name "\",\"type\":\"" type "\",\"path\":\"" path "\"" extra                                 \
+    ",\"mtime\":\"2026-10-20T09:00:00+02:00\",\"message_type\":\"node\",\"struct_type\":\"node\"}\n"
+
+static int fake_unc_repository(int argc, char** argv) {
+    const char* cmd = argc > 1 ? argv[1] : "";
+    if (strcmp(cmd, "snapshots") == 0) {
+        put_out("[{\"time\":\"2026-10-20T10:00:00+02:00\",\"tree\":\"00\",\"paths\":[\"C:\\\\Users\","
+                "\"\\\\\\\\srv\\\\share\\\\dir\",\"\\\\\\\\?\\\\UNC\\\\nas\\\\backup\","
+                "\"\\\\\\\\..\\\\..\\\\evil\",\"\\\\\\\\srv\\\\..\\\\up\"],"
+                "\"hostname\":\"pc\",\"username\":\"me\",\"id\":\"" UNC_SNAPSHOT_ID "\",\"short_id\":\"01234567\"}]\n");
+        return 0;
+    }
+    if (strcmp(cmd, "ls") == 0) {
+        put_out("{\"time\":\"2026-10-20T10:00:00+02:00\",\"tree\":\"00\",\"paths\":[],\"hostname\":\"pc\",\"id\":\""
+                UNC_SNAPSHOT_ID "\",\"short_id\":\"01234567\",\"message_type\":\"snapshot\","
+                "\"struct_type\":\"snapshot\"}\n");
+        put_out(UNC_NODE("C", "dir", "/C", ""));
+        put_out(UNC_NODE("Users", "dir", "/C/Users", ""));
+        put_out(UNC_NODE("\\\\\\\\srv\\\\share", "dir", "/\\\\\\\\srv\\\\share", ""));
+        put_out(UNC_NODE("dir", "dir", "/\\\\\\\\srv\\\\share/dir", ""));
+        put_out(UNC_NODE("a.txt", "file", "/\\\\\\\\srv\\\\share/dir/a.txt", ",\"size\":5"));
+        put_out(UNC_NODE("\\\\\\\\?\\\\UNC\\\\nas\\\\backup", "dir", "/\\\\\\\\?\\\\UNC\\\\nas\\\\backup", ""));
+        put_out(UNC_NODE("b.txt", "file", "/\\\\\\\\?\\\\UNC\\\\nas\\\\backup/b.txt", ",\"size\":3"));
+        put_out(UNC_NODE("\\\\\\\\..\\\\..", "dir", "/\\\\\\\\..\\\\..", ""));
+        put_out(UNC_NODE("evil", "file", "/\\\\\\\\..\\\\../evil", ",\"size\":4"));
+        put_out(UNC_NODE("\\\\\\\\srv\\\\..", "dir", "/\\\\\\\\srv\\\\..", ""));
+        put_out(UNC_NODE("up", "file", "/\\\\\\\\srv\\\\../up", ",\"size\":2"));
+        return 0;
+    }
+    const char* path = argv[argc - 1];
+    if (strcmp(cmd, "dump") == 0 && strcmp(path, "/\\\\srv\\share/dir/a.txt") == 0) {
+        put_out("share");
+        return 0;
+    }
+    if (strcmp(cmd, "dump") == 0 && strcmp(path, "/\\\\?\\UNC\\nas\\backup/b.txt") == 0) {
+        put_out("nas");
+        return 0;
+    }
+    put_err("Fatal: cannot dump file: path not found in snapshot\n");
+    return 1;
+}
+
 int main(int argc, char** argv) {
     /* The bytes must reach the dump target exactly as written, without a text-mode "\n" -> "\r\n" */
     if (_setmode(_fileno(stdout), _O_BINARY) == -1) {
@@ -33,6 +86,9 @@ int main(int argc, char** argv) {
         return 98;
     }
     const char* mode = argc > 1 ? argv[argc - 1] : "";
+    if (strcmp(mode, "version") != 0 && GetEnvironmentVariableA("FAKE_RESTIC_UNC", NULL, 0) > 0) {
+        return fake_unc_repository(argc, argv);
+    }
 
     if (strcmp(mode, "/ok") == 0) {
         put_out("hello");

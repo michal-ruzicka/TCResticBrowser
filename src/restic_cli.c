@@ -95,7 +95,19 @@ BOOL restic_normalize_filter_path(
     size_t out_idx = 0;
     out_utf8[out_idx++] = '/';
 
-    for (const char* p = raw_utf8; *p != '\0'; ++p) {
+    /*
+     * A network share mapped by main.c, after a '/' that no Total Commander path has: restic's name
+     * of the folder holding it is one component, backslashes and all
+     */
+    const char* p = raw_utf8;
+    size_t volume = raw_utf8[0] == '/' ? snapshot_tree_unc_volume(raw_utf8 + 1, strlen(raw_utf8 + 1)) : 0;
+    if (volume > 0) {
+        if (volume + 2 > out_capacity) return FALSE;
+        memcpy(out_utf8 + out_idx, raw_utf8 + 1, volume);
+        out_idx += volume;
+        p += 1 + volume;
+    }
+    for (; *p != '\0'; ++p) {
         char c = (*p == '\\') ? '/' : *p;
         if (c == '/' && out_utf8[out_idx - 1] == '/') {
             continue; /* Collapse consecutive separators */

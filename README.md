@@ -469,6 +469,7 @@ made it. Above the snapshots (the repository's folder and its files,
 | Repository folders, `🗑 Forget N Passwords` | None |
 | `hosts`, `ids`, `snapshots`, `tags`, a host's or a tag's folder | When the newest snapshot in it was taken; none if it holds no snapshot (`tags` when no snapshot has a tag) |
 | A snapshot's folder, also `latest` and `latest → …` | When the snapshot was taken |
+| `UNC` and a server's and a share's folder in a snapshot ([Network Shares](#network-shares-unc-paths)) | When the snapshot was taken |
 | Files and folders in a snapshot | Their modification time as restic recorded it (none if restic has none); creation and access time from restic's `ctime` and `atime` |
 | The versions of a file (`Alt+Enter`) | The version's modification time |
 | `snapshots.csv`, `snapshots.json` | When restic was asked for the snapshot list it is made from |
@@ -480,6 +481,39 @@ was taken, so the two differ for a snapshot from another time zone. A
 copied file (`F5`) keeps its modification time. On Linux and macOS,
 restic's `ctime` is the time a file's metadata last changed, not when it
 was created.
+
+### Network Shares (UNC Paths)
+
+A backup of a network share (`restic backup \\nas\media\Documents`, or
+`//nas/media/Documents`, which restic stores the same way) is shown inside
+the snapshot as **`UNC\<server>\<share>`**, next to the drive letters:
+
+```text
+\\\TCResticBrowser\MyLocalBackup\snapshots\2026-10-18_09-30-00\
+├── C\                       <-- C:\ as restic stores it
+└── UNC\
+    └── nas\
+        └── media\
+            └── Documents\   <-- \\nas\media\Documents
+```
+
+restic itself stores such a share as a single folder named
+`\\nas\media`, backslashes included, which is not a valid folder name on
+Windows; this is also why `restic restore` of a share fails with "invalid
+child node name" ([restic issue #2807](https://github.com/restic/restic/issues/2807)).
+The plugin shows it the way Windows itself writes the path (`\\?\UNC\nas\media`)
+and maps every path below it back to restic's name, so browsing, copying
+(`F5`), viewing and the versions of a file (`Alt+Enter`) work as on a
+drive. `UNC` and the server folder are the plugin's own: `F5` on them copies
+the shares below, and `Alt+Enter` shows the snapshot's details. Their date is
+the snapshot's.
+
+Which shares a snapshot holds is taken from the paths it backed up, so the
+plugin needs no extra restic run for it. A server or share name that is
+empty, `.` or `..`, or contains a character no Windows server or share name
+can have (`/ : * ? " < > |` or control characters), is not shown at all,
+so a damaged or forged snapshot cannot lead a copy out of the target folder.
+Shares whose names differ only in case are shown once.
 
 ### File Names from Other Systems
 
@@ -500,7 +534,9 @@ never renames anything, but it will not copy such a file under that name:
 Total Commander then reports a write error for that file. To restore a single
 such file, press `F5` on it alone and type another name in the copy dialog.
 Names containing `\` or `/`, or consisting only of dots and spaces, are not
-listed at all, so a snapshot can never make a copy leave the target folder.
+listed at all, so a snapshot can never make a copy leave the target folder;
+the one exception, the folder restic makes of a network share, is shown as
+`UNC\<server>\<share>` (see [Network Shares](#network-shares-unc-paths)).
 
 ### Configuration
 

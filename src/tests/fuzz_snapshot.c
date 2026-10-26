@@ -15,7 +15,8 @@
  * on are checked - every name is one Windows-safe path component, folders are sorted, unique and
  * found again by name, snapshot IDs are hexadecimal, snapshots.csv reads back as one record of six
  * fields per snapshot with no cell that could start with a formula, whatever the separator, every
- * version of a file has a unique name found again and lists exactly its snapshots - so a violation
+ * version of a file has a unique name found again and lists exactly its snapshots, the network
+ * shares of a snapshot are listed as safe names that map back to restic's volumes - so a violation
  * aborts like a sanitizer finding.
  */
 #include <stddef.h>
@@ -45,6 +46,68 @@ static void check_name(const char* name) {
 
 static const SnapshotTree* g_tree; /* The tree walk_tree() is in */
 
+/* A server or share name of UNC\<server>\<share>: one component that is not "." or ".." */
+static void check_unc_name(const char* name, size_t len) {
+    CHECK(len > 0);
+    int plain = 0;
+    for (size_t i = 0; i < len; ++i) {
+        unsigned char c = (unsigned char)name[i];
+        CHECK(c >= 0x20 && c != 0x7F && !strchr("\\/:*?\"<>|", c));
+        if (c != '.' && c != ' ') plain = 1;
+    }
+    CHECK(plain);
+}
+
+typedef struct {
+    const char* id;
+    const char* server;
+    size_t server_len;
+} UncWalk;
+
+/* "UNC/<server>/<share>/x" maps to restic's "/<volume>/x" */
+static void check_unc_share(void* ctx, const char* name, size_t len) {
+    const UncWalk* w = (const UncWalk*)ctx;
+    check_unc_name(name, len);
+    size_t cap = w->server_len + len + 16;
+    char* path = (char*)malloc(cap);
+    char* out  = (char*)malloc(cap + 16);
+    CHECK(path && out);
+    memcpy(path, "/UNC/", 5);
+    memcpy(path + 5, w->server, w->server_len);
+    path[5 + w->server_len] = '/';
+    memcpy(path + 6 + w->server_len, name, len);
+    memcpy(path + 6 + w->server_len + len, "/x", 3);
+    CHECK(snapshot_tree_unc_path(g_tree, w->id, path, out, cap + 16) == SNAPSHOT_UNC_MAPPED);
+    size_t volume = snapshot_tree_unc_volume(out + 1, strlen(out + 1));
+    CHECK(out[0] == '/' && volume > 0 && strcmp(out + 1 + volume, "/x") == 0);
+    free(path);
+    free(out);
+}
+
+/* "UNC/<server>" is a folder listing at least one share */
+static void check_unc_server(void* ctx, const char* name, size_t len) {
+    const UncWalk* w = (const UncWalk*)ctx;
+    check_unc_name(name, len);
+    char* path = (char*)malloc(len + 6);
+    CHECK(path != NULL);
+    memcpy(path, "/UNC/", 5);
+    memcpy(path + 5, name, len);
+    path[5 + len] = '\0';
+    char out[8];
+    CHECK(snapshot_tree_unc_path(g_tree, w->id, path, out, sizeof(out)) == SNAPSHOT_UNC_FOLDER);
+    UncWalk shares = {w->id, name, len};
+    CHECK(snapshot_tree_unc_list(g_tree, w->id, path, check_unc_share, &shares) > 0);
+    free(path);
+}
+
+/* The network shares of a snapshot: listed under UNC exactly when its root says so */
+static void check_unc(const char* id) {
+    char out[8];
+    UncWalk w      = {id, NULL, 0};
+    size_t servers = snapshot_tree_unc_list(g_tree, id, "/UNC", check_unc_server, &w);
+    CHECK((servers > 0) == (snapshot_tree_unc_path(g_tree, id, "/", out, sizeof(out)) == SNAPSHOT_UNC_ROOT));
+}
+
 static void walk_tree(const SnapshotNode* dir, int depth) {
     CHECK(depth <= 3); /* root / hosts|tags / <host|tag> / <snapshot> */
     for (size_t i = 0; i < dir->child_count; ++i) {
@@ -57,6 +120,7 @@ static void walk_tree(const SnapshotNode* dir, int depth) {
             CHECK(n >= SNAPSHOT_TREE_SHORT_ID_CHARS && n <= SNAPSHOT_TREE_ID_CHARS);
             CHECK(strspn(c->snapshot_id, "0123456789abcdef") == n && c->child_count == 0);
             CHECK(dir->time >= c->time);
+            check_unc(c->snapshot_id);
             /* The properties of a snapshot: lines of text, the first naming it */
             char* text = snapshot_tree_describe(g_tree, c->snapshot_id);
             if (text) {

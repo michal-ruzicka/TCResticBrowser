@@ -145,7 +145,7 @@ build\x86\test_plugin_dll.exe
 
 `src\tests\fuzz_json.c` is a libFuzzer target for the JSON reader, and
 `src\tests\fuzz_snapshot.c` one for the parsers that turn restic's output
-into the snapshot tree, the whole-snapshot index and a file's versions. They are not part of
+into the snapshot tree (with its network shares), the whole-snapshot index and a file's versions. They are not part of
 `build.cmd` because they need a fuzzing-capable compiler; their headers show
 how to build and run them with clang.
 

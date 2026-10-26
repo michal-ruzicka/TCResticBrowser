@@ -2143,6 +2143,141 @@ static void test_old_restic_refused(void) {
     delete_tree(dir);
 }
 
+static void print_failure_context(const WCHAR* log_file);
+static BOOL path_next_to_exe(const WCHAR* name, WCHAR* out, size_t cap);
+
+/* What test_unc_shares expects of the snapshot of network shares, listed by restic or from memory */
+static void check_unc_listings(const Plugin* p, const WCHAR* snap, const char* how) {
+    static WCHAR path[MAX_PATH], names[1024];
+    char what[160];
+    WIN32_FIND_DATAW fd;
+    snprintf(what, sizeof(what), "The snapshot's root holds C and UNC, no volume of a share (%s)", how);
+    EXPECT_TRUE(list_names(p, snap, names, _countof(names)) && wcscmp(names, L"C|UNC") == 0, what);
+    swprintf_s(path, _countof(path), L"%ls\\UNC", snap);
+    snprintf(what, sizeof(what), "UNC lists the servers, not .. (%s)", how);
+    EXPECT_TRUE(list_names(p, path, names, _countof(names)) && wcscmp(names, L"srv|nas") == 0, what);
+    swprintf_s(path, _countof(path), L"%ls\\UNC\\srv", snap);
+    snprintf(what, sizeof(what), "UNC\\srv lists its share, not .. (%s)", how);
+    EXPECT_TRUE(list_names(p, path, names, _countof(names)) && wcscmp(names, L"share") == 0, what);
+    swprintf_s(path, _countof(path), L"%ls\\UNC\\srv\\share\\dir", snap);
+    HANDLE h = p->find_first_w(path, &fd);
+    snprintf(what, sizeof(what), "A folder on \\\\srv\\share is listed with its file (%s)", how);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE && wcscmp(fd.cFileName, L"a.txt") == 0 && fd.nFileSizeLow == 5 &&
+                    !p->find_next_w(h, &fd),
+                what);
+    if (h != INVALID_HANDLE_VALUE) p->find_close(h);
+    swprintf_s(path, _countof(path), L"%ls\\unc\\SRV\\Share\\dir", snap);
+    snprintf(what, sizeof(what), "... also typed in another case (%s)", how);
+    EXPECT_TRUE(list_names(p, path, names, _countof(names)) && wcscmp(names, L"a.txt") == 0, what);
+    swprintf_s(path, _countof(path), L"%ls\\UNC\\nas\\backup", snap);
+    snprintf(what, sizeof(what), "\\\\?\\UNC\\nas\\backup is UNC\\nas\\backup (%s)", how);
+    EXPECT_TRUE(list_names(p, path, names, _countof(names)) && wcscmp(names, L"b.txt") == 0, what);
+    static const WCHAR* const hidden[] = {L"\\UNC\\..", L"\\UNC\\..\\..", L"\\UNC\\srv\\..", L"\\UNC\\nas\\none",
+                                          L"\\UNC\\none", L"\\UNC\\srv\\share\\none"};
+    for (size_t i = 0; i < _countof(hidden); ++i) {
+        swprintf_s(path, _countof(path), L"%ls%ls", snap, hidden[i]);
+        snprintf(what, sizeof(what), "%ls is not found (%s)", hidden[i], how);
+        EXPECT_TRUE(p->find_first_w(path, &fd) == INVALID_HANDLE_VALUE, what);
+    }
+}
+
+/* The checks of test_unc_shares, with fake_restic.exe playing the repository of network shares */
+static void unc_shares_scenario(const Plugin* pp, const WCHAR* dir, const WCHAR* log_file) {
+    static WCHAR local[MAX_PATH], path[MAX_PATH];
+    const Plugin p = *pp;
+    swprintf_s(local, MAX_PATH, L"%ls\\copy", dir);
+    delete_tree(local);
+    g_e2e_pwd_mode    = 1;
+    g_e2e_msg_dialogs = 0;
+    const WCHAR* snap = L"\\Shares\\ids\\01234567";
+    int failed        = g_tests_failed;
+    check_unc_listings(&p, snap, "listed by restic");
+    if (g_tests_failed > failed) return;
+
+    /* F5 on UNC: what Total Commander writes is named only after what the plugin listed */
+    int dirs = 0, files = 0;
+    swprintf_s(path, MAX_PATH, L"%ls\\UNC", snap);
+    EXPECT_TRUE(tc_copy_folder_recursive(&p, path, local, &dirs, &files) && dirs == 6 && files == 2,
+                "UNC is copied with F5: 5 folders below it and the 2 files on the shares");
+    swprintf_s(path, MAX_PATH, L"%ls\\srv\\share\\dir\\a.txt", local);
+    EXPECT_TRUE(file_has_text(path, "share"), "... the file on \\\\srv\\share from restic's /\\\\srv\\share/dir/a.txt");
+    swprintf_s(path, MAX_PATH, L"%ls\\nas\\backup\\b.txt", local);
+    EXPECT_TRUE(file_has_text(path, "nas"), "... the one on \\\\?\\UNC\\nas\\backup from its own folder");
+    swprintf_s(path, MAX_PATH, L"%ls\\evil", dir);
+    WCHAR up[MAX_PATH];
+    swprintf_s(up, MAX_PATH, L"%ls\\up", local);
+    EXPECT_TRUE(GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES && GetFileAttributesW(up) == INVALID_FILE_ATTRIBUTES,
+                "... and nothing of the volumes named with ..");
+    RemoteInfo ri;
+    memset(&ri, 0, sizeof(ri));
+    swprintf_s(path, MAX_PATH, L"%ls\\UNC", snap);
+    EXPECT_TRUE(p.get_file_w(path, up, FS_COPYFLAGS_OVERWRITE, &ri) == FS_FILE_NOTFOUND &&
+                    GetFileAttributesW(up) == INVALID_FILE_ATTRIBUTES,
+                "UNC itself is no file to copy");
+
+    /* Alt+Enter on the folders only the plugin shows: the snapshot's details, as on any folder in it */
+    WCHAR properties[] = L"properties";
+    swprintf_s(path, MAX_PATH, L"%ls\\UNC\\srv", snap);
+    EXPECT_TRUE(p.execute_w(NULL, path, properties) == FS_EXEC_OK && g_e2e_msg_dialogs == 1 &&
+                    wcsstr(g_e2e_last_msg, L"\\\\srv\\share\\dir") != NULL,
+                "Alt+Enter on UNC\\srv shows the snapshot's details, its paths among them");
+
+    /* The same once the whole snapshot is read */
+    BOOL read = FALSE;
+    for (int i = 0; i < 150 && !read; ++i) {
+        char* text = read_text_file(log_file);
+        read = text && strstr(text, "Listing of snapshot ") && strstr(text, " read: ");
+        free(text);
+        if (!read) Sleep(200);
+    }
+    EXPECT_TRUE(read, "The snapshot of network shares was read in the background");
+    int runs = count_restic_runs(log_file);
+    check_unc_listings(&p, snap, "from memory");
+    if (g_tests_failed > failed) return;
+    EXPECT_TRUE(count_restic_runs(log_file) == runs, "... without running restic");
+    EXPECT_TRUE(g_e2e_msg_dialogs == 1, "No error dialog on the way");
+}
+
+/*
+ * Network shares in a snapshot (snapshot_tree.h): restic names the folder of "\\\\srv\\share"
+ * "\\\\srv\\share", which is shown as UNC\\srv\\share; volumes whose server or share is ".." are
+ * not shown at all. fake_restic.exe plays the repository (FAKE_RESTIC_UNC): restic under Wine cannot
+ * back a share up.
+ */
+static void test_unc_shares(void) {
+    static WCHAR fake[MAX_PATH], dir[MAX_PATH], ini[MAX_PATH], log_file[MAX_PATH];
+    if (!path_next_to_exe(L"fake_restic.exe", fake, MAX_PATH) || GetFileAttributesW(fake) == INVALID_FILE_ATTRIBUTES) {
+        printf("[SKIP] fake_restic.exe not found next to the test: network share test skipped.\n");
+        return;
+    }
+    EXPECT_TRUE(make_unique_dir(L"restic_dll_unc", dir, MAX_PATH), "Create plugin directory (network shares)");
+    swprintf_s(ini, MAX_PATH, L"%ls\\TCResticBrowser.ini", dir);
+    swprintf_s(log_file, MAX_PATH, L"%ls\\unc.log", dir);
+    DeleteFileW(log_file); /* Left by a run that stopped early: the directory is named after the process ID */
+    char fake_u8[MAX_PATH * 3] = {0}, log_u8[MAX_PATH * 3] = {0};
+    WideCharToMultiByte(CP_UTF8, 0, fake, -1, fake_u8, sizeof(fake_u8), NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, log_file, -1, log_u8, sizeof(log_u8), NULL, NULL);
+    static char ini_text[2048];
+    int n = snprintf(ini_text, sizeof(ini_text),
+                     "[Settings]\r\nResticPath=%s\r\nConnectionLog=off\r\n[Logging]\r\nLogPath=%s\r\n"
+                     "[Repositories]\r\nShares=C:\\no_such_restic_repo_999\r\n",
+                     fake_u8, log_u8);
+    EXPECT_TRUE(n > 0 && (size_t)n < sizeof(ini_text) && write_file(ini, ini_text), "Write INI (network shares)");
+
+    Plugin p;
+    EXPECT_TRUE(load_plugin_copy(dir, &p), "Load plugin copy (network shares)");
+    EXPECT_TRUE(p.init_w(46, (void*)e2e_progress_proc, (void*)e2e_log_proc, (void*)e2e_request_proc) == 0,
+                "Register Total Commander callbacks (network shares)");
+    int failed = g_tests_failed;
+    SetEnvironmentVariableW(L"FAKE_RESTIC_UNC", L"1");
+    unc_shares_scenario(&p, dir, log_file);
+    SetEnvironmentVariableW(L"FAKE_RESTIC_UNC", NULL); /* Whatever failed: the later tests run the real restic */
+    if (g_tests_failed > failed) print_failure_context(log_file);
+
+    unload_plugin_copy(&p, dir);
+    delete_tree(dir);
+}
+
 /* Lists \<alias>\snapshots; TRUE when it worked and has a latest folder */
 static BOOL lists_snapshots(const Plugin* p, const WCHAR* alias) {
     WCHAR path[MAX_PATH];
@@ -2778,6 +2913,7 @@ int main(void) {
     test_live_paths_with_spaces();
     test_live_repository_settings();
     test_old_restic_refused();
+    test_unc_shares();
     test_live_rclone_repository();
     test_live_s3_repository();
 

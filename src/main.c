@@ -213,6 +213,11 @@ typedef struct {
 #define REPOSITORY_ID_FILE_NAME  "repository_id.txt"
 #define REPOSITORY_ID_FILE_BYTES (RESTIC_REPOSITORY_ID_CHARS + 2)
 
+/* A subpath mapped from "\UNC\server\share\..." (a WFX path: MAX_WFX_PATH in restic_cli.c) to "/" and
+   the volume restic named, which "\\?\UNC\" makes up to four characters longer */
+#define UNC_SUBPATH_CHARS (1024 + 4)
+#define UNC_PATH_BYTES    (UNC_SUBPATH_CHARS * 3 + 1)
+
 /* Where a path below a repository alias leads (resolve_repo_path) */
 typedef enum {
     REPO_PATH_FOLDER = 0, /* A folder of the restic mount tree above the snapshots */
@@ -227,10 +232,13 @@ typedef struct {
     WIN32_FIND_DATAW* items; /* REPO_PATH_FOLDER when a listing was asked for: heap array */
     size_t count;
     char snapshot_id[SNAPSHOT_TREE_ID_CHARS + 1];
-    const WCHAR* subpath;    /* REPO_PATH_SNAPSHOT: L"" or "\..." inside the snapshot */
+    const WCHAR* subpath;    /* REPO_PATH_SNAPSHOT: L"" or "\..." inside the snapshot, as restic names it */
     char* file;              /* REPO_PATH_LIST_FILE: the file's content (heap) */
     size_t file_len;
     uint64_t file_time;      /* REPO_PATH_LIST_FILE: when restic listed the snapshots (FILETIME ticks) */
+    SnapshotUncKind unc;     /* REPO_PATH_SNAPSHOT: what the path is to the snapshot's network shares */
+    uint64_t snapshot_time;  /* REPO_PATH_SNAPSHOT: the snapshot's time, that of the UNC folders */
+    WCHAR unc_subpath[UNC_SUBPATH_CHARS]; /* SNAPSHOT_UNC_MAPPED: subpath, "/\\server\share\..." */
 } RepoPath;
 
 /*
@@ -1253,12 +1261,79 @@ static ResticResult tree_folder_items(const SnapshotNode* dir, BOOL repo_folder,
     return RESTIC_OK;
 }
 
+/* The folders of a SNAPSHOT_UNC_FOLDER, made by snapshot_tree_unc_list() */
+typedef struct {
+    WIN32_FIND_DATAW* items;
+    size_t count, cap;
+    uint64_t time;
+} UncItems;
+
+static void add_unc_item(void* ctx, const char* name, size_t len) {
+    UncItems* u = (UncItems*)ctx;
+    if (u->count >= u->cap) return;
+    WIN32_FIND_DATAW* fd = &u->items[u->count];
+    memset(fd, 0, sizeof(*fd));
+    int n = len < MAX_PATH ? MultiByteToWideChar(CP_UTF8, 0, name, (int)len, fd->cFileName, MAX_PATH - 1) : 0;
+    if (n <= 0) return; /* Not listed: longer than a Windows name can be */
+    fd->cFileName[n]     = L'\0';
+    fd->dwFileAttributes = FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY;
+    set_find_time(fd, u->time);
+    u->count++;
+}
+
+/*
+ * Maps the path inside a snapshot that walk_tree() found to the snapshot's network shares
+ * (snapshot_tree.h): "\UNC\server\share\..." to the folder restic named "\\server\share", after a
+ * '/' that marks it for restic_normalize_filter_path; "\UNC" and "\UNC\server" are listed into
+ * out->items when `want_items` is set
+ */
+static ResticResult map_unc_path(const SnapshotTree* tree, BOOL want_items, RepoPath* out) {
+    Timestamp t;
+    out->snapshot_time = snapshot_tree_snapshot_time(tree, out->snapshot_id, &t) ? t.utc_ticks : 0;
+    char* path         = (char*)malloc(UNC_PATH_BYTES);
+    char* mapped       = (char*)malloc(UNC_PATH_BYTES);
+    ResticResult res   = RESTIC_ERR_OUT_OF_MEMORY;
+    if (!path || !mapped) goto done;
+    res = RESTIC_OK;
+    /* A path that cannot be normalized is left to the operation, which refuses it */
+    if (!restic_normalize_filter_path(out->subpath, path, UNC_PATH_BYTES)) goto done;
+    out->unc = snapshot_tree_unc_path(tree, out->snapshot_id, path, mapped, UNC_PATH_BYTES);
+    if (out->unc == SNAPSHOT_UNC_TOO_LONG) {
+        res = RESTIC_ERR_INVALID_ARG;
+    } else if (out->unc == SNAPSHOT_UNC_MAPPED) {
+        /* Back to a subpath ("/\\server\share/a" -> "/\\server\share\a", which split_subpath() splits as
+           any), which restic_normalize_filter_path turns into `mapped` again */
+        if (MultiByteToWideChar(CP_UTF8, 0, mapped, -1, out->unc_subpath, UNC_SUBPATH_CHARS) <= 0) {
+            res = RESTIC_ERR_INVALID_ARG;
+            goto done;
+        }
+        for (WCHAR* c = out->unc_subpath + 1; *c != L'\0'; ++c) {
+            if (*c == L'/') *c = L'\\';
+        }
+        out->subpath = out->unc_subpath;
+    } else if (out->unc == SNAPSHOT_UNC_FOLDER && want_items) {
+        size_t n   = snapshot_tree_unc_list(tree, out->snapshot_id, path, NULL, NULL);
+        UncItems u = {(WIN32_FIND_DATAW*)calloc(n > 0 ? n : 1, sizeof(WIN32_FIND_DATAW)), 0, n, out->snapshot_time};
+        if (!u.items) {
+            res = RESTIC_ERR_OUT_OF_MEMORY;
+            goto done;
+        }
+        snapshot_tree_unc_list(tree, out->snapshot_id, path, add_unc_item, &u);
+        out->items = u.items;
+        out->count = u.count;
+    }
+done:
+    free(path);
+    free(mapped);
+    return res;
+}
+
 /*
  * Follows `rest` (L"" or "\...") through the tree. The first component that reaches a snapshot
- * ends the walk: the remainder is the path inside it. A folder is listed into out->items when
- * `want_items` is set; SNAPSHOT_TREE_CSV_NAME in the repository's folder is generated into
- * out->file, with `csv_sep` between the fields, SNAPSHOT_TREE_JSON_NAME there copied into it, and
- * REPOSITORY_ID_FILE_NAME there is recognised.
+ * ends the walk: the remainder is the path inside it, mapped by map_unc_path(). A folder is listed
+ * into out->items when `want_items` is set; SNAPSHOT_TREE_CSV_NAME in the repository's folder is
+ * generated into out->file, with `csv_sep` between the fields, SNAPSHOT_TREE_JSON_NAME there copied
+ * into it, and REPOSITORY_ID_FILE_NAME there is recognised.
  */
 static ResticResult walk_tree(const SnapshotTree* tree, const WCHAR* rest, BOOL want_items, char csv_sep,
                               RepoPath* out) {
@@ -1304,7 +1379,7 @@ static ResticResult walk_tree(const SnapshotTree* tree, const WCHAR* rest, BOOL 
             out->kind = REPO_PATH_SNAPSHOT;
             strcpy_s(out->snapshot_id, sizeof(out->snapshot_id), node->snapshot_id);
             out->subpath = p;
-            return RESTIC_OK;
+            return map_unc_path(tree, want_items, out);
         }
     }
     out->kind = REPO_PATH_FOLDER;
@@ -1639,6 +1714,25 @@ static ResticResult find_version(const RepoCall* call, const char* snapshot_id, 
     return RESTIC_ERR_PATH_NOT_FOUND;
 }
 
+/*
+ * Adds the folder of a snapshot's network shares, SNAPSHOT_TREE_UNC_NAME, to the listing of its
+ * root, unless something of that name is there already
+ */
+static ResticResult add_unc_folder(WIN32_FIND_DATAW** items, size_t* count, uint64_t time) {
+    for (size_t i = 0; i < *count; ++i) {
+        if (_wcsicmp((*items)[i].cFileName, L"" SNAPSHOT_TREE_UNC_NAME) == 0) return RESTIC_OK;
+    }
+    WIN32_FIND_DATAW* grown = (WIN32_FIND_DATAW*)realloc(*items, (*count + 1) * sizeof(WIN32_FIND_DATAW));
+    if (!grown) return RESTIC_ERR_OUT_OF_MEMORY;
+    *items                = grown;
+    WIN32_FIND_DATAW* fd = &grown[(*count)++];
+    memset(fd, 0, sizeof(*fd));
+    wcscpy_s(fd->cFileName, MAX_PATH, L"" SNAPSHOT_TREE_UNC_NAME);
+    fd->dwFileAttributes = FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY;
+    set_find_time(fd, time);
+    return RESTIC_OK;
+}
+
 /* FsFindFirstW below a repository alias */
 typedef struct {
     const WCHAR* rest;
@@ -1669,6 +1763,11 @@ static ResticResult list_operation(const RepoCall* call, void* ctx_ptr) {
         }
         case REPO_PATH_SNAPSHOT: {
             strcpy_s(ctx->snapshot_id, sizeof(ctx->snapshot_id), where.snapshot_id);
+            if (where.unc == SNAPSHOT_UNC_FOLDER) { /* Listed from the snapshot's paths */
+                ctx->items = where.items;
+                ctx->count = where.count;
+                return RESTIC_OK;
+            }
             /* The whole snapshot read before: no restic at all */
             const SnapshotIndex* index =
                 call->trusted ? repo_cache_lock_index(call->repo->alias, call->repo->target, where.snapshot_id) : NULL;
@@ -1700,6 +1799,9 @@ static ResticResult list_operation(const RepoCall* call, void* ctx_ptr) {
                 } else if (found != RESTIC_ERR_PATH_NOT_FOUND) {
                     res = found;
                 }
+            }
+            if (res == RESTIC_OK && where.unc == SNAPSHOT_UNC_ROOT) {
+                res = add_unc_folder(&ctx->items, &ctx->count, where.snapshot_time);
             }
             return res;
         }
@@ -1995,8 +2097,8 @@ static ResticResult properties_operation(const RepoCall* call, void* ctx_ptr) {
 
     const WCHAR* sp = where.subpath;
     while (*sp == L'\\') sp++;
-    if (*sp == L'\0') {
-        ctx->text = describe_snapshot(call, where.snapshot_id); /* The snapshot itself */
+    if (*sp == L'\0' || where.unc == SNAPSHOT_UNC_FOLDER) {
+        ctx->text = describe_snapshot(call, where.snapshot_id); /* The snapshot itself, or a folder in it */
         return RESTIC_OK;
     }
     WCHAR* parent = NULL;
@@ -2558,8 +2660,8 @@ static ResticResult get_file_operation(const RepoCall* call, void* ctx_ptr) {
     }
     const WCHAR* sp = where.subpath;
     while (*sp == L'\\') sp++;
-    if (where.kind != REPO_PATH_SNAPSHOT || *sp == L'\0') {
-        return RESTIC_ERR_PATH_NOT_FOUND; /* A folder above the snapshots, or a snapshot itself */
+    if (where.kind != REPO_PATH_SNAPSHOT || *sp == L'\0' || where.unc == SNAPSHOT_UNC_FOLDER) {
+        return RESTIC_ERR_PATH_NOT_FOUND; /* A folder above the snapshots, a snapshot itself, or "UNC" in it */
     }
     /*
      * A version of a file (`<file>\<version>`): the file, from the oldest snapshot holding that

@@ -900,6 +900,187 @@ static int ascii_casecmp(const char* a, const char* b) {
     }
 }
 
+/* Bytes of text, not NUL-terminated */
+typedef struct {
+    const char* p;
+    size_t len;
+} Span;
+
+/* `a` and `b` byte for byte (`exact`) or ignoring ASCII case */
+static int span_eq(Span a, Span b, int exact) {
+    if (a.len != b.len) return 0;
+    if (exact) return memcmp(a.p, b.p, a.len) == 0;
+    for (size_t i = 0; i < a.len; ++i) {
+        int ca = (unsigned char)a.p[i], cb = (unsigned char)b.p[i];
+        if (ca >= 'A' && ca <= 'Z') ca += 'a' - 'A';
+        if (cb >= 'A' && cb <= 'Z') cb += 'a' - 'A';
+        if (ca != cb) return 0;
+    }
+    return 1;
+}
+
+/* A network share volume at the start of a path */
+typedef struct {
+    Span server, share;
+    size_t len; /* The whole volume, prefix included */
+} UncVolume;
+
+/*
+ * The server or share name at p[*i], up to a separator or the end, *i moved past it: 0 when it
+ * cannot name a folder (empty, only dots and spaces, a control character or one of : * ? " < > |,
+ * which no Windows server or share name has)
+ */
+static int unc_component(const char* p, size_t len, size_t* i, Span* out) {
+    out->p    = p + *i;
+    int plain = 0;
+    while (*i < len && p[*i] != '\\' && p[*i] != '/') {
+        unsigned char c = (unsigned char)p[*i];
+        if (c < 0x20 || c == 0x7F || strchr(":*?\"<>|", c)) return 0;
+        if (c != '.' && c != ' ') plain = 1;
+        ++*i;
+    }
+    out->len = (size_t)(p + *i - out->p);
+    return plain;
+}
+
+/*
+ * The volume `p` (`len` bytes) starts with, as Go's filepath.VolumeName finds it in the backslash
+ * form restic stores (a device path, "\\?\" or "\\.\", only with "UNC\" after it), followed by
+ * a separator or nothing: its length, or 0
+ */
+static size_t parse_unc(const char* p, size_t len, UncVolume* v) {
+    if (len < 3 || p[0] != '\\' || p[1] != '\\') return 0;
+    size_t i = 2;
+    if (p[2] == '?' || p[2] == '.') {
+        static const Span unc = {"UNC\\", 4};
+        if (len < 8 || p[3] != '\\' || !span_eq((Span){p + 4, 4}, unc, 0)) return 0;
+        i = 8;
+    }
+    if (!unc_component(p, len, &i, &v->server) || i >= len || p[i] != '\\') return 0;
+    ++i;
+    if (!unc_component(p, len, &i, &v->share)) return 0;
+    v->len = i;
+    return i;
+}
+
+size_t snapshot_tree_unc_volume(const char* path, size_t len) {
+    UncVolume v;
+    return path ? parse_unc(path, len, &v) : 0;
+}
+
+/* The next network share volume of a snapshot's paths (one per line) from *line on, *line moved past it */
+static int next_unc_volume(const char** line, UncVolume* v, const char** text) {
+    while (**line != '\0') {
+        const char* start = *line;
+        size_t n          = strcspn(start, "\n");
+        *line             = start + n + (start[n] == '\n');
+        if (parse_unc(start, n, v)) {
+            *text = start;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/*
+ * The first volume of the snapshot's paths on `server` (any when its p is NULL) with `share` (any
+ * when its p is NULL), byte for byte if there is one, else ignoring ASCII case; 0 when none
+ */
+static int find_unc(const SnapshotInfo* info, Span server, Span share, const char** text, size_t* len) {
+    for (int exact = 1; exact >= 0; --exact) {
+        const char* line = info->paths;
+        UncVolume v;
+        while (next_unc_volume(&line, &v, text)) {
+            if ((!server.p || span_eq(v.server, server, exact)) && (!share.p || span_eq(v.share, share, exact))) {
+                *len = v.len;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/* The next component of a "/a/b" path at *p, *p moved past it; 0 at the end */
+static int next_component(const char** p, Span* out) {
+    if (**p != '/') return 0;
+    out->p = ++*p;
+    while (**p != '\0' && **p != '/') ++*p;
+    out->len = (size_t)(*p - out->p);
+    return out->len > 0;
+}
+
+/*
+ * Splits a path below "/UNC" into the server and share it names (p NULL for those it does not);
+ * 0 when it is not below "/UNC". *rest is what follows the share.
+ */
+static int split_unc_path(const char* path, Span* server, Span* share, const char** rest) {
+    static const Span unc = {SNAPSHOT_TREE_UNC_NAME, sizeof(SNAPSHOT_TREE_UNC_NAME) - 1};
+    Span first;
+    const char* p = path;
+    server->p = share->p = NULL;
+    server->len = share->len = 0;
+    if (!next_component(&p, &first) || !span_eq(first, unc, 0)) return 0;
+    if (next_component(&p, server)) {
+        if (!next_component(&p, share)) share->p = NULL;
+    } else {
+        server->p = NULL;
+    }
+    *rest = p;
+    return 1;
+}
+
+SnapshotUncKind snapshot_tree_unc_path(const SnapshotTree* tree, const char* id, const char* path, char* out,
+                                       size_t cap) {
+    if (out && cap > 0) out[0] = '\0';
+    const SnapshotInfo* info = find_info(tree, id);
+    if (!info || !path || !out) return SNAPSHOT_UNC_NONE;
+    static const Span any = {NULL, 0};
+    const char* text = NULL;
+    size_t len       = 0;
+    if (strcmp(path, "/") == 0) return find_unc(info, any, any, &text, &len) ? SNAPSHOT_UNC_ROOT : SNAPSHOT_UNC_NONE;
+
+    Span server, share;
+    const char* rest = NULL;
+    if (!split_unc_path(path, &server, &share, &rest) || !find_unc(info, server, share, &text, &len)) {
+        return SNAPSHOT_UNC_NONE;
+    }
+    if (!share.p) return SNAPSHOT_UNC_FOLDER;
+    size_t rest_len = strlen(rest);
+    if (len + rest_len + 2 > cap) return SNAPSHOT_UNC_TOO_LONG;
+    out[0] = '/';
+    memcpy(out + 1, text, len);
+    memcpy(out + 1 + len, rest, rest_len + 1);
+    return SNAPSHOT_UNC_MAPPED;
+}
+
+size_t snapshot_tree_unc_list(const SnapshotTree* tree, const char* id, const char* path,
+                              void (*add)(void* ctx, const char* name, size_t len), void* ctx) {
+    const SnapshotInfo* info = find_info(tree, id);
+    Span server, share;
+    const char* rest = NULL;
+    if (!info || !path || !split_unc_path(path, &server, &share, &rest) || share.p) return 0;
+    size_t count     = 0;
+    const char* line = info->paths;
+    const char* text = NULL;
+    UncVolume v;
+    while (next_unc_volume(&line, &v, &text)) {
+        if (server.p && !span_eq(v.server, server, 0)) continue;
+        Span name = server.p ? v.share : v.server;
+        /* Listed once, for the first volume of that name */
+        int seen           = 0;
+        const char* before = info->paths;
+        const char* other  = NULL;
+        UncVolume w;
+        while (!seen && next_unc_volume(&before, &w, &other) && other != text) {
+            if (!server.p || span_eq(w.server, server, 0)) seen = span_eq(server.p ? w.share : w.server, name, 0);
+        }
+        if (seen) continue;
+        if (add) add(ctx, name.p, name.len);
+        count++;
+    }
+    return count;
+}
+
 const SnapshotNode* snapshot_tree_child(const SnapshotNode* dir, const char* name) {
     if (!dir || !name || dir->snapshot_id) return NULL;
     size_t lo = 0, hi = dir->child_count;
