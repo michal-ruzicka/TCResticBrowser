@@ -17,6 +17,7 @@
 #include <string.h>
 #include <wchar.h>
 #include "fsplugin.h"
+#include "file_history.h"
 #include "restic_cli.h"
 #include "repo_cache.h"
 
@@ -261,7 +262,7 @@ static void test_parse_ls_ndjson(void) {
         "{\"name\":\"link\",\"type\":\"symlink\",\"path\":\"/tmp/sample_data/link\",\"mtime\":\"garbage\",\"message_type\":\"node\"}\r\n"
         "{\"name\":\"empty.txt\",\"type\":\"file\",\"path\":\"/tmp/sample_data/empty.txt\",\"size\":0,\"message_type\":\"node\"}";
 
-    res = restic_parse_ls_ndjson(sample, "/tmp/sample_data", &items, &count);
+    res = restic_parse_ls_ndjson(sample, "/tmp/sample_data", &items, &count, NULL);
     EXPECT_TRUE(res == RESTIC_OK, "Parse NDJSON stream");
     EXPECT_TRUE(count == 4, "big_archive.tar, sub1, link and empty.txt only");
     const WIN32_FIND_DATAW* big = find_entry(items, count, L"big_archive.tar");
@@ -286,10 +287,10 @@ static void test_parse_ls_ndjson(void) {
     /* Root listing needs no self node */
     res = restic_parse_ls_ndjson(HEADER_LINE
         "{\"name\":\"C\",\"type\":\"dir\",\"path\":\"/C\",\"message_type\":\"node\"}\r\n",
-        "/", &items, &count);
+        "/", &items, &count, NULL);
     EXPECT_TRUE(res == RESTIC_OK && count == 1 && wcscmp(items[0].cFileName, L"C") == 0, "Root listing");
     free(items);
-    res = restic_parse_ls_ndjson(HEADER_LINE, "/", &items, &count);
+    res = restic_parse_ls_ndjson(HEADER_LINE, "/", &items, &count, NULL);
     EXPECT_TRUE(res == RESTIC_OK && count == 0 && items == NULL, "Empty snapshot root is valid");
 
     /* Names that would break Total Commander's navigation are never reported */
@@ -298,7 +299,7 @@ static void test_parse_ls_ndjson(void) {
         "{\"name\":\".\",\"type\":\"dir\",\"path\":\"/.\",\"message_type\":\"node\"}\r\n"
         "{\"name\":\"..\",\"type\":\"dir\",\"path\":\"/..\",\"message_type\":\"node\"}\r\n"
         "{\"name\":\"ok.txt\",\"type\":\"file\",\"path\":\"/ok.txt\",\"message_type\":\"node\"}\r\n",
-        "/", &items, &count);
+        "/", &items, &count, NULL);
     EXPECT_TRUE(res == RESTIC_OK && count == 1 && wcscmp(items[0].cFileName, L"ok.txt") == 0,
                 "Empty, '.' and '..' node names are skipped");
     free(items);
@@ -314,7 +315,7 @@ static void test_parse_ls_ndjson(void) {
         "{\"name\":\" \",\"type\":\"file\",\"path\":\"/ \",\"message_type\":\"node\"}\r\n"
         "{\"name\":\".hidden\",\"type\":\"file\",\"path\":\"/.hidden\",\"message_type\":\"node\"}\r\n"
         "{\"name\":\"a..\",\"type\":\"file\",\"path\":\"/a..\",\"message_type\":\"node\"}\r\n",
-        "/", &items, &count);
+        "/", &items, &count, NULL);
     EXPECT_TRUE(res == RESTIC_OK && count == 2, "Only the two single-component names are reported");
     EXPECT_TRUE(find_entry(items, count, L".hidden") != NULL && find_entry(items, count, L"a..") != NULL,
                 "Dot files and names merely ending in dots are kept");
@@ -323,33 +324,34 @@ static void test_parse_ls_ndjson(void) {
     /* Existing but empty directory vs. missing path vs. file used as directory */
     res = restic_parse_ls_ndjson(HEADER_LINE
         "{\"name\":\"empty_dir\",\"type\":\"dir\",\"path\":\"/a/empty_dir\",\"message_type\":\"node\"}\r\n",
-        "/a/empty_dir", &items, &count);
+        "/a/empty_dir", &items, &count, NULL);
     EXPECT_TRUE(res == RESTIC_OK && count == 0, "Empty directory exists");
-    res = restic_parse_ls_ndjson(HEADER_LINE, "/a/missing", &items, &count);
-    EXPECT_TRUE(res == RESTIC_ERR_PATH_NOT_FOUND && items == NULL && count == 0, "Missing directory");
+    BOOL not_a_folder = TRUE;
+    res = restic_parse_ls_ndjson(HEADER_LINE, "/a/missing", &items, &count, &not_a_folder);
+    EXPECT_TRUE(res == RESTIC_ERR_PATH_NOT_FOUND && items == NULL && count == 0 && !not_a_folder, "Missing directory");
     res = restic_parse_ls_ndjson(HEADER_LINE
         "{\"name\":\"f.txt\",\"type\":\"file\",\"path\":\"/a/f.txt\",\"size\":3,\"message_type\":\"node\"}\r\n",
-        "/a/f.txt", &items, &count);
-    EXPECT_TRUE(res == RESTIC_ERR_PATH_NOT_FOUND, "A file is not a listable directory");
+        "/a/f.txt", &items, &count, &not_a_folder);
+    EXPECT_TRUE(res == RESTIC_ERR_PATH_NOT_FOUND && not_a_folder, "A file is not a listable directory, but is there");
 
     /* Names: UTF-8 decoding and over-long names */
     res = restic_parse_ls_ndjson(
         "{\"name\":\"\xC3\xBCn\xE6\x97\xA5\xE6\x9C\xAC\",\"type\":\"file\",\"path\":\"/\xC3\xBCn\xE6\x97\xA5\xE6\x9C\xAC\",\"message_type\":\"node\"}\n",
-        "/", &items, &count);
+        "/", &items, &count, NULL);
     EXPECT_TRUE(res == RESTIC_OK && count == 1, "Unicode name");
     EXPECT_WSTR_EQ(items[0].cFileName, L"\u00fcn\u65e5\u672c", "UTF-8 name decoded to UTF-16");
     free(items);
 
     /* Corrupt or non-object lines */
-    res = restic_parse_ls_ndjson(HEADER_LINE "this is not json\r\n", "/", &items, &count);
+    res = restic_parse_ls_ndjson(HEADER_LINE "this is not json\r\n", "/", &items, &count, NULL);
     EXPECT_TRUE(res == RESTIC_ERR_JSON_PARSE && items == NULL && count == 0, "Garbage line aborts the parse");
-    res = restic_parse_ls_ndjson(HEADER_LINE "[1,2,3]\r\n", "/", &items, &count);
+    res = restic_parse_ls_ndjson(HEADER_LINE "[1,2,3]\r\n", "/", &items, &count, NULL);
     EXPECT_TRUE(res == RESTIC_ERR_JSON_PARSE, "Non-object line");
-    res = restic_parse_ls_ndjson("{\"name\":\"x\",\"type\":\"file\",\"pa", "/", &items, &count);
+    res = restic_parse_ls_ndjson("{\"name\":\"x\",\"type\":\"file\",\"pa", "/", &items, &count, NULL);
     EXPECT_TRUE(res == RESTIC_ERR_JSON_PARSE, "Truncated line");
-    res = restic_parse_ls_ndjson("", "/", &items, &count);
+    res = restic_parse_ls_ndjson("", "/", &items, &count, NULL);
     EXPECT_TRUE(res == RESTIC_OK && count == 0, "Empty stream");
-    res = restic_parse_ls_ndjson(NULL, "/", &items, &count);
+    res = restic_parse_ls_ndjson(NULL, "/", &items, &count, NULL);
     EXPECT_TRUE(res == RESTIC_ERR_INVALID_ARG, "NULL stream");
 }
 
@@ -680,6 +682,80 @@ static void test_repo_cache_generations(void) {
     repo_cache_clear();
 }
 
+static char* heap_text(const char* text) {
+    size_t n = strlen(text) + 1;
+    char* copy = (char*)malloc(n);
+    if (copy) memcpy(copy, text, n);
+    return copy;
+}
+
+/* The output of restic find kept per repository: the last few, by key, within their age */
+static void test_repo_cache_histories(void) {
+    repo_cache_clear();
+    char* json = NULL;
+    size_t len = 0;
+    ULONGLONG g = repo_cache_generation();
+    repo_cache_put_history(L"Repo", L"C:\\r", "pc\n/a", heap_text("[1]"), 3, g);
+    EXPECT_TRUE(repo_cache_get_history(L"repo", L"C:\\r", "pc\n/a", 60000, &json, &len) && len == 3 &&
+                    strcmp(json, "[1]") == 0,
+                "A history cached and read back (alias case ignored)");
+    free(json);
+    EXPECT_TRUE(!repo_cache_get_history(L"Repo", L"C:\\other", "pc\n/a", 60000, &json, &len) && !json &&
+                    !repo_cache_get_history(L"Repo", L"C:\\r", "pc\n/b", 60000, &json, &len),
+                "...only for its repository and key");
+    Sleep(20);
+    EXPECT_TRUE(!repo_cache_get_history(L"Repo", L"C:\\r", "pc\n/a", 0, &json, &len), "...within its age");
+    repo_cache_put_history(L"Repo", L"C:\\r", "pc\n/a", heap_text("[22]"), 4, g);
+    EXPECT_TRUE(repo_cache_get_history(L"Repo", L"C:\\r", "pc\n/a", 60000, &json, &len) && strcmp(json, "[22]") == 0,
+                "The same key again replaces it");
+    free(json);
+    for (int i = 0; i < 8; ++i) {
+        char key[16];
+        snprintf(key, sizeof(key), "pc\n/%d", i);
+        repo_cache_put_history(L"Repo", L"C:\\r", key, heap_text("[]"), 2, g);
+    }
+    EXPECT_TRUE(!repo_cache_get_history(L"Repo", L"C:\\r", "pc\n/a", 60000, &json, &len) &&
+                    repo_cache_get_history(L"Repo", L"C:\\r", "pc\n/0", 60000, &json, &len),
+                "Eight kept per repository, the oldest dropped");
+    free(json);
+
+    /* 32 MiB together: a third history of 12 MiB drops the oldest, and the oldest go first */
+    const size_t big = 12u * 1024u * 1024u;
+    for (int i = 0; i < 3; ++i) {
+        char key[16];
+        char* text = (char*)malloc(big + 1);
+        if (text) {
+            memset(text, '[', big);
+            text[big] = '\0';
+        }
+        snprintf(key, sizeof(key), "pc\n/big%d", i);
+        if (text) repo_cache_put_history(L"Repo", L"C:\\r", key, text, big, g);
+    }
+    EXPECT_TRUE(!repo_cache_get_history(L"Repo", L"C:\\r", "pc\n/big0", 60000, &json, &len) &&
+                    !repo_cache_get_history(L"Repo", L"C:\\r", "pc\n/7", 60000, &json, &len),
+                "Beyond 32 MiB the oldest dropped, and everything older than it");
+    EXPECT_TRUE(repo_cache_get_history(L"Repo", L"C:\\r", "pc\n/big2", 60000, &json, &len) && len == big,
+                "...the newest kept");
+    free(json);
+    char* huge = (char*)malloc(33u * 1024u * 1024u + 1);
+    if (huge) {
+        memset(huge, '[', 33u * 1024u * 1024u);
+        huge[33u * 1024u * 1024u] = '\0';
+        repo_cache_put_history(L"Repo", L"C:\\r", "pc\n/huge", huge, 33u * 1024u * 1024u, g);
+    }
+    EXPECT_TRUE(!repo_cache_get_history(L"Repo", L"C:\\r", "pc\n/huge", 60000, &json, &len) &&
+                    repo_cache_get_history(L"Repo", L"C:\\r", "pc\n/big1", 60000, &json, &len),
+                "One history over 32 MiB is not kept, and drops nothing");
+    free(json);
+    repo_cache_forget(L"Repo");
+    EXPECT_TRUE(!repo_cache_get_history(L"Repo", L"C:\\r", "pc\n/big2", 60000, &json, &len),
+                "Forgetting the repository drops them");
+    repo_cache_put_history(L"Repo", L"C:\\r", "pc\n/a", heap_text("[]"), 2, g);
+    EXPECT_TRUE(!repo_cache_get_history(L"Repo", L"C:\\r", "pc\n/a", 60000, &json, &len),
+                "...and what was read before the forget is not kept");
+    repo_cache_clear();
+}
+
 /* RepoSecretSource for the background loads of the live test */
 static BOOL fixture_password(const WCHAR* alias, RepoSecrets* out) {
     (void)alias;
@@ -771,7 +847,7 @@ static int compare_index_with_restic(const WCHAR* restic_bin, const WCHAR* repo,
     WIN32_FIND_DATAW *a = NULL, *b = NULL;
     size_t na = 0, nb = 0;
     WCHAR err[512];
-    ResticResult ra = restic_list_directory(restic_bin, REPO(repo, password), snap, subpath, NULL, &a, &na, err, _countof(err));
+    ResticResult ra = restic_list_directory(restic_bin, REPO(repo, password), snap, subpath, NULL, &a, &na, NULL, err, _countof(err));
     ResticResult rb = restic_list_index_directory(index, subpath, &b, &nb);
     int folders = 1;
     if (ra != RESTIC_OK || rb != RESTIC_OK || na != nb || (na && memcmp(a, b, na * sizeof(*a)) != 0)) {
@@ -1030,10 +1106,14 @@ static void test_live_restic_cli(void) {
     strcpy_s(snap1, sizeof(snap1), strcmp(by_time->children[0]->snapshot_id, snap2) != 0 ? by_time->children[0]->snapshot_id
                                                                                        : by_time->children[1]->snapshot_id);
     EXPECT_TRUE(strcmp(snap1, snap2) != 0, "Two different snapshots");
+    static char host[256]; /* Static: /analyze (C6262) caps a frame at 16 KB */
+    const char* snap_host = snapshot_tree_snapshot_host(tree, snap2);
+    EXPECT_TRUE(snap_host && snap_host[0] && strlen(snap_host) < sizeof(host), "The snapshots' host");
+    if (snap_host) strncpy_s(host, sizeof(host), snap_host, _TRUNCATE);
     snapshot_tree_free(tree);
 
     /* Level 2: root of the snapshot holds only the drive letter */
-    res = restic_list_directory(restic_bin, REPO(repo, password), snap2, L"\\", NULL, &items, &count, err, _countof(err));
+    res = restic_list_directory(restic_bin, REPO(repo, password), snap2, L"\\", NULL, &items, &count, NULL, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_OK && count == 1, "Snapshot root contains one entry");
     EXPECT_TRUE(is_dir_entry(&items[0]) && _wcsnicmp(items[0].cFileName, data, 1) == 0 && items[0].cFileName[1] == L'\0',
                 "Root entry is the drive letter directory");
@@ -1041,7 +1121,7 @@ static void test_live_restic_cli(void) {
 
     WCHAR wfx[MAX_PATH * 2];
     to_wfx_path(data, NULL, wfx, _countof(wfx));
-    res = restic_list_directory(restic_bin, REPO(repo, password), snap2, wfx, NULL, &items, &count, err, _countof(err));
+    res = restic_list_directory(restic_bin, REPO(repo, password), snap2, wfx, NULL, &items, &count, NULL, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_OK, "List fixture directory (snapshot 2)");
     EXPECT_TRUE(count == 9, "Nine direct children (nothing from deeper levels)");
     const WIN32_FIND_DATAW* e = find_entry(items, count, L"readme.txt");
@@ -1065,11 +1145,69 @@ static void test_live_restic_cli(void) {
     free(items);
 
     /* The older snapshot still reflects the original content */
-    res = restic_list_directory(restic_bin, REPO(repo, password), snap1, wfx, NULL, &items, &count, err, _countof(err));
+    res = restic_list_directory(restic_bin, REPO(repo, password), snap1, wfx, NULL, &items, &count, NULL, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_OK && count == 9, "List fixture directory (snapshot 1)");
     e = find_entry(items, count, L"with space.txt");
     EXPECT_TRUE(e && file_size_of(e) == 5, "Snapshot 1 keeps the original size");
     free(items);
+
+    /* The versions of a file: restic find for exactly its path, in the snapshots of one host */
+    static const struct {
+        const WCHAR* leaf;
+        const char* in_snapshot; /* NULL: snap2 */
+        const char* host;        /* NULL: the snapshots' host */
+        FileHistoryStatus status;
+        size_t versions;
+        const char* what;
+    } finds[] = {
+        {L"with space.txt", NULL, NULL, FILE_HISTORY_OK, 2, "The modified file has two versions"},
+        {L"readme.txt", NULL, NULL, FILE_HISTORY_OK, 1, "An unchanged file has one, in both snapshots"},
+        {L"odd [dir] & (x) ^ 100% !\\odd_inner.txt", NULL, NULL, FILE_HISTORY_OK, 1,
+         "A path with wildcard characters is matched literally"},
+        {L"sub", NULL, NULL, FILE_HISTORY_NOT_A_FILE, 0, "A folder has no versions (what lies below it is ignored)"},
+        {L"no such file", NULL, NULL, FILE_HISTORY_NOT_A_FILE, 0, "A missing file has none"},
+        {L"readme.txt", NULL, "no-such-host", FILE_HISTORY_NOT_A_FILE, 0, "Only the snapshots of the host searched"},
+        {L"readme.txt", NULL, "", FILE_HISTORY_OK, 1, "An empty host: every host"},
+    };
+    for (size_t i = 0; i < _countof(finds); ++i) {
+        char* found      = NULL;
+        size_t found_len = 0;
+        static char path_utf8[1024];
+        to_wfx_path(data, finds[i].leaf, wfx, _countof(wfx));
+        res = restic_find_file(restic_bin, REPO(repo, password), finds[i].host ? finds[i].host : host, wfx, NULL,
+                               &found, &found_len, err, _countof(err));
+        FileHistory* history = NULL;
+        FileHistoryStatus st = FILE_HISTORY_BAD_JSON;
+        if (res == RESTIC_OK && restic_normalize_filter_path(wfx, path_utf8, sizeof(path_utf8))) {
+            st = file_history_build(found, found_len, path_utf8, snap2, NULL, &history);
+        }
+        EXPECT_TRUE(res == RESTIC_OK && st == finds[i].status && file_history_count(history) == finds[i].versions,
+                    finds[i].what);
+        if (i == 0 && history) {
+            const FileVersion* old = file_history_version(history, 0);
+            const FileVersion* now = file_history_version(history, 1);
+            EXPECT_TRUE(old && now && old->size == 5 && strcmp(old->snapshot_id, snap1) == 0 && now->size == 12 &&
+                            strcmp(now->snapshot_id, snap2) == 0 && strstr(now->name, " with space.txt") != NULL,
+                        "...the older from snapshot 1, the newer from snapshot 2, named by their times");
+        }
+        if (i == 1 && history) {
+            EXPECT_TRUE(file_history_version(history, 0)->snapshot_count == 2, "...held by both snapshots");
+        }
+        file_history_free(history);
+        free(found);
+    }
+    char* nothing = NULL;
+    size_t nothing_len = 0;
+    EXPECT_TRUE(restic_find_file(restic_bin, REPO(repo, password), host, L"\\", NULL, &nothing, &nothing_len, err,
+                                 _countof(err)) == RESTIC_ERR_INVALID_ARG && !nothing,
+                "The snapshot root is no file");
+    to_wfx_path(data, L"readme.txt", wfx, _countof(wfx));
+    EXPECT_TRUE(restic_find_file(restic_bin, REPO(repo, password), NULL, wfx, NULL, &nothing, &nothing_len, err,
+                                 _countof(err)) == RESTIC_ERR_INVALID_ARG && !nothing,
+                "No host: refused, not every host");
+    EXPECT_TRUE(restic_find_file(restic_bin, REPO(repo, L"wrong password"), host, wfx, NULL, &nothing, &nothing_len,
+                                 err, _countof(err)) == RESTIC_ERR_WRONG_PASSWORD && !nothing,
+                "Wrong password reported as for any other command");
 
     /* The whole snapshot read at once (restic ls without a path) lists every folder as restic does */
     SnapshotIndex* index = snapshot_index_new(0);
@@ -1141,7 +1279,7 @@ static void test_live_restic_cli(void) {
 
     /* Output larger than the initial 4 KB / typical buffers: 300 NDJSON lines */
     to_wfx_path(data, L"many", wfx, _countof(wfx));
-    res = restic_list_directory(restic_bin, REPO(repo, password), snap2, wfx, NULL, &items, &count, err, _countof(err));
+    res = restic_list_directory(restic_bin, REPO(repo, password), snap2, wfx, NULL, &items, &count, NULL, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_OK && count == 300, "300 entries (~100 KB of NDJSON) listed");
     EXPECT_TRUE(find_entry(items, count, L"file_with_a_reasonably_long_name_to_grow_the_buffer_0300.txt") != NULL,
                 "Last entry present");
@@ -1149,34 +1287,39 @@ static void test_live_restic_cli(void) {
 
     /* Names containing metacharacters travel through the command line intact */
     to_wfx_path(data, L"odd [dir] & (x) ^ 100% !", wfx, _countof(wfx));
-    res = restic_list_directory(restic_bin, REPO(repo, password), snap2, wfx, NULL, &items, &count, err, _countof(err));
+    res = restic_list_directory(restic_bin, REPO(repo, password), snap2, wfx, NULL, &items, &count, NULL, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_OK && count == 1 && wcscmp(items[0].cFileName, L"odd_inner.txt") == 0,
                 "Directory with metacharacters lists its content");
     free(items);
 
     to_wfx_path(data, L"empty_dir", wfx, _countof(wfx));
-    res = restic_list_directory(restic_bin, REPO(repo, password), snap2, wfx, NULL, &items, &count, err, _countof(err));
+    res = restic_list_directory(restic_bin, REPO(repo, password), snap2, wfx, NULL, &items, &count, NULL, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_OK && count == 0, "Existing empty directory is not an error");
 
     /* Missing paths, files used as directories, quote injection attempts */
+    BOOL not_a_folder = TRUE;
     to_wfx_path(data, L"does_not_exist", wfx, _countof(wfx));
-    res = restic_list_directory(restic_bin, REPO(repo, password), snap2, wfx, NULL, &items, &count, err, _countof(err));
-    EXPECT_TRUE(res == RESTIC_ERR_PATH_NOT_FOUND && items == NULL, "Missing directory -> RESTIC_ERR_PATH_NOT_FOUND");
+    res = restic_list_directory(restic_bin, REPO(repo, password), snap2, wfx, NULL, &items, &count, &not_a_folder, err,
+                                _countof(err));
+    EXPECT_TRUE(res == RESTIC_ERR_PATH_NOT_FOUND && items == NULL && !not_a_folder,
+                "Missing directory -> RESTIC_ERR_PATH_NOT_FOUND, nothing there");
     to_wfx_path(data, L"readme.txt", wfx, _countof(wfx));
-    res = restic_list_directory(restic_bin, REPO(repo, password), snap2, wfx, NULL, &items, &count, err, _countof(err));
-    EXPECT_TRUE(res == RESTIC_ERR_PATH_NOT_FOUND, "File used as directory -> RESTIC_ERR_PATH_NOT_FOUND");
+    res = restic_list_directory(restic_bin, REPO(repo, password), snap2, wfx, NULL, &items, &count, &not_a_folder, err,
+                                _countof(err));
+    EXPECT_TRUE(res == RESTIC_ERR_PATH_NOT_FOUND && not_a_folder,
+                "File used as directory -> RESTIC_ERR_PATH_NOT_FOUND, but a file is there");
     to_wfx_path(data, L"no\"such\" --help \"dir", wfx, _countof(wfx));
-    res = restic_list_directory(restic_bin, REPO(repo, password), snap2, wfx, NULL, &items, &count, err, _countof(err));
+    res = restic_list_directory(restic_bin, REPO(repo, password), snap2, wfx, NULL, &items, &count, NULL, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_PATH_NOT_FOUND, "Embedded quotes cannot inject extra arguments");
 
     /* Snapshot ID handling */
-    res = restic_list_directory(restic_bin, REPO(repo, password), "deadbeef", L"\\", NULL, &items, &count, err, _countof(err));
+    res = restic_list_directory(restic_bin, REPO(repo, password), "deadbeef", L"\\", NULL, &items, &count, NULL, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_CLI_FAILED && wcsstr(err, L"deadbeef") != NULL, "Unknown snapshot ID reports Restic's reason");
-    res = restic_list_directory(restic_bin, REPO(repo, password), "--help", L"\\", NULL, &items, &count, err, _countof(err));
+    res = restic_list_directory(restic_bin, REPO(repo, password), "--help", L"\\", NULL, &items, &count, NULL, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_INVALID_ARG, "Option-like snapshot ID rejected before spawning");
-    res = restic_list_directory(restic_bin, REPO(repo, password), "abc def", L"\\", NULL, &items, &count, err, _countof(err));
+    res = restic_list_directory(restic_bin, REPO(repo, password), "abc def", L"\\", NULL, &items, &count, NULL, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_INVALID_ARG, "Snapshot ID with whitespace rejected");
-    res = restic_list_directory(restic_bin, REPO(repo, password), NULL, L"\\", NULL, &items, &count, err, _countof(err));
+    res = restic_list_directory(restic_bin, REPO(repo, password), NULL, L"\\", NULL, &items, &count, NULL, err, _countof(err));
     EXPECT_TRUE(res == RESTIC_ERR_INVALID_ARG, "NULL snapshot ID rejected");
 
     /* File extraction via restic_dump_file */
@@ -1562,6 +1705,7 @@ int main(void) {
     test_exec_large_output_and_long_args();
     test_exec_line_streaming();
     test_repo_cache_generations();
+    test_repo_cache_histories();
     test_dump_with_fake_restic();
     test_read_version();
     test_process_tree_ends();

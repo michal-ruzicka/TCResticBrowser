@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.3.0] – 2026-10-26
+
+### Added
+
+- **`snapshots.json` in every repository folder**, beside
+  `snapshots.csv`: the `restic snapshots --json` output the folders were
+  built from, byte for byte, for `jq` or a script; no extra restic run.
+  It is kept with the cached snapshot list, which takes that much more
+  memory.
+
+- **File versions (`Alt+Enter` on a file inside a snapshot):** a dialog
+  shows the path of a folder, whose `Go to folder` button (the default)
+  opens it in the active panel and `Copy to clipboard` copies it: the
+  file's own path followed by `\`, which can also be typed by hand. The folder lists that file's versions across the snapshots of the
+  same host, named by their modification time, the short ID of the
+  oldest snapshot that holds the version (the backup it first appeared
+  in) and the file's name (`2026-10-17_14-02-11 (1a2b3c4d) report.docx`),
+  oldest first, which can be viewed and copied like files; a version is
+  copied from the snapshot its name carries. One `restic find --json`
+  for exactly the file's path finds them, only for a path that is a file
+  in the snapshot; its output is kept as long as the snapshot list for
+  listing, and as long as the password for copying a version.
+  `Alt+Enter` on a version lists the snapshots that hold it.
+- **Snapshot details (`Alt+Enter` on a snapshot or a folder in it):** a
+  dialog with the snapshot's ID, time, host, user, paths, tags, and from
+  its summary the size, files and folders new, changed and unmodified,
+  data added (and stored), the backup's duration, the parent snapshot
+  and the restic version, from the snapshot list (a folder inside a
+  snapshot takes one `restic ls` until the snapshot has been read).
+
+### Changed
+
+- `Alt+Enter` (and *Properties* in the context menu) inside a snapshot
+  may now ask for the repository's password and run restic; above the
+  snapshots it still does nothing and asks for nothing.
+- A file inside a snapshot opened as a folder (its path followed by `\`)
+  lists the file's versions instead of failing with "not found".
+
 ## [v2.2.0] – 2026-10-24
 
 ### Added
@@ -340,6 +378,7 @@ by Pietro Partescano, the base of this fork was commit [c8481b43c9ab2867eee82471
   block.
 
 
+[v2.3.0]: https://github.com/michal-ruzicka/TCResticBrowser/compare/v2.2.0...v2.3.0
 [v2.2.0]: https://github.com/michal-ruzicka/TCResticBrowser/compare/v2.1.0...v2.2.0
 [v2.1.0]: https://github.com/michal-ruzicka/TCResticBrowser/compare/v2.0.0...v2.1.0
 [v2.0.0]: https://github.com/michal-ruzicka/TCResticBrowser/compare/c8481b43c9ab2867eee824719e3a9c6785db6c61...v2.0.0

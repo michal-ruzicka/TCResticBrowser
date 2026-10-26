@@ -5,15 +5,38 @@
  *    found in the WFX DLL and displays it next to "TCResticBrowser" in Network Neighborhood.
  * 2. Version resource (VS_VERSION_INFO): displayed in Windows Explorer / Total Commander
  *    file properties ("Details" tab).
+ * 3. The dialog naming the folder of a file's versions (IDD_VERSIONS_FOLDER): Total Commander's
+ *    own dialogs (RequestProc) offer no button of the plugin's choosing.
  */
 
 /* UTF-8 source: the copyright notice below contains non-ASCII characters */
 #pragma code_page(65001)
 
-#include <winver.h>
+#include <windows.h>
 #include "version.h"
+#include "resource.h"
 
 1 ICON "TCResticBrowser.ico"
+
+/*
+ * The path wraps in the multi-line field; the caption ("Versions of <file>") is set at run time.
+ * Segoe UI 9 is the message font of Windows since Vista ("MS Shell Dlg" 8 maps to the smaller
+ * Tahoma 8); the dialog's size in dialog units grows with it, and with the DPI the dialog is
+ * created for (see show_versions_folder() in main.c). Going to the folder is what the dialog is
+ * for, so "Go to folder" is the default button, first, as Windows places a dialog's commit
+ * button; "Copy to clipboard" stays for when Total Commander does not go there.
+ */
+IDD_VERSIONS_FOLDER DIALOGEX 0, 0, 320, 96
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Versions"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    LTEXT           "The versions of this file are listed in this folder:", -1, 7, 7, 306, 10
+    EDITTEXT        IDC_VERSIONS_PATH, 7, 20, 306, 46, ES_MULTILINE | ES_READONLY | WS_VSCROLL
+    DEFPUSHBUTTON   "&Go to folder", IDC_VERSIONS_GO, 123, 75, 56, 14
+    PUSHBUTTON      "&Copy to clipboard", IDC_VERSIONS_COPY, 183, 75, 76, 14
+    PUSHBUTTON      "Close", IDCANCEL, 263, 75, 50, 14
+END
 
 #ifdef _DEBUG
 #define VER_FILEFLAGS VS_FF_DEBUG

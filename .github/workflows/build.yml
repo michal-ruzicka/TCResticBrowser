@@ -48,9 +48,9 @@ env:
   # https://learn.microsoft.com/visualstudio/releases/2026/release-history;
   # its SHA-256 is part of the URL and checked again below. Bump the three
   # together with EXPECTED_VS, in a commit of their own.
-  VS_BUILDTOOLS_VERSION: 18.11.1
-  VS_BUILDTOOLS_URL: https://download.visualstudio.microsoft.com/download/pr/e07fb79d-d4ec-45bc-b19d-200bc819ee8d/3b21743cfbd0458e7f4dba87981fb8b99602a974c7439b857878cfa3e9fba5f2/vs_BuildTools.exe
-  VS_BUILDTOOLS_SHA256: 3b21743cfbd0458e7f4dba87981fb8b99602a974c7439b857878cfa3e9fba5f2
+  VS_BUILDTOOLS_VERSION: 18.11.2
+  VS_BUILDTOOLS_URL: https://download.visualstudio.microsoft.com/download/pr/9a3f23c2-cc94-49a0-88c0-f9f19f2ac9df/c217be69e6547c77c62d870394cd649a7a85ab86fcaa526a6ff629d1ec043e77/vs_BuildTools.exe
+  VS_BUILDTOOLS_SHA256: c217be69e6547c77c62d870394cd649a7a85ab86fcaa526a6ff629d1ec043e77
   # build.cmd uses this installation even if the runner image has a newer
   # Visual Studio that vswhere would prefer.
   TCRB_VSINSTALL: C:\BuildTools

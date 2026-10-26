@@ -1,11 +1,12 @@
 /*
  * Unit tests for the RFC 3339 parser (src/timestamp.c), the restic-mount folder tree
- * (src/snapshot_tree.c) and the index of a whole snapshot (src/snapshot_index.c).
+ * (src/snapshot_tree.c), the index of a whole snapshot (src/snapshot_index.c) and the versions of
+ * a file (src/file_history.c).
  *
  * Portable C11 with no Win32 dependency, like the code under test: it builds with MSVC as part of
  * build.cmd and equally with any hosted C compiler, e.g. from src/:
  *   gcc -std=c11 -I. -fsanitize=address,undefined tests/test_snapshot_tree.c snapshot_tree.c snapshot_index.c \
- *       timestamp.c json.c
+ *       file_history.c timestamp.c json.c
  */
 #if defined(_MSC_VER) && defined(_DEBUG) && !defined(__SANITIZE_ADDRESS__)
 #define _CRTDBG_MAP_ALLOC
@@ -15,6 +16,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include "file_history.h"
 #include "snapshot_index.h"
 #include "snapshot_tree.h"
 #include "timestamp.h"
@@ -463,6 +466,26 @@ static void test_skipped_entries(void) {
     snapshot_tree_free(tree);
 }
 
+/* snapshots.json: the output the tree was built from, byte for byte, skipped entries included */
+static void test_json_copy(void) {
+    static const char json[] = "[{\"time\":\"2026-10-18T10:00:00Z\",\"id\":\"deadbeef\"},\n"
+                               " {\"time\":\"bad\",\"id\":\"12345678\",\"x\":\"\\u00e9\"}]\n";
+    SnapshotTree* tree = NULL;
+    EXPECT_TRUE(snapshot_tree_build(json, sizeof(json) - 1, NULL, &tree) == SNAPSHOT_TREE_OK, "Built");
+    size_t len        = 0;
+    const char* copy  = snapshot_tree_json(tree, &len);
+    EXPECT_TRUE(copy && copy != json && len == sizeof(json) - 1 && memcmp(copy, json, len) == 0 && copy[len] == '\0',
+                "The very bytes restic printed, NUL-terminated, the skipped entry too");
+    EXPECT_TRUE(snapshot_tree_snapshot_count(tree) == 1, "...while the tree holds the usable snapshot only");
+    snapshot_tree_free(tree);
+    EXPECT_TRUE(snapshot_tree_build("null", 4, NULL, &tree) == SNAPSHOT_TREE_OK, "An empty repository");
+    copy = snapshot_tree_json(tree, &len);
+    EXPECT_TRUE(copy && len == 4 && strcmp(copy, "null") == 0, "...keeps its null");
+    snapshot_tree_free(tree);
+    len = 7;
+    EXPECT_TRUE(snapshot_tree_json(NULL, &len) == NULL && len == 0, "No tree, no JSON");
+}
+
 /* 20 000 snapshots: insertion stays fast (hash index) and every name stays unique */
 static void test_many_snapshots(void) {
     size_t n = 20000, cap = n * 200 + 16;
@@ -644,6 +667,242 @@ static void test_index_large_folder(void) {
     snapshot_index_free(x);
 }
 
+/* The properties text of a snapshot, from what restic 0.19.1 prints (restic snapshots --json) */
+static void test_describe(void) {
+    SnapshotTree* tree = build(
+        "[{\"time\":\"2026-10-24T22:15:20.490648083+02:00\",\"tree\":\"23b1\",\"paths\":[\"/data\",\"/etc\"],"
+        "\"hostname\":\"pc1\",\"username\":\"agent\",\"uid\":1000,\"gid\":1000,\"program_version\":\"restic 0.19.1\","
+        "\"tags\":[\"daily\"],\"parent\":\"" ID("a") "\","
+        "\"summary\":{\"backup_start\":\"2026-10-24T22:15:20.490648083+02:00\",\"backup_end\":\"2026-10-24T22:17:25.154510884+02:00\","
+        "\"files_new\":2,\"files_changed\":1,\"files_unmodified\":7,\"dirs_new\":2,\"dirs_changed\":0,\"dirs_unmodified\":3,"
+        "\"data_blobs\":2,\"tree_blobs\":3,\"data_added\":1924,\"data_added_packed\":1380,\"total_files_processed\":10,"
+        "\"total_bytes_processed\":1088},\"id\":\"" ID("b") "\",\"short_id\":\"bbbbbbbb\"},"
+        "{\"time\":\"2026-10-23T08:00:00Z\",\"hostname\":\"pc2\",\"paths\":[\"/x\"],\"id\":\"" ID("c") "\"}]");
+    EXPECT_TRUE(tree != NULL, "Built");
+    char* text = snapshot_tree_describe(tree, ID("b"));
+    static const char expected[] =
+        "Snapshot bbbbbbbb of pc1\n"
+        "ID: " ID("b") "\n"
+        "Time: 2026-10-24 22:15:20 +0200\n"
+        "User: agent\n"
+        "Paths: /data\n    /etc\n"
+        "Tags: daily\n"
+        "Size: 1.062 KiB in 10 files\n"
+        "Files: 2 new, 1 changed, 7 unmodified\n"
+        "Folders: 2 new, 0 changed, 3 unmodified\n"
+        "Added to the repository: 1.879 KiB (1.348 KiB stored)\n"
+        "Backup took: 2 min 4 s\n"
+        "Parent: aaaaaaaa\n"
+        "Program: restic 0.19.1\n";
+    if (!text || strcmp(text, expected) != 0) printf("       got: %s\n", text ? text : "(null)");
+    EXPECT_TRUE(text && strcmp(text, expected) == 0, "Every detail restic recorded, a line each");
+    free(text);
+    text = snapshot_tree_describe(tree, ID("c"));
+    EXPECT_TRUE(text && strcmp(text, "Snapshot cccccccc of pc2\nID: " ID("c") "\nTime: 2026-10-23 08:00:00 +0000\n"
+                                     "Paths: /x\n") == 0,
+                "A snapshot without a summary (restic before 0.17): only what it has");
+    free(text);
+    EXPECT_TRUE(snapshot_tree_describe(tree, ID("d")) == NULL && snapshot_tree_describe(tree, NULL) == NULL,
+                "No such snapshot");
+    Timestamp t;
+    EXPECT_TRUE(snapshot_tree_snapshot_time(tree, ID("c"), &t) && t.day == 23 && !snapshot_tree_snapshot_time(tree, ID("d"), &t),
+                "A snapshot's time by its ID");
+    EXPECT_TRUE(strcmp(snapshot_tree_snapshot_host(tree, ID("b")), "pc1") == 0 && !snapshot_tree_snapshot_host(tree, ID("d")),
+                "A snapshot's host by its ID");
+    snapshot_tree_free(tree);
+
+    /* A host name longer than any line buffer stays whole, on its own line */
+    static char long_json[4400];
+    char host[2001];
+    memset(host, 'h', sizeof(host) - 1);
+    host[sizeof(host) - 1] = '\0';
+    snprintf(long_json, sizeof(long_json),
+             "[{\"time\":\"2026-10-23T08:00:00Z\",\"hostname\":\"%s\",\"username\":\"%s\",\"id\":\"" ID("c") "\"}]",
+             host, host);
+    tree = build(long_json);
+    text = snapshot_tree_describe(tree, ID("c"));
+    EXPECT_TRUE(text && strncmp(text, "Snapshot cccccccc of hhh", 24) == 0 && strstr(text, "hhh\nID: ") != NULL &&
+                    strlen(text) > 4000 && strstr(text, "hhh\nTime: ") == NULL,
+                "A long host and user: whole, each line ended");
+    free(text);
+    snapshot_tree_free(tree);
+
+    /* Repository content cannot make lines of its own that look like the plugin's */
+    tree = build("[{\"time\":\"2026-10-23T08:00:00Z\",\"hostname\":\"pc\\r\\nID: x\",\"username\":\"u\\nSize: 9 TiB\","
+                 "\"paths\":[\"/a\\rb\",\"/c\"],\"tags\":[\"t\\u007f\"],\"parent\":\"p\\ny\",\"program_version\":\"r\\t1\","
+                 "\"id\":\"" ID("c") "\"}]");
+    text = snapshot_tree_describe(tree, ID("c"));
+    static const char cleaned[] = "Snapshot cccccccc of pc??ID: x\nID: " ID("c") "\nTime: 2026-10-23 08:00:00 +0000\n"
+                                  "User: u?Size: 9 TiB\nPaths: /a?b\n    /c\nTags: t?\nParent: p?y\nProgram: r?1\n";
+    if (!text || strcmp(text, cleaned) != 0) printf("       got: %s\n", text ? text : "(null)");
+    EXPECT_TRUE(text && strcmp(text, cleaned) == 0, "Control characters in host, user, paths, tags, parent shown as ?");
+    free(text);
+    snapshot_tree_free(tree);
+    tree = build("[{\"time\":\"2026-10-23T08:00:00Z\",\"hostname\":\"pc\",\"id\":\"" ID("c") "\"}]");
+    text = snapshot_tree_describe(tree, ID("c"));
+    EXPECT_TRUE(text && strstr(text, "Paths:") == NULL, "No paths recorded: no Paths line");
+    free(text);
+    snapshot_tree_free(tree);
+}
+
+/* One snapshot of restic find --json output with one match */
+#define FIND_MATCH(snapshot, path, type, size, mtime) \
+    "{\"matches\":[{\"path\":\"" path "\",\"permissions\":\"-rw-------\",\"type\":\"" type "\",\"mode\":384," \
+    "\"mtime\":\"" mtime "\",\"uid\":1000,\"gid\":1000,\"size\":" size "}],\"hits\":1,\"snapshot\":\"" snapshot "\"}"
+
+/* The versions of a file across snapshots, from restic find --json (the shape restic 0.19.1 prints) */
+static void test_file_history(void) {
+    /* Youngest snapshot first, as restic find lists them */
+    static const char json[] =
+        "[" FIND_MATCH(ID("4"), "/data/report.txt", "file", "11", "2026-10-24T22:15:22.159055432+02:00") ","
+        FIND_MATCH(ID("3"), "/data/report.txt", "file", "11", "2026-10-24T22:15:22.159055432+02:00") ","
+        "{\"matches\":[{\"path\":\"/data/report.txt\",\"type\":\"dir\",\"mtime\":\"2026-10-21T10:00:00Z\"},"
+        "{\"path\":\"/data/report.txt/inner\",\"type\":\"file\",\"size\":3,\"mtime\":\"2026-10-21T10:00:00Z\"}],"
+        "\"hits\":2,\"snapshot\":\"" ID("2") "\"},"
+        FIND_MATCH(ID("1"), "/data/report.txt", "file", "4", "2026-10-20T08:00:00.5+02:00") ","
+        FIND_MATCH(ID("0"), "/data/report.txt", "file", "5", "2026-10-20T08:00:00.7+02:00") "]";
+    FileHistory* h = NULL;
+    EXPECT_TRUE(file_history_build(json, strlen(json), "/data/report.txt", ID("3"), NULL, &h) == FILE_HISTORY_OK && h,
+                "Built");
+    EXPECT_TRUE(file_history_count(h) == 3, "Three versions: the folder and what lies below it are not one");
+    const FileVersion* v0 = file_history_version(h, 0);
+    const FileVersion* v1 = file_history_version(h, 1);
+    const FileVersion* v2 = file_history_version(h, 2);
+    EXPECT_TRUE(strcmp(v0->name, "2026-10-20_08-00-00 (11111111) report.txt") == 0 && v0->size == 4 &&
+                    strcmp(v0->snapshot_id, ID("1")) == 0 && v0->snapshot_count == 1,
+                "Oldest first, named by the modification time in the file's own zone and the snapshot");
+    EXPECT_TRUE(strcmp(v1->name, "2026-10-20_08-00-00 (00000000) report.txt") == 0 && v1->size == 5,
+                "A second version of the same second: told apart by its snapshot");
+    EXPECT_TRUE(strcmp(v2->name, "2026-10-24_22-15-22 (33333333) report.txt") == 0 && v2->size == 11 &&
+                    v2->snapshot_count == 2 && strcmp(v2->snapshot_id, ID("3")) == 0 && strcmp(v2->type, "file") == 0,
+                "The same size and time in two snapshots is one version, named after and dumped from the oldest");
+    EXPECT_TRUE(strcmp(file_history_snapshot(h, 2, 0), ID("4")) == 0 && strcmp(file_history_snapshot(h, 2, 1), ID("3")) == 0 &&
+                    file_history_snapshot(h, 2, 2) == NULL && strcmp(file_history_snapshot(h, 0, 0), ID("1")) == 0,
+                "The snapshots of each version, youngest first");
+    EXPECT_TRUE(file_history_find(h, "2026-10-24_22-15-22 (33333333) report.txt") == v2 &&
+                    !file_history_find(h, "2026-10-24_22-15-22 report.txt") && !file_history_find(h, "report.txt"),
+                "A version found by its name");
+    file_history_free(h);
+
+    EXPECT_TRUE(file_history_build(json, strlen(json), "/data/report.txt", ID("2"), NULL, &h) == FILE_HISTORY_NOT_A_FILE &&
+                    !h,
+                "In a snapshot where the path is a folder, there is no history of a file");
+    EXPECT_TRUE(file_history_build("[]", 2, "/data/report.txt", ID("3"), NULL, &h) == FILE_HISTORY_NOT_A_FILE,
+                "Nothing found");
+    EXPECT_TRUE(file_history_build(json, strlen(json), "/data/report.txt", NULL, "YYYY-MM-DD", &h) == FILE_HISTORY_OK &&
+                    strcmp(file_history_version(h, 1)->name, "2026-10-20 (00000000) report.txt") == 0,
+                "The time format of the snapshot folders");
+    file_history_free(h);
+    /* Two snapshots whose IDs share the short ID, two versions of the same second */
+    static const char same_short[] =
+        "[" FIND_MATCH("1111111122", "/data/report.txt", "file", "5", "2026-10-20T08:00:00.7Z") ","
+        FIND_MATCH("1111111133", "/data/report.txt", "file", "4", "2026-10-20T08:00:00.5Z") "]";
+    EXPECT_TRUE(file_history_build(same_short, strlen(same_short), "/data/report.txt", NULL, NULL, &h) == FILE_HISTORY_OK &&
+                    strcmp(file_history_version(h, 0)->name, "2026-10-20_08-00-00 (11111111) report.txt") == 0 &&
+                    strcmp(file_history_version(h, 1)->name, "2026-10-20_08-00-00-1 (11111111) report.txt") == 0,
+                "The same time and short ID: -1 after the time");
+    file_history_free(h);
+    static const char* const bad[] = {"{}", "[{\"matches\":[]}]", "[{\"matches\":{},\"snapshot\":\"" ID("1") "\"}]",
+                                      "[{\"matches\":[],\"snapshot\":\"XYZ\"}]", "[", ""};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
+        EXPECT_TRUE(file_history_build(bad[i], strlen(bad[i]), "/a", NULL, NULL, &h) == FILE_HISTORY_BAD_JSON && !h,
+                    "Not restic find's output");
+    }
+
+    /* A long name is cut so that the version's name stays a valid component (255 UTF-16 units) */
+    static char long_json[2048], long_path[600];
+    char name[300];
+    memset(name, 'n', 250);
+    memcpy(name + 250, "\xc3\xa9.txt", 7); /* An e with acute: two bytes, one unit */
+    snprintf(long_path, sizeof(long_path), "/%s", name);
+    snprintf(long_json, sizeof(long_json),
+             "[{\"matches\":[{\"path\":\"%s\",\"type\":\"file\",\"size\":1,\"mtime\":\"2026-10-20T08:00:00Z\"}],"
+             "\"snapshot\":\"" ID("1") "\"}]", long_path);
+    EXPECT_TRUE(file_history_build(long_json, strlen(long_json), long_path, NULL, NULL, &h) == FILE_HISTORY_OK,
+                "A long name");
+    const char* n = file_history_version(h, 0)->name;
+    EXPECT_TRUE(strlen(n) == 31 + 224 && strncmp(n, "2026-10-20_08-00-00 (11111111) nnnn", 35) == 0, "Cut to 255 units");
+    file_history_free(h);
+
+    /* Cut just after a dot and a space: neither ends the name (Windows would drop them) */
+    memset(name, 'n', 223);
+    memcpy(name + 223, ". tail.docx", 12);
+    snprintf(long_path, sizeof(long_path), "/%s", name);
+    snprintf(long_json, sizeof(long_json),
+             "[{\"matches\":[{\"path\":\"%s\",\"type\":\"file\",\"size\":1,\"mtime\":\"2026-10-20T08:00:00Z\"}],"
+             "\"snapshot\":\"" ID("1") "\"}]", long_path);
+    EXPECT_TRUE(file_history_build(long_json, strlen(long_json), long_path, NULL, NULL, &h) == FILE_HISTORY_OK,
+                "A long name with a dot");
+    n = file_history_version(h, 0)->name;
+    EXPECT_TRUE(strlen(n) == 31 + 223 && n[strlen(n) - 1] == 'n', "Cut before the dot and the space");
+    file_history_free(h);
+    EXPECT_TRUE(file_history_build("[]", 2, "/data/", NULL, NULL, &h) == FILE_HISTORY_BAD_JSON && !h &&
+                    file_history_build("[]", 2, "data/a", NULL, NULL, &h) == FILE_HISTORY_BAD_JSON,
+                "A path that names no file");
+
+    /* 20 000 snapshots, each with its own version, two snapshots per version: quick */
+    enum { MANY = 20000 };
+    size_t many_cap = (size_t)MANY * 2 * 256 + 16;
+    char* many      = (char*)malloc(many_cap);
+    size_t used     = 0;
+    if (many) {
+        used += (size_t)snprintf(many + used, many_cap - used, "[");
+        for (unsigned i = 0; i < MANY * 2; ++i) {
+            unsigned version = (MANY * 2 - 1 - i) / 2; /* Youngest snapshot first, newest version first */
+            used += (size_t)snprintf(many + used, many_cap - used,
+                                     "%s{\"matches\":[{\"path\":\"/a\",\"type\":\"file\",\"size\":%u,"
+                                     "\"mtime\":\"2026-10-20T08:00:00Z\"}],\"snapshot\":\"%08x%056x\"}",
+                                     i ? "," : "", version, MANY * 2 - i, 0u);
+        }
+        used += (size_t)snprintf(many + used, many_cap - used, "]");
+    }
+    EXPECT_TRUE(many && file_history_build(many, used, "/a", NULL, NULL, &h) == FILE_HISTORY_OK &&
+                    file_history_count(h) == MANY,
+                "20 000 versions");
+    if (h) {
+        const FileVersion* last = file_history_version(h, MANY - 1);
+        EXPECT_TRUE(file_history_version(h, 0)->size == 0 && last->size == MANY - 1 && last->snapshot_count == 2 &&
+                        strncmp(last->snapshot_id, "00009c3f", 8) == 0 &&
+                        strncmp(file_history_version(h, 0)->snapshot_id, "00000001", 8) == 0 &&
+                        strcmp(file_history_version(h, 1)->name, "2026-10-20_08-00-00 (00000003) a") == 0,
+                    "...the same second told apart by snapshot, each from its oldest");
+    }
+    file_history_free(h);
+
+    /* 10 000 versions of one time and short ID (snapshot IDs can be made to share 8 digits): -1, -2... quick */
+    enum { SAME = 10000 };
+    used = 0;
+    if (many) {
+        used += (size_t)snprintf(many + used, many_cap - used, "[");
+        for (unsigned i = 0; i < SAME; ++i) {
+            used += (size_t)snprintf(many + used, many_cap - used,
+                                     "%s{\"matches\":[{\"path\":\"/a\",\"type\":\"file\",\"size\":%u,"
+                                     "\"mtime\":\"2026-10-20T08:00:00Z\"}],\"snapshot\":\"aaaaaaaa%08x\"}",
+                                     i ? "," : "", SAME - 1 - i, i);
+        }
+        used += (size_t)snprintf(many + used, many_cap - used, "]");
+    }
+    clock_t started = clock();
+    EXPECT_TRUE(many && file_history_build(many, used, "/a", NULL, NULL, &h) == FILE_HISTORY_OK &&
+                    file_history_count(h) == SAME,
+                "10 000 versions of one time and short ID");
+    double seconds = (double)(clock() - started) / CLOCKS_PER_SEC;
+    EXPECT_TRUE(h && strcmp(file_history_version(h, 0)->name, "2026-10-20_08-00-00 (aaaaaaaa) a") == 0 &&
+                    strcmp(file_history_version(h, SAME - 1)->name, "2026-10-20_08-00-00-9999 (aaaaaaaa) a") == 0 &&
+                    file_history_find(h, "2026-10-20_08-00-00-5000 (aaaaaaaa) a") == file_history_version(h, 5000),
+                "...numbered in order");
+    if (seconds >= 10.0) printf("       took %.1f s\n", seconds);
+    EXPECT_TRUE(seconds < 10.0, "...in linear, not quadratic, time");
+    file_history_free(h);
+    free(many);
+
+    char pattern[64];
+    EXPECT_TRUE(file_history_pattern("/a/b*c?d[e]f", pattern, sizeof(pattern)) == 18 &&
+                    strcmp(pattern, "/a/b[*]c[?]d[[]e]f") == 0,
+                "Wildcards in a path matched literally");
+    EXPECT_TRUE(file_history_pattern("/[[[", pattern, 10) == 0, "No room: nothing");
+}
+
 int main(void) {
 #if defined(_MSC_VER) && defined(_DEBUG) && !defined(__SANITIZE_ADDRESS__)
     _CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
@@ -657,8 +916,11 @@ int main(void) {
     test_sanitized_names();
     test_time_formats();
     test_csv();
+    test_describe();
+    test_file_history();
     test_csv_size();
     test_skipped_entries();
+    test_json_copy();
     test_many_snapshots();
     test_index_listing();
     test_index_errors();

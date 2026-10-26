@@ -66,6 +66,7 @@ to list and extract data and never modifies a repository.
 │   │       ├── latest → 2026-10-18_09-30-00\
 │   │       └── latest → a1b2c3d4\
 │   ├── snapshots.csv                       <-- All snapshots, for a spreadsheet
+│   ├── snapshots.json                      <-- All snapshots, as restic lists them
 │   └── repository_id.txt                   <-- The repository's ID
 └── CloudS3Backup\
 ```
@@ -99,6 +100,8 @@ Paths saved by version 2.0 (`2026-10-18_09-30-00_[a1b2c3d4]` directly in
 the repository) no longer exist; Total Commander's history and hotlist
 entries pointing there need to be recreated.
 
+![TCResticBrowser shown on demo restic repository browsing snapshots and file version history](TCResticBrowser.gif)
+
 ### Key Features
 
 - **Fast Browsing of Large and Remote Repositories:** Every `restic` run costs about a second before it prints anything (deriving the key from the password and loading the repository index), more for big or remote (e.g. S3) repositories. The plugin therefore reads each repository's snapshot list once and answers from it at once, re-reading it in the background once it is a minute old (as often as `restic mount` does), and when you enter a snapshot it reads the list of *all* its files and folders in the background with a single `restic ls`. Until that is done, each folder is listed on its own (`restic ls <snapshot> <path>`), as fast as before; afterwards every folder of the snapshot opens instantly and `restic` runs only to copy or view files. See [What Is Instant and What Takes a While](#what-is-instant-and-what-takes-a-while) and [Snapshot Cache](#snapshot-cache).
@@ -106,6 +109,7 @@ entries pointing there need to be recreated.
   - Copy individual files or entire directory trees out of any snapshot using **`F5`** (preserving original modification timestamps and 64-bit file sizes).
   - Inspect files directly with Total Commander's **Lister (`F3`)** or **Quick View (`Ctrl+Q`)**.
   - Constant-memory streaming (`64 KB` chunks via `restic dump --no-lock`) into a temporary file with **atomic replacement** on completion: an interrupted or failed overwrite never corrupts or deletes your existing local file.
+- **File Versions and Snapshot Properties (`Alt+Enter`):** `Alt+Enter` on a file inside a snapshot offers to go to a folder - the file's own path followed by `\` - that lists every version of that file in the snapshots of the same host, named by its modification time and the short ID of the snapshot it was first backed up in (`2026-10-17_14-02-11 (1a2b3c4d) report.docx`), to view (`F3`) or copy (`F5`) like any file - one `restic find` instead of opening snapshot after snapshot. `Alt+Enter` on a snapshot or a folder in it shows the snapshot's details (host, user, paths, tags, size, files new and changed, data added, how long the backup took), and on a version the snapshots that hold it. See [File Versions and Snapshot Properties](#file-versions-and-snapshot-properties-altenter).
 - **Strictly Read-Only by Design:** Every Restic command runs with `--no-lock`. Repository modification entry points (`FsPutFile`, `FsDeleteFile`, `FsRemoveDir`, `FsMkDir`, `FsRenMovFile`) are intentionally not exported, and `F6` (Move) is rejected.
 - **Zero Passwords on Disk:** Repository passwords are requested interactively via Total Commander's native password dialog (`RequestProcW`), kept only in RAM per repository alias for 30 minutes by default (see [Password Timeout](#password-timeout)), passed to `restic.exe` via an isolated environment block (`RESTIC_PASSWORD`), and wiped with `SecureZeroMemory`. Cached passwords are encrypted in memory (`CryptProtectMemory`), in pages locked out of the page file and excluded from Windows Error Reporting crash dumps, so a memory dump or the hibernation file does not reveal them. A repository can instead take its password from a file or a password manager's command, which restic reads itself, and S3 repositories can have their own access key, whose secret key is asked for and kept like a password (see [Repository Settings](#repository-settings-password-file-password-command-s3-credentials)).
 - **Responsive Cancellation (`ESC`):** Long operations on remote backends can be aborted with `ESC`. Extraction uses a 30-minute **inactivity** timeout (so slow multi-gigabyte transfers are never cut off as long as bytes keep flowing); a folder listing is stopped after 30 minutes in total.
@@ -211,10 +215,11 @@ documentation.
 | **List Repositories** | Open **Network Neighborhood** (`\\\`) -> **`TCResticBrowser`**. Changes to `TCResticBrowser.ini` take effect immediately on panel refresh (`Ctrl+R` / `F2`). |
 | **Browse Snapshots** | Enter a repository folder (`\<Alias>`). Prompted once for the repository password; once restic accepts it, it is kept in RAM (encrypted) for that alias across both panels for 30 minutes (see [Password Timeout](#password-timeout)). Up to 3 password attempts are allowed. The dialog's title starts with the repository alias (`MyLocalBackup - Restic repository password`), so a password manager that picks an entry by the title of the active window, such as KeePassXC Auto-Type, can offer the right password. |
 | **Connection Log** | Total Commander's FTP connections toolbar (unless `ConnectionLog=no`), whose log window shows what the plugin is doing in the background - reading a whole snapshot (with progress every few seconds) or re-reading the snapshot list - and whose **Disconnect** forgets all passwords and everything read with them. See [Connection Log](#connection-log). |
-| **Snapshot List (`snapshots.csv`)** | Every repository folder also holds the file **`snapshots.csv`**: all snapshots with host, paths, size, time, tags and full ID, for Excel or another spreadsheet (`F3` to view, `F5` to copy, or open it). See [Snapshot List as a Spreadsheet](#snapshot-list-as-a-spreadsheet). Next to it, **`repository_id.txt`** holds the repository's ID (see [Repository ID](#repository-id)). |
+| **Snapshot List (`snapshots.csv`)** | Every repository folder also holds the file **`snapshots.csv`**: all snapshots with host, paths, size, time, tags and full ID, for Excel or another spreadsheet (`F3` to view, `F5` to copy, or open it). See [Snapshot List as a Spreadsheet](#snapshot-list-as-a-spreadsheet). Next to it, **`snapshots.json`** holds the same list as restic itself prints it (see [Snapshot List as JSON](#snapshot-list-as-json)), and **`repository_id.txt`** holds the repository's ID (see [Repository ID](#repository-id)). |
 | **Forget Passwords** | While passwords are remembered, the plugin's root folder starts with **`🗑 Forget N Passwords`** (N is their number; `🗑 Forget 1 Password` for one). Press **Enter** on it to wipe them all at once; a message says how many were forgotten, the root folder is then re-read without the entry, and the next access asks again. The entry is not removed by itself when the passwords expire; it disappears the next time the root folder is read (`Ctrl+R`). |
 | **Explore Files** | Enter a snapshot through `snapshots`, `ids`, `hosts` or `tags` (or `latest`) and navigate the backed-up directory tree. The snapshot list is read once and then shown at once from memory; when it is older than a minute (`SnapshotListRefreshSeconds=`), as `restic mount` would re-read it, restic reads a new one in the background and the next listing (`Ctrl+R`) shows any new snapshots (see [Snapshot List Refresh](#snapshot-list-refresh)). |
 | **View File (`F3` / `Ctrl+Q`)** | Press **`F3`** (Lister) or **`Ctrl+Q`** (Quick View) on any file to stream it to a temporary location and view its contents. |
+| **File Versions (`Alt+Enter`)** | Press **`Alt+Enter`** on a file inside a snapshot: a dialog names the folder of that file's versions across the snapshots of the same host; `Go to folder` (or `Enter`) opens it, `Copy to clipboard` copies its path. View or copy the versions there, oldest first. `Backspace` returns. `Alt+Enter` on a snapshot or a folder shows the snapshot's details. See [File Versions and Snapshot Properties](#file-versions-and-snapshot-properties-altenter). |
 | **Restore / Extract (`F5`)** | Select one or more files or directories and press **`F5`** to copy them to the target panel, preserving original `LastWriteTime` timestamps. Standard Total Commander overwrite prompts are supported. |
 | **Cancel Operation (`ESC`)** | Press **`ESC`** in Total Commander's progress dialog to terminate the underlying `restic.exe` child process, together with any `rclone`, `ssh` or password command it started, and clean up any temporary file. Closing Total Commander ends restic runs still working in the background the same way. |
 
@@ -233,6 +238,8 @@ it can, so the same folder can take a moment once and open instantly later:
 | Any folder of that snapshot once the background read is done | Instant, from memory. The read takes from seconds to minutes depending on the number of files, and runs while you browse. |
 | A snapshot with more files than `SnapshotCacheMB=` holds | Every folder waits for its own `restic ls`; it is never read as a whole. |
 | A file you view (`F3`, `Ctrl+Q`) or copy (`F5`) | Always runs `restic dump`, about a second per file plus the transfer. |
+| The versions of a file (`Alt+Enter`) | Waits for one `restic find`, which opens every snapshot of the host along the file's path: longer than a folder, shorter than opening the snapshots one by one. Kept for a minute (`SnapshotListRefreshSeconds=`), so returning to it runs no `restic find` again; copying a version or `Alt+Enter` on one does not either, as long as the versions are still remembered (the last eight files looked up per repository). |
+| The details of a snapshot (`Alt+Enter`) | Instant on a snapshot folder, from the snapshot list. On a folder inside a snapshot, one `restic ls` until the snapshot has been read as a whole (to tell a folder from a file). |
 
 After the password timeout (30 minutes by default) or `🗑 Forget N
 Passwords`, everything read from that repository is dropped, so the next
@@ -339,6 +346,17 @@ list at the time of the listing; the file copied is made from the list
 cached at the time of the copy and carries that list's date, so after a
 background refresh it may already include newer snapshots.
 
+### Snapshot List as JSON
+
+Every repository folder also holds `snapshots.json`: the output of
+`restic snapshots --json` the plugin read to build `hosts`, `ids`,
+`snapshots` and `tags`, byte for byte (no extra restic run). It has
+everything restic records about each snapshot - full ID, time, host,
+user, paths, tags, parent, the program version and the summary of the
+backup - for `jq`, a script or any other JSON tool, and also the
+snapshots the plugin itself cannot show (one without a valid time or
+ID). Its date, and when it is refreshed, are those of `snapshots.csv`.
+
 ### Repository ID
 
 Every repository folder also holds `repository_id.txt`: one line with
@@ -354,6 +372,96 @@ is remembered as long as the repository's password is. The file's date
 is the moment restic was asked for the ID; until then the listing shows
 the date of `snapshots.csv`.
 
+### File Versions and Snapshot Properties (`Alt+Enter`)
+
+`Alt+Enter` (or *Properties* in the context menu) on a **file inside a
+snapshot** shows the full path of a folder, the file's own path followed
+by `\` (`\\\TCResticBrowser\...\report.docx\`), which lists the versions of
+that file in all snapshots of the same host as the snapshot you came
+from. The dialog has three buttons:
+
+- **`Go to folder`** (the default button, so also `Enter`) closes the
+  dialog and opens the folder in the active panel.
+- **`Copy to clipboard`** copies the path and closes the dialog; go there
+  by pasting the path into the path above the panel's file list (click
+  it, or the command `cm_EditPath`) or after `cd ` on the command line.
+- **`Close`** (or `Esc`) just closes it.
+
+Total Commander does not let a plugin change the panel's folder from
+*Properties*, so `Go to folder` asks Total Commander to do it with the
+message other tools use to change its folders (`WM_COPYDATA` with the
+`CD` command), which its author describes on the Total Commander forum
+but not in the plugin documentation. Should a version of Total Commander
+not react to it, use `Copy to clipboard`. Like entering a snapshot,
+`Alt+Enter` asks for the repository's password if none is remembered, and
+restic errors are reported as usual.
+
+The path starts with the name the plugin proposed to Total Commander
+(`RootName=`, see [Root Folder Name](#root-folder-name)). If you renamed
+the plugin's folder in Total Commander, or changed `RootName=` without
+installing the plugin again, `Go to folder` cannot find the folder;
+copy the path instead and replace its first part with the name the
+folder has in Network Neighborhood.
+
+The trailing `\` is what turns the file into a folder: without it,
+Total Commander takes the path for the file itself. The dialog only
+leads to that folder, so you can also type it yourself: in a snapshot's
+folder, add `\` after a file's name in the path above the file list.
+
+```text
+2026-09-30_08-15-02 (5e6f7a8b) report.docx      48 213   30.09.2026 08:15
+2026-10-17_14-02-11 (1a2b3c4d) report.docx      51 877   17.10.2026 14:02
+```
+
+- A version is what restic itself compares when it decides whether a
+  file changed: the same size and modification time in several
+  snapshots is one version. Versions are named by their modification
+  time, written by `SnapshotTimeFormat=` in the file's own time zone,
+  then the short ID of the oldest snapshot that holds the version - the
+  backup in which it first appeared - in parentheses, then the file's
+  name, so they sort by time and keep their extension (opening one in
+  the Lister or with Enter works as usual). The short ID is the name of
+  that snapshot's folder under `ids`, where the files that changed
+  together with this version can be found. Two versions with the same
+  time and short ID get `-1`, `-2`... after the time. A file that never
+  changed has a single version.
+- View (`F3`, `Ctrl+Q`) or copy (`F5`) a version like any file; it comes
+  from the snapshot its name carries. Several selected versions can
+  be copied into a folder at once.
+- `Alt+Enter` on a version shows its modification time, size and the
+  snapshots that hold it (their short IDs and times).
+- `Backspace` returns to the folder the file is in.
+- Only files have versions: a folder at that path in other snapshots is
+  left out, as is the file in snapshots of other hosts (for a snapshot
+  recorded without a host name, restic searches the snapshots of every
+  host). A version whose modification time restic recorded as unknown
+  (year 1) is left out too. The versions are
+  looked up with one `restic find` for exactly the file's path, which
+  opens every snapshot of the host only along that path; on a big remote
+  repository with many snapshots that takes a while (`ESC` cancels). The
+  result is kept as long as the snapshot list (a minute,
+  `SnapshotListRefreshSeconds=`) for listing the versions again, and for
+  as long as the password for copying a version or `Alt+Enter` on one -
+  a snapshot never changes -, for the last eight files looked up in a
+  repository; an older one is looked up again. Only after `restic forget` removed the
+  snapshot a version is named after does copying it fail; `Ctrl+R` in
+  the folder of versions looks them up again.
+- `restic find` runs only for a path that is a file in the snapshot you
+  came from: a mistyped or deleted path stays "not found" at once, as
+  before.
+
+`Alt+Enter` on a **snapshot folder** (in `snapshots`, `ids`, `hosts` or
+`tags`, also `latest`) or on any **folder inside a snapshot** shows the
+snapshot's details from the snapshot list (on a folder inside a snapshot
+after one `restic ls`, until the snapshot has been read as a whole): its
+full ID, time, host, user, backed-up paths, tags, and for snapshots
+taken with restic 0.17 or later the size, the number of new, changed and
+unmodified files and folders, the data added to the repository, how
+long the backup took, the parent snapshot and the restic version that
+made it. Above the snapshots (the repository's folder and its files,
+`hosts`, `ids`, `snapshots`, `tags`, a host's or a tag's folder)
+`Alt+Enter` shows nothing and asks for no password.
+
 ### Dates in the Panels
 
 | Entry | Date shown |
@@ -362,7 +470,8 @@ the date of `snapshots.csv`.
 | `hosts`, `ids`, `snapshots`, `tags`, a host's or a tag's folder | When the newest snapshot in it was taken; none if it holds no snapshot (`tags` when no snapshot has a tag) |
 | A snapshot's folder, also `latest` and `latest → …` | When the snapshot was taken |
 | Files and folders in a snapshot | Their modification time as restic recorded it (none if restic has none); creation and access time from restic's `ctime` and `atime` |
-| `snapshots.csv` | When restic was asked for the snapshot list it is made from |
+| The versions of a file (`Alt+Enter`) | The version's modification time |
+| `snapshots.csv`, `snapshots.json` | When restic was asked for the snapshot list it is made from |
 | `repository_id.txt` | When restic was asked for the ID; until then the date of `snapshots.csv` |
 
 Total Commander shows every date in your local time zone, while a
@@ -491,7 +600,9 @@ entered it.
 
 `SnapshotTimeFormat=` under `[Settings]` sets how the snapshot folders
 under `snapshots`, `hosts\<host>` and `tags\<tag>` are named, like
-`restic mount --time-template` but with simpler placeholders:
+`restic mount --time-template` but with simpler placeholders; the
+versions of a file (`Alt+Enter`) start with their modification time in
+the same format:
 
 | Placeholder | Meaning | Example |
 | --- | --- | --- |
@@ -720,8 +831,9 @@ PasswordCommand=C:\Tools\get-restic-password.cmd
 
 The plugin depends on nothing but what it cannot do without:
 
-- **Windows** — the plugin imports only `KERNEL32.dll` and `CRYPT32.dll`
-  (for `CryptProtectMemory`) and links the C runtime statically, so no
+- **Windows** — the plugin imports only `KERNEL32.dll`, `USER32.dll` (for
+  the dialog naming the folder of a file's versions, and the clipboard) and
+  `CRYPT32.dll` (for `CryptProtectMemory`) and links the C runtime statically, so no
   Visual C++ Redistributable is needed.
 - **[Restic](https://restic.net)** ([github.com/restic/restic](https://github.com/restic/restic),
   BSD 2-Clause License) — run as an external `restic.exe` process, never
@@ -732,8 +844,9 @@ The plugin depends on nothing but what it cannot do without:
 
 ### Why the Plugin Has Its Own JSON Reader
 
-`restic.exe` reports snapshots and directory listings as JSON
-(`restic snapshots --json`, `restic ls --json`), so the plugin has to parse
+`restic.exe` reports snapshots, directory listings and the rest as JSON
+(`restic snapshots --json`, `restic ls --json`, `restic find --json`,
+`restic --json version`, `restic cat config`), so the plugin has to parse
 JSON. Upstream used the [cJSON](https://github.com/DaveGamble/cJSON) library
 as a Git submodule. This fork replaces it with `src/json.c`, a strict,
 read-only JSON reader of about 370 lines, because no component the plugin
@@ -761,9 +874,10 @@ decoded name is a plain C string that cannot be cut short) — and reads file
 sizes as exact 64-bit integers instead of going through floating point.
 
 The reader is generic: it understands any valid JSON, not just a list of
-expected keywords. The plugin looks up the few fields it uses (`id`,
-`time`, `hostname`, `tags`, `paths`, `summary.total_bytes_processed`, `name`, `type`, `size`, `mtime`, `atime`,
-`ctime`, `path`, `message_type`, `message`), so fields and message types that a newer
+expected keywords. The plugin looks up the fields it uses (such as `id`,
+`time`, `hostname`, `tags`, `paths` and the `summary` of a snapshot, `name`,
+`type`, `size`, `mtime`, `atime`, `ctime` and `path` of a file, `snapshot` and
+`matches` of `restic find`, `message_type`, `message`, `version`), so fields and message types that a newer
 Restic adds are simply ignored; a missing field skips the entry or leaves its
 size or time unknown, and a line that is not valid JSON fails the listing
 instead of being guessed at.

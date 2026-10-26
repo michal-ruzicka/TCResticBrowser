@@ -926,13 +926,18 @@ static BOOL descend_to_fixture_data(
     return descend_to_fixture_data(p, next_path, depth + 1, out_data_path, out_cap);
 }
 
-/* Number of restic processes the plugin started so far, as its diagnostic log records them */
-static int count_restic_runs(const WCHAR* log_file) {
+/* Number of times `what` occurs in the plugin's diagnostic log */
+static int count_in_log(const WCHAR* log_file, const char* what) {
     char* text = read_text_file(log_file);
     int n = 0;
-    for (const char* p = text; p && (p = strstr(p, "restic run: ")) != NULL; p++) n++;
+    for (const char* p = text; p && (p = strstr(p, what)) != NULL; p++) n++;
     free(text);
     return n;
+}
+
+/* Number of restic processes the plugin started so far, as its diagnostic log records them */
+static int count_restic_runs(const WCHAR* log_file) {
+    return count_in_log(log_file, "restic run: ");
 }
 
 /*
@@ -969,14 +974,10 @@ static void test_e2e_snapshot_cache(const Plugin* p, const WCHAR* dir, const WCH
     SetLastError(0);
     EXPECT_TRUE(p->find_first_w(sub, &fd) == INVALID_HANDLE_VALUE && GetLastError() == ERROR_NO_MORE_FILES,
                 "An empty folder is still empty");
-    swprintf_s(sub, _countof(sub), L"%ls\\readme.txt", data_path);
-    SetLastError(0);
-    EXPECT_TRUE(p->find_first_w(sub, &fd) == INVALID_HANDLE_VALUE && GetLastError() == ERROR_PATH_NOT_FOUND,
-                "A file is not a folder");
     swprintf_s(sub, _countof(sub), L"%ls\\no_such_folder", data_path);
     SetLastError(0);
     EXPECT_TRUE(p->find_first_w(sub, &fd) == INVALID_HANDLE_VALUE && GetLastError() == ERROR_PATH_NOT_FOUND,
-                "A missing folder is missing");
+                "A missing folder is missing (and no file there to search the versions of)");
     EXPECT_TRUE(count_restic_runs(log_file) == runs && g_e2e_pwd_prompts == 0, "None of it ran restic");
 
     /* Forgetting the passwords drops the listing with them: the next visit asks and runs restic */
@@ -991,6 +992,304 @@ static void test_e2e_snapshot_cache(const Plugin* p, const WCHAR* dir, const WCH
                 "Listed again after a password prompt, with the same entries");
     EXPECT_TRUE(g_e2e_pwd_prompts == 1 && count_restic_runs(log_file) > runs, "Asked for the password and ran restic");
     EXPECT_TRUE(conn_log_count(L"1:CONNECT \\\n") == 1, "...on the connection still listed, not a new one");
+    g_e2e_pwd_prompts = 0;
+    g_e2e_msg_dialogs = 0;
+}
+
+/* The size of a local file, or -1 */
+static long long local_size(const WCHAR* path) {
+    WIN32_FILE_ATTRIBUTE_DATA a;
+    if (!GetFileAttributesExW(path, GetFileExInfoStandard, &a)) return -1;
+    return ((long long)a.nFileSizeHigh << 32) | a.nFileSizeLow;
+}
+
+/*
+ * The plugin's own dialog naming the folder of a file's versions (IDD_VERSIONS_FOLDER in
+ * resource.h): found by its caption, its path, default button and focus read, then a button pressed
+ */
+typedef struct {
+    const WCHAR* caption;
+    WORD button; /* IDCANCEL ("Close"), 1002 ("Copy to clipboard") or 1003 ("Go to folder") */
+    BOOL found;
+    WCHAR path[MAX_PATH * 2];
+    int default_id, focus_id; /* Control IDs, 0 when unknown */
+} DialogAnswer;
+
+static DWORD WINAPI answer_dialog(LPVOID param) {
+    DialogAnswer* a = (DialogAnswer*)param;
+    for (int i = 0; i < 1000; ++i) { /* Up to 10 s */
+        HWND dlg = FindWindowW(L"#32770", a->caption);
+        if (dlg) {
+            a->found = GetDlgItemTextW(dlg, 1001, a->path, _countof(a->path)) > 0;
+            LRESULT def = SendMessageW(dlg, DM_GETDEFID, 0, 0);
+            a->default_id = HIWORD(def) == DC_HASDEFID ? LOWORD(def) : 0;
+            GUITHREADINFO gui = {sizeof(gui)};
+            a->focus_id = GetGUIThreadInfo(GetWindowThreadProcessId(dlg, NULL), &gui) && gui.hwndFocus
+                              ? GetDlgCtrlID(gui.hwndFocus) : 0;
+            PostMessageW(dlg, WM_COMMAND, MAKEWPARAM(a->button, BN_CLICKED), 0);
+            return 0;
+        }
+        Sleep(10);
+    }
+    return 0;
+}
+
+/*
+ * A stand-in for Total Commander's main window, on the thread calling the plugin: keeps what a
+ * WM_COPYDATA brought (Total Commander's "CD" request)
+ */
+static struct {
+    ULONG_PTR kind;
+    DWORD len;
+    char data[4096];
+    int count;
+} g_copydata;
+
+static LRESULT CALLBACK fake_total_cmd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    if (msg == WM_COPYDATA) {
+        const COPYDATASTRUCT* cds = (const COPYDATASTRUCT*)lparam;
+        g_copydata.kind = cds->dwData;
+        g_copydata.len  = cds->cbData < sizeof(g_copydata.data) ? cds->cbData : (DWORD)sizeof(g_copydata.data);
+        memcpy(g_copydata.data, cds->lpData, g_copydata.len);
+        g_copydata.count++;
+        return TRUE;
+    }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+static HWND fake_total_cmd(void) {
+    static HWND window;
+    if (!window) {
+        WNDCLASSW wc     = {0};
+        wc.lpfnWndProc   = fake_total_cmd_proc;
+        wc.hInstance     = GetModuleHandleW(NULL);
+        wc.lpszClassName = L"TCResticBrowserTestTotalCmd";
+        RegisterClassW(&wc);
+        window = CreateWindowW(wc.lpszClassName, L"Total Commander stand-in", WS_OVERLAPPEDWINDOW, 0, 0, 100, 100,
+                               NULL, NULL, wc.hInstance, NULL);
+    }
+    return window;
+}
+
+/* Lets the calling thread's message loop run for `ms` milliseconds, as Total Commander's would */
+static void pump_messages(DWORD ms) {
+    ULONGLONG start = GetTickCount64();
+    while (GetTickCount64() - start < ms) {
+        MSG msg;
+        while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        Sleep(5);
+    }
+}
+
+/* Alt+Enter on `remote` from `main_win` with the dialog answered by `button`: FS_EXEC_* */
+static int properties_with_dialog(const Plugin* p, HWND main_win, WCHAR* remote, DialogAnswer* a, WORD button) {
+    WCHAR properties[] = L"properties";
+    a->button = button;
+    a->found  = FALSE;
+    a->path[0] = L'\0';
+    a->default_id = a->focus_id = 0;
+    HANDLE t = CreateThread(NULL, 0, answer_dialog, a, 0, NULL);
+    int rc   = p->execute_w(main_win, remote, properties);
+    if (t) {
+        WaitForSingleObject(t, INFINITE);
+        CloseHandle(t);
+    }
+    return rc;
+}
+
+/* The clipboard's text into `out` ("" when it holds none); `set` non-NULL: puts that there first */
+static void clipboard_text(const WCHAR* set, WCHAR* out, size_t cap) {
+    out[0] = L'\0';
+    if (!OpenClipboard(NULL)) return;
+    if (set) {
+        size_t bytes = (wcslen(set) + 1) * sizeof(WCHAR);
+        HGLOBAL mem  = GlobalAlloc(GMEM_MOVEABLE, bytes);
+        void* data   = mem ? GlobalLock(mem) : NULL;
+        if (data) {
+            memcpy(data, set, bytes);
+            GlobalUnlock(mem);
+            if (!EmptyClipboard() || !SetClipboardData(CF_UNICODETEXT, mem)) GlobalFree(mem);
+        } else if (mem) {
+            GlobalFree(mem);
+        }
+    }
+    HANDLE clip       = GetClipboardData(CF_UNICODETEXT);
+    const WCHAR* text = clip ? (const WCHAR*)GlobalLock(clip) : NULL;
+    if (text) {
+        wcsncpy_s(out, cap, text, _TRUNCATE);
+        GlobalUnlock(clip);
+    }
+    CloseClipboard();
+}
+
+/*
+ * Alt+Enter (FsExecuteFileW "properties"): a file names, in a dialog, the folder of its versions
+ * across the snapshots, which copy like files; a version, a snapshot and a folder in it show their properties
+ */
+static void test_e2e_file_history(const Plugin* p, const WCHAR* dir, const WCHAR* snap_root, const WCHAR* data_path) {
+    static WCHAR remote[MAX_PATH * 2], names[2048], version_path[MAX_PATH * 2], local[MAX_PATH], log_file[MAX_PATH];
+    WCHAR properties[] = L"properties";
+    swprintf_s(log_file, _countof(log_file), L"%ls\\log dir\\e2e.log", dir);
+    g_e2e_pwd_prompts = 0;
+    g_e2e_msg_dialogs = 0;
+
+    /* with space.txt was changed between the two fixture snapshots: two versions */
+    swprintf_s(remote, _countof(remote), L"%ls\\with space.txt", data_path);
+    static DialogAnswer answer = {L"Versions of with space.txt", IDCANCEL, FALSE, {0}, 0, 0};
+    static WCHAR clip[MAX_PATH * 2];
+    HWND total_cmd = fake_total_cmd();
+    EXPECT_TRUE(total_cmd != NULL, "A stand-in for Total Commander's window");
+    clipboard_text(L"before", clip, _countof(clip));
+    g_copydata.count = 0;
+    EXPECT_TRUE(properties_with_dialog(p, total_cmd, remote, &answer, IDCANCEL) == FS_EXEC_OK &&
+                    g_e2e_msg_dialogs == 0 && answer.found,
+                "Alt+Enter on a file names the folder of its versions in a dialog");
+    EXPECT_TRUE(answer.default_id == 1003 && answer.focus_id == 1003,
+                "...whose default button, focused, is Go to folder");
+    size_t value_len = wcslen(answer.path), remote_len = wcslen(remote);
+    EXPECT_TRUE(wcsncmp(answer.path, L"\\\\\\", 3) == 0 && value_len > remote_len + 1 &&
+                    wcsncmp(answer.path + value_len - remote_len - 1, remote, remote_len) == 0 &&
+                    answer.path[value_len - 1] == L'\\' &&
+                    wcschr(answer.path + 3, L'\\') == answer.path + value_len - remote_len - 1,
+                "...the file's own full path, with a trailing backslash");
+    clipboard_text(NULL, clip, _countof(clip));
+    pump_messages(200);
+    EXPECT_TRUE(wcscmp(clip, L"before") == 0 && g_copydata.count == 0,
+                "...which Close leaves off the clipboard, without going there");
+    EXPECT_TRUE(properties_with_dialog(p, NULL, remote, &answer, 1002) == FS_EXEC_OK && answer.found,
+                "...and Copy to clipboard");
+    EXPECT_TRUE(answer.default_id == 1002 && answer.focus_id == 1002,
+                "...the default without Total Commander's window, Go to folder disabled");
+    clipboard_text(NULL, clip, _countof(clip));
+    EXPECT_TRUE(wcscmp(clip, answer.path) == 0, "...puts there");
+    EXPECT_TRUE(properties_with_dialog(p, total_cmd, remote, &answer, 1003) == FS_EXEC_OK && answer.found,
+                "...and Go to folder");
+    EXPECT_TRUE(g_copydata.count == 0, "...asks Total Commander only once Alt+Enter has returned");
+    pump_messages(500);
+    static char expected[4096];
+    int path_bytes = WideCharToMultiByte(CP_UTF8, 0, answer.path, -1, expected + 3, (int)sizeof(expected) - 8, NULL,
+                                         NULL);
+    memcpy(expected, "\xEF\xBB\xBF", 3);
+    memcpy(expected + 3 + path_bytes - 1, "\r\0S", 4); /* The literal's NUL ends the flags */
+    DWORD expected_len = (DWORD)(3 + path_bytes - 1 + 4);
+    EXPECT_TRUE(g_copydata.count == 1 && g_copydata.kind == ('C' + 256 * 'D') && g_copydata.len == expected_len &&
+                    memcmp(g_copydata.data, expected, expected_len) == 0,
+                "...then asks it, once, to show the folder in the active panel (WM_COPYDATA \"CD\", UTF-8, flag S)");
+    swprintf_s(remote, _countof(remote), L"%ls\\with space.txt\\", data_path);
+    WIN32_FIND_DATAW fd;
+    WCHAR older[MAX_PATH] = {0}, newer[MAX_PATH] = {0};
+    long long older_size = -1, newer_size = -1;
+    size_t versions = 0;
+    HANDLE h = p->find_first_w(remote, &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE, "...which lists the file's versions");
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            ++versions;
+            BOOL plain = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 && fd.ftLastWriteTime.dwHighDateTime != 0xFFFFFFFF;
+            EXPECT_TRUE(plain && wcsstr(fd.cFileName, L" with space.txt") != NULL,
+                        "A version is a file named by its modification time and the file's name");
+            WCHAR* slot = older[0] ? newer : older;
+            wcsncpy_s(slot, MAX_PATH, fd.cFileName, _TRUNCATE);
+            *(slot == older ? &older_size : &newer_size) = ((long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+        } while (p->find_next_w(h, &fd));
+        p->find_close(h);
+    }
+    EXPECT_TRUE(versions == 2 && older_size == 5 && newer_size == 12 && wcscmp(older, newer) < 0,
+                "Two versions, oldest first: 5 bytes, then 12");
+    EXPECT_TRUE(older[4] == L'-' && older[10] == L'T' && older[13] == L'.', "Named by SnapshotTimeFormat");
+    int finds = count_in_log(log_file, " find --json ");
+    EXPECT_TRUE(finds == 1, "...found by one restic find");
+    EXPECT_TRUE(wcsncmp(older + 19, L" (", 2) == 0 && wcsspn(older + 21, L"0123456789abcdef") == 8 &&
+                    wcsncmp(older + 29, L") with space.txt", 16) == 0 && wcsncmp(older + 19, newer + 19, 10) != 0,
+                "...then the short ID of the snapshot holding the version, a different one for each");
+
+    remote[wcslen(remote) - 1] = L'\0'; /* Total Commander names what is inside without the backslash */
+
+    /* F5 on a version copies the file from a snapshot that holds that version */
+    swprintf_s(version_path, _countof(version_path), L"%ls\\%ls", remote, older);
+    swprintf_s(local, _countof(local), L"%ls\\older version.txt", dir);
+    DeleteFileW(local);
+    RemoteInfo ri = {5, 0, {0x802D2000, 0x01D5EF01}, FILE_ATTRIBUTE_READONLY};
+    EXPECT_TRUE(p->get_file_w(version_path, local, 0, &ri) == FS_FILE_OK && local_size(local) == 5,
+                "The older version copied: the content of the older snapshot");
+    DeleteFileW(local);
+    swprintf_s(version_path, _countof(version_path), L"%ls\\%ls", remote, newer);
+    ri.SizeLow = 12;
+    EXPECT_TRUE(p->get_file_w(version_path, local, 0, &ri) == FS_FILE_OK && local_size(local) == 12,
+                "The newer version copied");
+    DeleteFileW(local);
+    swprintf_s(version_path, _countof(version_path), L"%ls\\1999-01-01T00.00.00 with space.txt", remote);
+    EXPECT_TRUE(p->get_file_w(version_path, local, 0, &ri) == FS_FILE_NOTFOUND &&
+                    GetFileAttributesW(local) == INVALID_FILE_ATTRIBUTES,
+                "No such version: not found, nothing written");
+
+    /* Alt+Enter on a version: the snapshots holding it */
+    swprintf_s(version_path, _countof(version_path), L"%ls\\%ls", remote, newer);
+    EXPECT_TRUE(p->execute_w(NULL, version_path, properties) == FS_EXEC_OK && g_e2e_msg_dialogs == 1 &&
+                    wcsstr(g_e2e_last_msg, L"Version of with space.txt\n") == g_e2e_last_msg &&
+                    wcsstr(g_e2e_last_msg, L"Size: 12 B\n") != NULL && wcsstr(g_e2e_last_msg, L"In 1 snapshot:\n") != NULL,
+                "Alt+Enter on a version names it, its size and the snapshot holding it");
+
+    /* An unchanged file: one version in both snapshots */
+    swprintf_s(remote, _countof(remote), L"%ls\\readme.txt", data_path);
+    EXPECT_TRUE(list_names(p, remote, names, _countof(names)) && wcschr(names, L'|') == NULL &&
+                    wcsstr(names, L" readme.txt") != NULL,
+                "An unchanged file has one version");
+    swprintf_s(version_path, _countof(version_path), L"%ls\\%ls", remote, names);
+    EXPECT_TRUE(p->execute_w(NULL, version_path, properties) == FS_EXEC_OK && g_e2e_msg_dialogs == 2 &&
+                    wcsstr(g_e2e_last_msg, L"In 2 snapshots:\n") != NULL,
+                "...held by both snapshots");
+
+    EXPECT_TRUE(count_in_log(log_file, " find --json ") == finds + 1,
+                "Copying the versions and Alt+Enter on them ran no restic find again (one for readme.txt)");
+
+    /* A snapshot, or a folder in it: the snapshot's properties */
+    EXPECT_TRUE(p->execute_w(NULL, (WCHAR*)snap_root, properties) == FS_EXEC_OK && g_e2e_msg_dialogs == 3 &&
+                    wcsncmp(g_e2e_last_msg, L"Snapshot ", 9) == 0 && wcsstr(g_e2e_last_msg, L"\nPaths: ") != NULL &&
+                    wcsstr(g_e2e_last_msg, L"\nFiles: ") != NULL && wcsstr(g_e2e_last_msg, L"\nProgram: restic ") != NULL,
+                "Alt+Enter on a snapshot shows its properties");
+    static WCHAR snapshot_text[1024];
+    wcscpy_s(snapshot_text, _countof(snapshot_text), g_e2e_last_msg);
+    wcscpy_s(remote, _countof(remote), data_path);
+    EXPECT_TRUE(p->execute_w(NULL, remote, properties) == FS_EXEC_OK && g_e2e_msg_dialogs == 4 &&
+                    wcscmp(g_e2e_last_msg, snapshot_text) == 0 && wcscmp(remote, data_path) == 0,
+                "...and on a folder inside it the same");
+    wcscpy_s(remote, _countof(remote), L"\\MainRepo\\hosts");
+    EXPECT_TRUE(p->execute_w(NULL, remote, properties) == FS_EXEC_OK && g_e2e_msg_dialogs == 4,
+                "Above the snapshots: nothing to show");
+
+    /* A missing path is neither a folder nor a file */
+    swprintf_s(remote, _countof(remote), L"%ls\\no_such_file.txt", data_path);
+    SetLastError(0);
+    EXPECT_TRUE(p->find_first_w(remote, &fd) == INVALID_HANDLE_VALUE && GetLastError() == ERROR_PATH_NOT_FOUND,
+                "A missing file has no versions");
+    EXPECT_TRUE(g_e2e_pwd_prompts == 0 && g_e2e_msg_dialogs == 4, "No password asked, no error shown");
+    swprintf_s(local, _countof(local), L"%ls\\nothing.txt", dir);
+    swprintf_s(remote, _countof(remote), L"%ls\\no_such_file.txt\\2026-01-01T00.00.00 (00000000) no_such_file.txt",
+               data_path);
+    EXPECT_TRUE(p->get_file_w(remote, local, 0, &ri) == FS_FILE_NOTFOUND, "A version of a missing file: not found");
+    swprintf_s(remote, _countof(remote), L"%ls\\many\\no_such_file.txt", data_path);
+    EXPECT_TRUE(p->get_file_w(remote, local, 0, &ri) == FS_FILE_NOTFOUND, "A missing file in a folder: not found");
+    EXPECT_TRUE(count_in_log(log_file, " find --json ") == finds + 1 && g_e2e_msg_dialogs == 4,
+                "...and its folder or a missing path searched for by no restic find");
+
+    /* Without a password, Alt+Enter above the snapshots asks for none: there is nothing to show */
+    WCHAR forget[] = L"\\\U0001F5D1 Forget 1 Password", open_verb[] = L"open";
+    EXPECT_TRUE(p->execute_w(NULL, forget, open_verb) == FS_EXEC_SYMLINK, "Forget the password");
+    int runs = count_restic_runs(log_file);
+    static const WCHAR* const above[] = {L"\\MainRepo\\hosts", L"\\MainRepo\\snapshots", L"\\MainRepo\\snapshots.csv",
+                                         L"\\MainRepo\\snapshots.json", L"\\MainRepo\\ids\\", L"\\MainRepo\\tags\\daily"};
+    for (size_t i = 0; i < _countof(above); ++i) {
+        wcscpy_s(remote, _countof(remote), above[i]);
+        EXPECT_TRUE(p->execute_w(NULL, remote, properties) == FS_EXEC_OK, "Alt+Enter above the snapshots");
+    }
+    EXPECT_TRUE(g_e2e_pwd_prompts == 0 && count_restic_runs(log_file) == runs && g_e2e_msg_dialogs == 5,
+                "...asked for no password and ran no restic (only the forget entry's message)");
+    g_e2e_pwd_mode = 1;
+    EXPECT_TRUE(list_names(p, data_path, names, _countof(names)), "The password given again");
     g_e2e_pwd_prompts = 0;
     g_e2e_msg_dialogs = 0;
 }
@@ -1146,6 +1445,62 @@ static int read_small_file(const WCHAR* path, char* text, DWORD cap) {
 }
 
 /*
+ * snapshots.json beside snapshots.csv: restic's own `snapshots --json` output, listed as a read-only
+ * file of its exact size with the time of snapshots.csv, copied byte for byte, never a folder
+ */
+static void test_snapshots_json(const Plugin* p, const WCHAR* dir, const WCHAR* some_id, const WCHAR* latest_id) {
+    WIN32_FIND_DATAW fd;
+    RemoteInfo ri;
+    memset(&ri, 0, sizeof(ri));
+    BOOL listed  = FALSE;
+    FILETIME csv = {0, 0};
+    HANDLE h     = p->find_first_w(L"\\MainRepo", &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (wcscmp(fd.cFileName, L"snapshots.csv") == 0) csv = fd.ftLastWriteTime;
+            if (wcscmp(fd.cFileName, L"snapshots.json") != 0) continue;
+            listed = (fd.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY)) ==
+                         FILE_ATTRIBUTE_READONLY && fd.nFileSizeHigh == 0 && fd.nFileSizeLow > 0;
+            ri.SizeLow       = fd.nFileSizeLow;
+            ri.LastWriteTime = fd.ftLastWriteTime;
+            ri.Attr          = (int)fd.dwFileAttributes;
+        } while (p->find_next_w(h, &fd));
+        p->find_close(h);
+    }
+    EXPECT_TRUE(listed, "snapshots.json is listed as a read-only file with a size");
+    EXPECT_TRUE(csv.dwHighDateTime != 0 && CompareFileTime(&ri.LastWriteTime, &csv) == 0,
+                "...dated like snapshots.csv: when restic listed the snapshots");
+
+    WCHAR local[MAX_PATH];
+    swprintf_s(local, MAX_PATH, L"%ls\\snapshots.json", dir);
+    DeleteFileW(local);
+    EXPECT_TRUE(p->get_file_w(L"\\MainRepo\\snapshots.json", local, 0, &ri) == FS_FILE_OK, "snapshots.json copied");
+    static char text[65536];
+    int got = read_small_file(local, text, sizeof(text));
+    EXPECT_TRUE(got > 0 && (DWORD)got == ri.SizeLow, "The copy has exactly the listed size");
+    char some_a[16] = {0}, latest_a[16] = {0}, key[64];
+    WideCharToMultiByte(CP_UTF8, 0, some_id, -1, some_a, sizeof(some_a), NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, latest_id, -1, latest_a, sizeof(latest_a), NULL, NULL);
+    snprintf(key, sizeof(key), "\"short_id\":\"%s\"", latest_a);
+    BOOL has_latest = strstr(text, key) != NULL;
+    snprintf(key, sizeof(key), "\"short_id\":\"%s\"", some_a);
+    EXPECT_TRUE(got > 0 && text[0] == '[' && has_latest && strstr(text, key) != NULL &&
+                    strstr(text, "\"summary\":") != NULL,
+                "...restic's JSON array of the snapshots, summaries included");
+
+    EXPECT_TRUE(p->get_file_w(L"\\MainRepo\\snapshots.json", local, 0, &ri) == FS_FILE_EXISTS &&
+                    p->get_file_w(L"\\MainRepo\\Snapshots.JSON", local, FS_COPYFLAGS_OVERWRITE, &ri) == FS_FILE_OK,
+                "The overwrite protocol, the name ignoring case");
+    SetLastError(0);
+    EXPECT_TRUE(p->find_first_w(L"\\MainRepo\\snapshots.json", &fd) == INVALID_HANDLE_VALUE &&
+                    GetLastError() == ERROR_PATH_NOT_FOUND &&
+                    p->get_file_w(L"\\MainRepo\\snapshots.json\\x", local, FS_COPYFLAGS_OVERWRITE, &ri) == FS_FILE_NOTFOUND &&
+                    p->get_file_w(L"\\MainRepo\\tags\\snapshots.json", local, FS_COPYFLAGS_OVERWRITE, &ri) == FS_FILE_NOTFOUND,
+                "snapshots.json is a file, only in the repository's folder");
+    DeleteFileW(local);
+}
+
+/*
  * repository_id.txt beside snapshots.csv: listed with its fixed size (64 hexadecimal characters and
  * CRLF), read by restic once and then taken from the cache, never a folder
  */
@@ -1277,8 +1632,8 @@ static void test_live_end_to_end_navigation(void) {
     WIN32_FIND_DATAW fd;
     static WCHAR names[1024];
     EXPECT_TRUE(list_names(&p, L"\\MainRepo", names, _countof(names)) &&
-                    wcscmp(names, L"hosts|ids|snapshots|tags|snapshots.csv|repository_id.txt") == 0,
-                "Level 1 shows restic mount's folders, snapshots.csv and repository_id.txt after a password retry");
+                    wcscmp(names, L"hosts|ids|snapshots|tags|snapshots.csv|snapshots.json|repository_id.txt") == 0,
+                "Level 1 shows restic mount's folders, snapshots.csv, snapshots.json and repository_id.txt after a password retry");
     EXPECT_TRUE(g_e2e_pwd_prompts == 2, "Prompted twice (initial + 1 retry after wrong password)");
     EXPECT_TRUE(wcsstr(g_e2e_last_prompt, L"Wrong password") != NULL, "Retry prompt tells the user the password was wrong");
     EXPECT_TRUE(wcscmp(g_e2e_last_title, L"MainRepo - Restic repository password") == 0,
@@ -1334,6 +1689,7 @@ static void test_live_end_to_end_navigation(void) {
                 GetLastError() == ERROR_PATH_NOT_FOUND, "Unknown snapshot -> ERROR_PATH_NOT_FOUND");
     EXPECT_TRUE(g_e2e_pwd_prompts == 0 && g_e2e_msg_dialogs == 0, "No prompt and no dialog while browsing the tree");
     test_snapshots_csv(&p, dir, short_id, latest_link + 9);
+    test_snapshots_json(&p, dir, short_id, latest_link + 9);
     test_repository_id(&p, dir);
 
     /* The snapshot root is the same through latest and ids/ */
@@ -1390,6 +1746,7 @@ static void test_live_end_to_end_navigation(void) {
     EXPECT_TRUE(g_e2e_pwd_prompts == 0 && g_e2e_msg_dialogs == 0,
                 "All navigations within MainRepo reused the cached RAM password with no popups");
     test_e2e_snapshot_cache(&p, dir, data_path);
+    test_e2e_file_history(&p, dir, snap_root, data_path);
 
     /* 3. Repositories keep independent sessions: SecondRepo prompts once, MainRepo is NOT asked again */
     g_e2e_pwd_mode = 1;

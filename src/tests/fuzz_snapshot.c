@@ -1,25 +1,28 @@
 /*
  * Coverage-guided fuzz target for the parsers of restic's output that build the browsing structures
- * (libFuzzer entry point): the restic mount tree from `restic snapshots --json` (snapshot_tree.c)
- * and the whole-snapshot index from `restic ls --json` NDJSON (snapshot_index.c).
+ * (libFuzzer entry point): the restic mount tree from `restic snapshots --json` (snapshot_tree.c),
+ * the whole-snapshot index from `restic ls --json` NDJSON (snapshot_index.c) and the versions of a
+ * file from `restic find --json` (file_history.c).
  *
  * Not part of build.cmd: it needs a compiler with libFuzzer, e.g. from src/ with clang:
  *   clang -std=c11 -g -O1 -I. -fsanitize=fuzzer,address,undefined tests/fuzz_snapshot.c \
- *       snapshot_tree.c snapshot_index.c timestamp.c json.c -o fuzz_snapshot
+ *       snapshot_tree.c snapshot_index.c file_history.c timestamp.c json.c -o fuzz_snapshot
  *   ./fuzz_snapshot -max_len=65536 -max_total_time=3600 corpus/
  * (MSVC can build it as well with /fsanitize=fuzzer /fsanitize=address.)
  *
- * The first byte chooses what the rest is fed to: its low bit the parser, the next bits a time
- * format or a memory limit. Everything that parses is walked and the invariants the plugin relies
+ * The first byte chooses what the rest is fed to: its low bit the index or one of the other two,
+ * the next bits a time format or a memory limit. Everything that parses is walked and the invariants the plugin relies
  * on are checked - every name is one Windows-safe path component, folders are sorted, unique and
  * found again by name, snapshot IDs are hexadecimal, snapshots.csv reads back as one record of six
- * fields per snapshot with no cell that could start with a formula, whatever the separator - so a
- * violation aborts like a sanitizer finding.
+ * fields per snapshot with no cell that could start with a formula, whatever the separator, every
+ * version of a file has a unique name found again and lists exactly its snapshots - so a violation
+ * aborts like a sanitizer finding.
  */
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include "file_history.h"
 #include "snapshot_index.h"
 #include "snapshot_tree.h"
 
@@ -40,6 +43,8 @@ static void check_name(const char* name) {
     CHECK(name[len - 1] != '.' && name[len - 1] != ' ');
 }
 
+static const SnapshotTree* g_tree; /* The tree walk_tree() is in */
+
 static void walk_tree(const SnapshotNode* dir, int depth) {
     CHECK(depth <= 3); /* root / hosts|tags / <host|tag> / <snapshot> */
     for (size_t i = 0; i < dir->child_count; ++i) {
@@ -52,6 +57,13 @@ static void walk_tree(const SnapshotNode* dir, int depth) {
             CHECK(n >= SNAPSHOT_TREE_SHORT_ID_CHARS && n <= SNAPSHOT_TREE_ID_CHARS);
             CHECK(strspn(c->snapshot_id, "0123456789abcdef") == n && c->child_count == 0);
             CHECK(dir->time >= c->time);
+            /* The properties of a snapshot: lines of text, the first naming it */
+            char* text = snapshot_tree_describe(g_tree, c->snapshot_id);
+            if (text) {
+                size_t n = strlen(text);
+                CHECK(strncmp(text, "Snapshot ", 9) == 0 && n > 0 && text[n - 1] == '\n');
+                free(text);
+            }
         } else {
             walk_tree(c, depth + 1);
         }
@@ -102,6 +114,10 @@ static void fuzz_tree(const char* data, size_t size, const char* format) {
     if (!tree) return;
     const SnapshotNode* root = snapshot_tree_root(tree);
     CHECK(root->child_count == 4);
+    size_t json_len  = 0;
+    const char* json = snapshot_tree_json(tree, &json_len);
+    CHECK(json && json_len == size && memcmp(json, data, size) == 0 && json[size] == '\0'); /* snapshots.json */
+    g_tree = tree;
     walk_tree(root, 0);
     static const char SEPARATORS[] = {',', ';', '|', '\t'};
     char sep  = SEPARATORS[size % sizeof(SEPARATORS)];
@@ -152,14 +168,56 @@ static void fuzz_index(const char* data, size_t size, size_t limit) {
     snapshot_index_free(x);
 }
 
+/* A file name of 224 characters, then ". tail.docx": a version's name is cut around the dot */
+#define LONG_FILE_PATH "/a/" \
+    "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn" \
+    "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn. tail.docx"
+
+static void fuzz_history(const char* data, size_t size, const char* format, int in_snapshot, int long_name) {
+    const char* path = long_name ? LONG_FILE_PATH : "/a/b.txt";
+    FileHistory* h = NULL;
+    FileHistoryStatus st = file_history_build(data, size, path, NULL, format, &h);
+    CHECK((st == FILE_HISTORY_OK) == (h != NULL));
+    if (!h) return;
+    size_t count = file_history_count(h);
+    CHECK(count > 0 && file_history_version(h, count) == NULL);
+    for (size_t i = 0; i < count; ++i) {
+        const FileVersion* v = file_history_version(h, i);
+        size_t len = strlen(v->name);
+        check_name(v->name);
+        CHECK(len <= 255); /* ASCII: 255 UTF-16 units */
+        CHECK(file_history_find(h, v->name) == v);
+        if (i > 0) CHECK(timestamp_compare(&file_history_version(h, i - 1)->mtime, &v->mtime) <= 0);
+        CHECK(v->snapshot_count > 0 && file_history_snapshot(h, i, v->snapshot_count) == NULL);
+        CHECK(strcmp(file_history_snapshot(h, i, v->snapshot_count - 1), v->snapshot_id) == 0); /* The oldest */
+        /* "... (<short ID>) b.txt": the time format may hold " (" itself, a short file name is never cut */
+        CHECK(long_name || (len > 17 && strcmp(v->name + len - 7, ") b.txt") == 0 &&
+                            strncmp(v->name + len - 17, " (", 2) == 0 && strncmp(v->name + len - 15, v->snapshot_id, 8) == 0));
+        for (size_t k = 0; k < v->snapshot_count; ++k) CHECK(strlen(file_history_snapshot(h, i, k)) > 0);
+    }
+    /* Built again from inside a snapshot that holds a version: the same versions */
+    if (in_snapshot) {
+        char id[FILE_HISTORY_ID_CHARS + 1];
+        memcpy(id, file_history_version(h, count - 1)->snapshot_id, sizeof(id));
+        FileHistory* again = NULL;
+        CHECK(file_history_build(data, size, path, id, format, &again) == FILE_HISTORY_OK);
+        CHECK(file_history_count(again) == count);
+        file_history_free(again);
+    }
+    file_history_free(h);
+}
+
 int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     if (size == 0) return 0;
     unsigned mode = data[0];
     const char* text = (const char*)data + 1;
     if (mode & 1) {
         fuzz_index(text, size - 1, (mode >> 1) & 1 ? 0 : (size_t)(mode >> 2) * 1024u + 4096u);
+    } else if (mode & 2) {
+        fuzz_history(text, size - 1, FORMATS[(mode >> 3) % (sizeof(FORMATS) / sizeof(FORMATS[0]))], (mode >> 2) & 1,
+                     (mode >> 7) & 1);
     } else {
-        fuzz_tree(text, size - 1, FORMATS[(mode >> 1) % (sizeof(FORMATS) / sizeof(FORMATS[0]))]);
+        fuzz_tree(text, size - 1, FORMATS[(mode >> 2) % (sizeof(FORMATS) / sizeof(FORMATS[0]))]);
     }
     return 0;
 }

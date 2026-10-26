@@ -21,7 +21,7 @@ it up to date with every change.
 - [**Visual Studio 2026 Build Tools**](https://visualstudio.microsoft.com/)
   with the components listed in [`.vsconfig`](.vsconfig): the MSVC toolset,
   the Windows SDK, CMake and AddressSanitizer. For a build that matches the
-  CI build byte for byte, use the pinned release, 18.11.1 (see
+  CI build byte for byte, use the pinned release, 18.11.2 (see
   [Reproducible Builds](#reproducible-builds)). Installing with
   `vs_buildtools.exe --config .vsconfig` (as
   `setup-build-environment-example.cmd` and the CI workflow do) selects
@@ -130,10 +130,10 @@ are not shipped in the ZIP) and run from the repository root:
 | Program | Scope |
 |---|---|
 | `test_json` | The JSON reader on its own: malformed input, escapes, surrogates, exact 64-bit integers, the nesting limit, real Restic output, pinned JSONTestSuite edge cases |
-| `test_snapshot_tree` | RFC 3339 timestamps, the `restic mount` folder tree and the whole-snapshot index (portable C, also builds with gcc/clang and sanitizers): naming, `SnapshotTimeFormat`, `-1` suffixes, `latest`, `latest → <folder>` and `latest → <short ID>`, host and tag names made Windows-safe, `snapshots.csv` (quoting, sort order, formula defusing), the index's walk order, limits and lookups |
+| `test_snapshot_tree` | RFC 3339 timestamps, the `restic mount` folder tree and the whole-snapshot index (portable C, also builds with gcc/clang and sanitizers): naming, `SnapshotTimeFormat`, `-1` suffixes, `latest`, `latest → <folder>` and `latest → <short ID>`, host and tag names made Windows-safe, `snapshots.csv` (quoting, sort order, formula defusing) and `snapshots.json`, the index's walk order, limits and lookups, a file's versions from `restic find` |
 | `test_config` | `TCResticBrowser.ini` lookup and parsing, `[Repository: <alias>]` sections, `restic.exe` resolution (never from the current directory), root listing, the inert plugin without an INI |
 | `test_restic_cli` | `ls` parser, argument quoting, child-process handling with `cmd.exe` and a fake `restic` stand-in (`fake_restic.exe`), line streaming, the credentials in the environment, `-o` options, the job object, the version check, refused S3 credentials, and live tests against `tmp\restic.exe` (including every folder listed identically from the whole-snapshot index and from `restic ls`) |
-| `test_plugin_dll` | Loads the built DLL like Total Commander does: exact export surface, icon and version resources, INI lookup, and live navigation (the `restic mount` folders, background listings and refreshes) and extraction through the WFX API, also of `[Repository: <alias>]` settings, an `rclone:` repository and an S3 repository on `rclone serve s3` with `tmp\rclone.exe` |
+| `test_plugin_dll` | Loads the built DLL like Total Commander does: exact export surface, icon and version resources, INI lookup, and live navigation (the `restic mount` folders, background listings and refreshes) and extraction through the WFX API, also of `[Repository: <alias>]` settings, an `rclone:` repository and an S3 repository on `rclone serve s3` with `tmp\rclone.exe`, and `Alt+Enter` (the versions of a file and their dialog, snapshot details) |
 
 [AGENT.md](AGENT.md#87-test-suites-srctests) lists every case. Run them
 manually after a build:
@@ -145,7 +145,7 @@ build\x86\test_plugin_dll.exe
 
 `src\tests\fuzz_json.c` is a libFuzzer target for the JSON reader, and
 `src\tests\fuzz_snapshot.c` one for the parsers that turn restic's output
-into the snapshot tree and the whole-snapshot index. They are not part of
+into the snapshot tree, the whole-snapshot index and a file's versions. They are not part of
 `build.cmd` because they need a fuzzing-capable compiler; their headers show
 how to build and run them with clang.
 
@@ -172,7 +172,7 @@ compiler output":
 
 | Parameter | Pinned to | Files that must match |
 |---|---|---|
-| Visual Studio release | `18.11.1` | `build.cmd` (`EXPECTED_VS`), `.github\workflows\build.yml` (`VS_BUILDTOOLS_VERSION`, `_URL`, `_SHA256`), `setup-build-environment-example.cmd` (`VS_BUILDTOOLS_URL`, `_SHA256`) |
+| Visual Studio release | `18.11.2` | `build.cmd` (`EXPECTED_VS`), `.github\workflows\build.yml` (`VS_BUILDTOOLS_VERSION`, `_URL`, `_SHA256`), `setup-build-environment-example.cmd` (`VS_BUILDTOOLS_URL`, `_SHA256`) |
 | Exact `cl.exe` version | `19.51.36260` | `build.cmd` (`EXPECTED_CL`) |
 | MSVC toolset (major.minor) | `14.51` | `build.cmd` (`CMAKE_T`), `.vsconfig` (also used by the CI workflow) |
 | Windows SDK | `10.0.26100.0` | `build.cmd` (`CMAKE_SDK`), `.vsconfig` (also used by the CI workflow) |
