@@ -901,6 +901,129 @@ static void test_file_history(void) {
                     strcmp(pattern, "/a/b[*]c[?]d[[]e]f") == 0,
                 "Wildcards in a path matched literally");
     EXPECT_TRUE(file_history_pattern("/[[[", pattern, 10) == 0, "No room: nothing");
+    EXPECT_TRUE(file_history_pattern("/\\\\srv\\share/d/a*", pattern, sizeof(pattern)) == 21 &&
+                    strcmp(pattern, "/*/*/srv\\share/d/a[*]") == 0,
+                "A network share's leading backslashes as '*' components, not restic's \"**\"");
+    EXPECT_TRUE(file_history_pattern("/\\\\", pattern, 5) == 0 && file_history_pattern("/\\\\", pattern, 6) == 5,
+                "...within the room given");
+    EXPECT_TRUE(file_history_pattern("/C/\\\\x", pattern, sizeof(pattern)) == 6 && strcmp(pattern, "/C/\\\\x") == 0,
+                "...and only at the start");
+}
+
+/* Joins the names snapshot_tree_unc_list() passes with '|' */
+typedef struct {
+    char text[256];
+    size_t len;
+} UncNames;
+
+static void add_unc_name(void* ctx, const char* name, size_t len) {
+    UncNames* u = (UncNames*)ctx;
+    if (u->len + len + 2 > sizeof(u->text)) return;
+    if (u->len > 0) u->text[u->len++] = '|';
+    memcpy(u->text + u->len, name, len);
+    u->len += len;
+    u->text[u->len] = '\0';
+}
+
+static const char* unc_names(const SnapshotTree* tree, const char* id, const char* path) {
+    static UncNames u;
+    memset(&u, 0, sizeof(u));
+    size_t n = snapshot_tree_unc_list(tree, id, path, add_unc_name, &u);
+    return n == snapshot_tree_unc_list(tree, id, path, NULL, NULL) ? u.text : "(count differs)";
+}
+
+/* Network shares: restic's "\\server\share" folder shown as UNC/server/share and mapped back */
+static void test_unc_volumes(void) {
+    /* JSON of the paths: "\\srv\share\dir", "\\nas\backup", "\\SRV\share\other" (the same share in
+       another case), device paths ("\\?\UNC\dev\x", "\\.\unc\dev\s"), names no folder may have, a drive */
+    SnapshotTree* tree = build(
+        "[{\"time\":\"2026-10-20T10:00:00+02:00\",\"hostname\":\"pc\",\"id\":\"" ID("a") "\",\"paths\":["
+        "\"C:\\\\Users\",\"\\\\\\\\srv\\\\share\\\\dir\",\"\\\\\\\\nas\\\\backup\",\"\\\\\\\\?\\\\UNC\\\\dev\\\\x\","
+        "\"\\\\\\\\SRV\\\\share\\\\other\",\"\\\\\\\\.\\\\unc\\\\dev\\\\s\","
+        "\"\\\\\\\\..\\\\..\\\\evil\",\"\\\\\\\\srv\\\\..\\\\up\",\"\\\\\\\\srv\\\\ . \",\"\\\\\\\\x\\\\a\\u0001b\","
+        "\"\\\\\\\\lone\",\"\\\\\\\\\\\\share\",\"\\\\\\\\?\\\\C:\\\\x\",\"\\\\\\\\srv/share\\\\y\"]},"
+        "{\"time\":\"2026-10-20T11:00:00Z\",\"hostname\":\"linux\",\"id\":\"" ID("b") "\",\"paths\":[\"/UNC/srv\"]}]");
+    EXPECT_TRUE(tree != NULL, "Built");
+    char out[64];
+    EXPECT_TRUE(snapshot_tree_unc_path(tree, ID("a"), "/", out, sizeof(out)) == SNAPSHOT_UNC_ROOT && out[0] == '\0',
+                "The root of a snapshot of shares gets UNC");
+    EXPECT_TRUE(snapshot_tree_unc_path(tree, ID("a"), "/UNC", out, sizeof(out)) == SNAPSHOT_UNC_FOLDER &&
+                    snapshot_tree_unc_path(tree, ID("a"), "/unc/Srv", out, sizeof(out)) == SNAPSHOT_UNC_FOLDER,
+                "UNC and a server are folders of the plugin's own, in any case");
+    EXPECT_TRUE(strcmp(unc_names(tree, ID("a"), "/UNC"), "srv|nas") == 0, "UNC: the servers, each once, no device path");
+    EXPECT_TRUE(strcmp(unc_names(tree, ID("a"), "/UNC/srv"), "share") == 0, "A server: its shares, each once");
+    EXPECT_TRUE(strcmp(unc_names(tree, ID("a"), "/UNC/nas"), "backup") == 0, "... of each server");
+    EXPECT_TRUE(strcmp(unc_names(tree, ID("a"), "/UNC/srv/share"), "") == 0 &&
+                    strcmp(unc_names(tree, ID("a"), "/"), "") == 0 && strcmp(unc_names(tree, ID("a"), "/UNC/x"), "") == 0,
+                "Nothing is listed for a share, the root or an unknown server");
+
+    EXPECT_TRUE(snapshot_tree_unc_path(tree, ID("a"), "/UNC/srv/share/dir/a.txt", out, sizeof(out)) ==
+                        SNAPSHOT_UNC_MAPPED && strcmp(out, "/\\\\srv\\share/dir/a.txt") == 0,
+                "A path on a share is restic's");
+    EXPECT_TRUE(snapshot_tree_unc_path(tree, ID("a"), "/UNC/SRV/share", out, sizeof(out)) == SNAPSHOT_UNC_MAPPED &&
+                    strcmp(out, "/\\\\SRV\\share") == 0,
+                "The exact case first");
+    EXPECT_TRUE(snapshot_tree_unc_path(tree, ID("a"), "/UNC/Srv/SHARE", out, sizeof(out)) == SNAPSHOT_UNC_MAPPED &&
+                    strcmp(out, "/\\\\srv\\share") == 0,
+                "... else the first ignoring case");
+    EXPECT_TRUE(snapshot_tree_unc_path(tree, ID("a"), "/UNC/nas/backup/b", out, sizeof(out)) == SNAPSHOT_UNC_MAPPED &&
+                    strcmp(out, "/\\\\nas\\backup/b") == 0,
+                "Each share to its own volume");
+    static const char* const none[] = {"/UNC/../..", "/UNC/srv/..", "/UNC/srv/ . ", "/UNC/lone", "/UNC/x/a\x01b",
+                                       "/UNC/srv/none", "/UNC/none/share", "/C/Users", "/UNCX/srv/share", "/UNC/C:/x",
+                                       "/UNC/dev", "/UNC/dev/x", "/UNC/dev/s", "/UNC/?/UNC", "/UNC/./UNC"};
+    for (size_t i = 0; i < sizeof(none) / sizeof(none[0]); ++i) {
+        EXPECT_TRUE(snapshot_tree_unc_path(tree, ID("a"), none[i], out, sizeof(out)) == SNAPSHOT_UNC_NONE && out[0] == '\0',
+                    none[i]);
+    }
+    EXPECT_TRUE(snapshot_tree_unc_path(tree, ID("b"), "/", out, sizeof(out)) == SNAPSHOT_UNC_NONE &&
+                    snapshot_tree_unc_path(tree, ID("b"), "/UNC/srv", out, sizeof(out)) == SNAPSHOT_UNC_NONE &&
+                    snapshot_tree_unc_path(tree, ID("c"), "/UNC", out, sizeof(out)) == SNAPSHOT_UNC_NONE,
+                "A folder named UNC in a snapshot without shares, or an unknown snapshot, is left alone");
+    EXPECT_TRUE(snapshot_tree_unc_path(tree, ID("a"), "/UNC/srv/share/dir", out, 16) == SNAPSHOT_UNC_TOO_LONG &&
+                    snapshot_tree_unc_path(tree, ID("a"), "/UNC/srv/share/dir", out, 17) == SNAPSHOT_UNC_MAPPED,
+                "Too long for `out`: 16 bytes and the NUL");
+    EXPECT_TRUE(snapshot_tree_unc_path(NULL, ID("a"), "/", out, sizeof(out)) == SNAPSHOT_UNC_NONE &&
+                    snapshot_tree_unc_path(tree, ID("a"), NULL, out, sizeof(out)) == SNAPSHOT_UNC_NONE &&
+                    snapshot_tree_unc_list(tree, ID("a"), NULL, NULL, NULL) == 0,
+                "NULL arguments");
+
+    static const struct {
+        const char* path;
+        size_t volume;
+    } volumes[] = {{"\\\\srv\\share", 11}, {"\\\\srv\\share\\d", 11}, {"\\\\srv\\share/d", 11},
+                   {"\\\\?\\UNC\\srv\\s", 0}, {"\\\\.\\UNC\\srv\\s\\", 0}, {"\\\\srv", 0},
+                   {"\\\\srv\\", 0}, {"\\\\..\\x", 0}, {"\\\\x\\..", 0}, {"\\\\?\\C:\\x", 0},
+                   {"\\srv\\share", 0}, {"\\\\srv/share", 0}, {"//srv/share", 0}, {"\\\\?\\UNC\\srv", 0}};
+    for (size_t i = 0; i < sizeof(volumes) / sizeof(volumes[0]); ++i) {
+        EXPECT_TRUE(snapshot_tree_unc_volume(volumes[i].path, strlen(volumes[i].path)) == volumes[i].volume,
+                    volumes[i].path);
+    }
+    snapshot_tree_free(tree);
+
+    /* More volumes than SNAPSHOT_TREE_UNC_MAX_VOLUMES: only the first ones are used, so listing stays quick */
+    enum { MANY = 20000 };
+    size_t cap = 200 + (size_t)MANY * 24;
+    char* json = (char*)malloc(cap);
+    EXPECT_TRUE(json != NULL, "Memory for many shares");
+    if (!json) return;
+    size_t len = (size_t)snprintf(json, cap, "[{\"time\":\"2026-10-20T10:00:00Z\",\"hostname\":\"pc\",\"id\":\"%s\",\"paths\":[",
+                                  ID("a"));
+    for (int i = 0; i < MANY; ++i) {
+        len += (size_t)snprintf(json + len, cap - len, "%s\"\\\\\\\\s%d\\\\x\"", i ? "," : "", i);
+    }
+    snprintf(json + len, cap - len, "]}]");
+    tree = build(json);
+    free(json);
+    clock_t start = clock();
+    size_t servers = snapshot_tree_unc_list(tree, ID("a"), "/UNC", NULL, NULL);
+    double seconds = (double)(clock() - start) / CLOCKS_PER_SEC;
+    EXPECT_TRUE(servers == SNAPSHOT_TREE_UNC_MAX_VOLUMES, "Many shares: the first ones listed");
+    EXPECT_TRUE(seconds < 10.0, "...without comparing every one with every other");
+    EXPECT_TRUE(snapshot_tree_unc_path(tree, ID("a"), "/UNC/s1023/x/f", out, sizeof(out)) == SNAPSHOT_UNC_MAPPED &&
+                    snapshot_tree_unc_path(tree, ID("a"), "/UNC/s1024/x/f", out, sizeof(out)) == SNAPSHOT_UNC_NONE,
+                "...and reached, the others not");
+    snapshot_tree_free(tree);
 }
 
 int main(void) {
@@ -925,6 +1048,7 @@ int main(void) {
     test_index_listing();
     test_index_errors();
     test_index_large_folder();
+    test_unc_volumes();
     printf("[SNAPSHOT TREE] %d checks, %d failed\n", g_tests_run, g_tests_failed);
     return g_tests_failed == 0 ? 0 : 1;
 }

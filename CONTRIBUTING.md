@@ -130,10 +130,10 @@ are not shipped in the ZIP) and run from the repository root:
 | Program | Scope |
 |---|---|
 | `test_json` | The JSON reader on its own: malformed input, escapes, surrogates, exact 64-bit integers, the nesting limit, real Restic output, pinned JSONTestSuite edge cases |
-| `test_snapshot_tree` | RFC 3339 timestamps, the `restic mount` folder tree and the whole-snapshot index (portable C, also builds with gcc/clang and sanitizers): naming, `SnapshotTimeFormat`, `-1` suffixes, `latest`, `latest → <folder>` and `latest → <short ID>`, host and tag names made Windows-safe, `snapshots.csv` (quoting, sort order, formula defusing) and `snapshots.json`, the index's walk order, limits and lookups, a file's versions from `restic find` |
+| `test_snapshot_tree` | RFC 3339 timestamps, the `restic mount` folder tree and the whole-snapshot index (portable C, also builds with gcc/clang and sanitizers): naming, `SnapshotTimeFormat`, `-1` suffixes, `latest`, `latest → <folder>` and `latest → <short ID>`, host and tag names made Windows-safe, `snapshots.csv` (quoting, sort order, formula defusing) and `snapshots.json`, the index's walk order, limits and lookups, a file's versions from `restic find`, network shares (`UNC\<server>\<share>` mapped to restic's volume names) |
 | `test_config` | `TCResticBrowser.ini` lookup and parsing, `[Repository: <alias>]` sections, `restic.exe` resolution (never from the current directory), root listing, the inert plugin without an INI |
 | `test_restic_cli` | `ls` parser, argument quoting, child-process handling with `cmd.exe` and a fake `restic` stand-in (`fake_restic.exe`), line streaming, the credentials in the environment, `-o` options, the job object, the version check, refused S3 credentials, and live tests against `tmp\restic.exe` (including every folder listed identically from the whole-snapshot index and from `restic ls`) |
-| `test_plugin_dll` | Loads the built DLL like Total Commander does: exact export surface, icon and version resources, INI lookup, and live navigation (the `restic mount` folders, background listings and refreshes) and extraction through the WFX API, also of `[Repository: <alias>]` settings, an `rclone:` repository and an S3 repository on `rclone serve s3` with `tmp\rclone.exe`, and `Alt+Enter` (the versions of a file and their dialog, snapshot details) |
+| `test_plugin_dll` | Loads the built DLL like Total Commander does: exact export surface, icon and version resources, INI lookup, and live navigation (the `restic mount` folders, background listings and refreshes) and extraction through the WFX API, also of `[Repository: <alias>]` settings, an `rclone:` repository and an S3 repository on `rclone serve s3` with `tmp\rclone.exe`, and `Alt+Enter` (the versions of a file and their dialog, snapshot details), and network shares (with `fake_restic.exe`) |
 
 [AGENT.md](AGENT.md#87-test-suites-srctests) lists every case. Run them
 manually after a build:
@@ -145,7 +145,7 @@ build\x86\test_plugin_dll.exe
 
 `src\tests\fuzz_json.c` is a libFuzzer target for the JSON reader, and
 `src\tests\fuzz_snapshot.c` one for the parsers that turn restic's output
-into the snapshot tree, the whole-snapshot index and a file's versions. They are not part of
+into the snapshot tree (with its network shares), the whole-snapshot index and a file's versions. They are not part of
 `build.cmd` because they need a fuzzing-capable compiler; their headers show
 how to build and run them with clang.
 

@@ -155,3 +155,60 @@ uint64_t snapshot_tree_listed_at(const SnapshotTree* tree);
  * snapshot.
  */
 const SnapshotNode* snapshot_tree_child(const SnapshotNode* dir, const char* name);
+
+/*
+ * Network shares inside a snapshot
+ *
+ * restic names the top folder of a backed-up Windows path after its volume (pathComponents in its
+ * internal/archiver/tree.go, Go's filepath.VolumeName): "C:\Users" is stored below "/C", but
+ * "\\server\share\dir" below one folder named "\\server\share", backslashes and all. A name holding
+ * a separator is never listed (it would be several components on Windows), so such a folder is
+ * shown as UNC\<server>\<share> instead, much as restic stores "C:" as "C", and the paths below it
+ * are mapped back for restic. Which volumes a snapshot holds comes from the paths it backed up
+ * (`restic snapshots`), so no restic run is needed for it. A server or share name that is empty,
+ * made only of dots and spaces, or holds a control character, one of : * ? " < > | or a '/'
+ * (restic writes backslashes) cannot name a folder: its volume stays hidden, as before. So does a
+ * device path ("\\?\UNC\server\share", whose volume is "\\?\UNC" to Go, and "\\.\UNC\..."):
+ * restic 0.19.1 cannot back one up. Volumes that differ only in ASCII case are listed once, after
+ * the first of them in the snapshot's paths; the others are reached only by their exact case. Only
+ * the first SNAPSHOT_TREE_UNC_MAX_VOLUMES volumes in the paths are used.
+ */
+#define SNAPSHOT_TREE_UNC_NAME "UNC"
+
+/* Listing a folder of servers or shares compares each name with those listed before it */
+#define SNAPSHOT_TREE_UNC_MAX_VOLUMES 1024
+
+typedef enum {
+    SNAPSHOT_UNC_NONE = 0, /* Nothing to do with the snapshot's network shares: as it is */
+    SNAPSHOT_UNC_ROOT,     /* The snapshot's root ("/"), which holds network shares: also list "UNC" */
+    SNAPSHOT_UNC_FOLDER,   /* "/UNC" or "/UNC/<server>", folders only the plugin shows: snapshot_tree_unc_list() */
+    SNAPSHOT_UNC_MAPPED,   /* "/UNC/<server>/<share>[/...]": restic's path to it written into `out` */
+    SNAPSHOT_UNC_TOO_LONG  /* SNAPSHOT_UNC_MAPPED, but `out` is too small */
+} SnapshotUncKind;
+
+/*
+ * What `path`, inside the snapshot with this full ID (UTF-8, "/" or "/a/b" without a trailing '/',
+ * as restic_normalize_filter_path() writes it), is to the snapshot's network shares. "UNC", the
+ * server and the share are matched exactly first, otherwise ignoring ASCII case. For
+ * SNAPSHOT_UNC_MAPPED `out` (`cap` bytes) receives "/<volume as restic named it>" and the rest of
+ * the path ("/\\server\share/dir"); otherwise it is "". SNAPSHOT_UNC_NONE also when the tree has
+ * no such snapshot or for a NULL argument.
+ */
+SnapshotUncKind snapshot_tree_unc_path(const SnapshotTree* tree, const char* id, const char* path, char* out,
+                                       size_t cap);
+
+/*
+ * The folders in `path`, a SNAPSHOT_UNC_FOLDER of the snapshot with this full ID: the servers in
+ * "/UNC", the shares of the server in "/UNC/<server>", each once (ignoring ASCII case), passed to
+ * `add` (`len` bytes of UTF-8, not NUL-terminated) unless it is NULL. Returns how many there are
+ * (0 also without memory).
+ */
+size_t snapshot_tree_unc_list(const SnapshotTree* tree, const char* id, const char* path,
+                              void (*add)(void* ctx, const char* name, size_t len), void* ctx);
+
+/*
+ * The length of the network share volume ("\\server\share") that
+ * `path` (`len` bytes) starts with, followed by a separator or nothing; 0 when it starts with none
+ * that snapshot_tree_unc_path() would map to
+ */
+size_t snapshot_tree_unc_volume(const char* path, size_t len);

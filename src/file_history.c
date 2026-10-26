@@ -300,7 +300,14 @@ const char* file_history_snapshot(const FileHistory* history, size_t i, size_t k
 
 size_t file_history_pattern(const char* path, char* out, size_t cap) {
     size_t o = 0;
-    for (const char* p = path; *p; ++p) {
+    const char* p = path;
+    if (strncmp(path, "/\\\\", 3) == 0) { /* A network share: see the header */
+        if (cap < 6) return 0;
+        memcpy(out, "/*/*/", 5);
+        o = 5;
+        p += 3;
+    }
+    for (; *p; ++p) {
         const char* with = *p == '*' ? "[*]" : *p == '?' ? "[?]" : *p == '[' ? "[[]" : NULL;
         size_t n         = with ? 3 : 1;
         if (o + n + 1 > cap) return 0;

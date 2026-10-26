@@ -122,7 +122,11 @@ BOOL restic_parse_iso8601_time(const char* iso_str, FILETIME* out_ft);
 
 /**
  * Normalizes a WFX wide subpath (e.g. L"", L"\\", L"\\C\\Users\\Docs\\") into the canonical
- * UTF-8 forward-slash absolute path required by Restic (e.g. "/", "/C/Users/Docs").
+ * UTF-8 forward-slash absolute path required by Restic (e.g. "/", "/C/Users/Docs"). A subpath that
+ * starts with '/' and a network share volume (snapshot_tree_unc_volume(),
+ * L"/\\\\server\\share\\Docs": what main.c maps "\\UNC\\server\\share\\Docs" to; a path from
+ * Total Commander starts with a backslash) keeps the volume as the first component, as restic names
+ * it ("/\\\\server\\share/Docs").
  */
 BOOL restic_normalize_filter_path(
     const WCHAR* subpath_w,

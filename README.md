@@ -238,8 +238,8 @@ it can, so the same folder can take a moment once and open instantly later:
 | Any folder of that snapshot once the background read is done | Instant, from memory. The read takes from seconds to minutes depending on the number of files, and runs while you browse. |
 | A snapshot with more files than `SnapshotCacheMB=` holds | Every folder waits for its own `restic ls`; it is never read as a whole. |
 | A file you view (`F3`, `Ctrl+Q`) or copy (`F5`) | Always runs `restic dump`, about a second per file plus the transfer. |
-| The versions of a file (`Alt+Enter`) | Waits for one `restic find`, which opens every snapshot of the host along the file's path: longer than a folder, shorter than opening the snapshots one by one. Kept for a minute (`SnapshotListRefreshSeconds=`), so returning to it runs no `restic find` again; copying a version or `Alt+Enter` on one does not either, as long as the versions are still remembered (the last eight files looked up per repository). |
-| The details of a snapshot (`Alt+Enter`) | Instant on a snapshot folder, from the snapshot list. On a folder inside a snapshot, one `restic ls` until the snapshot has been read as a whole (to tell a folder from a file). |
+| The versions of a file (`Alt+Enter`) | Waits for one `restic find`, which opens every snapshot of the host along the file's path (for a file on a [network share](#network-shares-unc-paths) also the first two folder levels of each): longer than a folder, shorter than opening the snapshots one by one. Kept for a minute (`SnapshotListRefreshSeconds=`), so returning to it runs no `restic find` again; copying a version or `Alt+Enter` on one does not either, as long as the versions are still remembered (the last eight files looked up per repository). |
+| The details of a snapshot (`Alt+Enter`) | Instant on a snapshot folder and on `UNC` and its server folders, from the snapshot list. On a folder inside a snapshot, one `restic ls` until the snapshot has been read as a whole (to tell a folder from a file). |
 
 After the password timeout (30 minutes by default) or `🗑 Forget N
 Passwords`, everything read from that repository is dropped, so the next
@@ -469,6 +469,7 @@ made it. Above the snapshots (the repository's folder and its files,
 | Repository folders, `🗑 Forget N Passwords` | None |
 | `hosts`, `ids`, `snapshots`, `tags`, a host's or a tag's folder | When the newest snapshot in it was taken; none if it holds no snapshot (`tags` when no snapshot has a tag) |
 | A snapshot's folder, also `latest` and `latest → …` | When the snapshot was taken |
+| `UNC`, `UNC\<server>` and `UNC\<server>\<share>` in a snapshot ([Network Shares](#network-shares-unc-paths)) | When the snapshot was taken |
 | Files and folders in a snapshot | Their modification time as restic recorded it (none if restic has none); creation and access time from restic's `ctime` and `atime` |
 | The versions of a file (`Alt+Enter`) | The version's modification time |
 | `snapshots.csv`, `snapshots.json` | When restic was asked for the snapshot list it is made from |
@@ -480,6 +481,52 @@ was taken, so the two differ for a snapshot from another time zone. A
 copied file (`F5`) keeps its modification time. On Linux and macOS,
 restic's `ctime` is the time a file's metadata last changed, not when it
 was created.
+
+### Network Shares (UNC Paths)
+
+A backup of a network share (`restic backup \\nas\media\Documents`, or
+`//nas/media/Documents`, which restic stores the same way) is shown inside
+the snapshot as **`UNC\<server>\<share>`**, next to the drive letters:
+
+```text
+\\\TCResticBrowser\MyLocalBackup\snapshots\2026-10-18_09-30-00\
+├── C\                       <-- C:\ as restic stores it
+└── UNC\
+    └── nas\
+        └── media\
+            └── Documents\   <-- \\nas\media\Documents
+```
+
+restic itself stores such a share as a single folder named
+`\\nas\media`, backslashes included, which is not a valid folder name on
+Windows; this is also why `restic restore` of a share fails on Windows with
+"invalid child node name" ([restic issue #2807](https://github.com/restic/restic/issues/2807)).
+The plugin shows it as `UNC\nas\media`, as in the long form Windows has for
+such a path (`\\?\UNC\nas\media`), and maps every path below it back to
+restic's name, so browsing, copying (`F5`), viewing and the versions of a
+file (`Alt+Enter`) work as on a drive. `UNC` and the server folder are the
+plugin's own: `F5` on them copies the shares below, and `Alt+Enter` shows
+the snapshot's details. Their date is the snapshot's. Looking up the
+versions of a file on a share opens the first two folder levels of every
+snapshot of the host as well as the file's path, because restic cannot be
+asked for a path that starts with `\\` without searching every snapshot
+whole.
+
+Which shares a snapshot holds is taken from the paths it backed up, so the
+plugin needs no extra restic run for it. A server or share name that is
+empty, made only of dots and spaces (`.`, `..`), or contains a character no
+Windows server or share name can have (`/ : * ? " < > |` or control
+characters), is not shown at all, so a damaged or forged snapshot cannot
+lead a copy out of the target folder. Shares whose names differ only in case
+(`\\nas\media` and `\\NAS\media`) are shown once, with the contents of the
+first of them in the snapshot's paths; the other can still be opened by
+typing its exact name. A share given to restic in the long form
+(`\\?\UNC\nas\media`) is not shown: restic 0.19.1 fails to back it up, and
+any snapshot of it would hold a folder named `\\?\UNC` instead. A folder backed up
+by a relative path while a share was the current folder (PowerShell
+`cd \\nas\media; restic backup Documents`) is stored by restic as
+`Documents` at the snapshot's root, where it is shown; its share is listed
+under `UNC` all the same, but cannot be opened.
 
 ### File Names from Other Systems
 
@@ -501,6 +548,9 @@ Total Commander then reports a write error for that file. To restore a single
 such file, press `F5` on it alone and type another name in the copy dialog.
 Names containing `\` or `/`, or consisting only of dots and spaces, are not
 listed at all, so a snapshot can never make a copy leave the target folder.
+The only such name shown at all, in another form, is the folder restic
+makes of a network share: `UNC\<server>\<share>`, whose server and share
+names are checked the same way (see [Network Shares](#network-shares-unc-paths)).
 
 ### Configuration
 

@@ -156,6 +156,16 @@ static void test_path_and_quote_helpers(void) {
     EXPECT_TRUE(restic_normalize_filter_path(L"\\\u00fcn\\\u65e5\u672c", norm, sizeof(norm)), "Unicode path");
     EXPECT_STR_EQ(norm, "/\xC3\xBCn/\xE6\x97\xA5\xE6\x9C\xAC", "UTF-8 encoding");
     EXPECT_TRUE(!restic_normalize_filter_path(L"\\abcdefghijklmnop", norm, 8), "Output buffer too small");
+    /* A network share as main.c maps it, after a '/', and paths that only look like one */
+    EXPECT_TRUE(restic_normalize_filter_path(L"/\\\\srv\\share\\dir\\", norm, sizeof(norm)), "Mapped share");
+    EXPECT_STR_EQ(norm, "/\\\\srv\\share/dir", "The share's volume stays one component, as restic names it");
+    EXPECT_TRUE(restic_normalize_filter_path(L"/\\\\?\\UNC\\srv\\share", norm, sizeof(norm)), "A device path");
+    EXPECT_STR_EQ(norm, "/?/UNC/srv/share", "... is no share: never mapped to");
+    EXPECT_TRUE(restic_normalize_filter_path(L"\\\\Z\\home\\x", norm, sizeof(norm)), "Doubled leading backslash");
+    EXPECT_STR_EQ(norm, "/Z/home/x", "... is no share: Total Commander's paths start with a backslash");
+    EXPECT_TRUE(restic_normalize_filter_path(L"/\\\\..\\..\\x", norm, sizeof(norm)), "A share named ..");
+    EXPECT_STR_EQ(norm, "/../../x", "... is no share either");
+    EXPECT_TRUE(!restic_normalize_filter_path(L"/\\\\srv\\share", norm, 12), "No room for the share");
 
     /* A maximum-length (1023 UTF-16 units) path made of 3-byte characters must fit */
     WCHAR* long_path = (WCHAR*)calloc(1024, sizeof(WCHAR));
