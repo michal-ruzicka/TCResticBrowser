@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A long error message from restic no longer ends in `�`.** Cut to
+  fit the dialog, it could be cut inside a non-ASCII character.
+
 ## [v2.3.1] – 2026-10-26
 
 ### Fixed

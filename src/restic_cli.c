@@ -55,7 +55,11 @@ static void utf8_to_wide_trunc(const char* src, WCHAR* dst, size_t cap) {
     if (!src) return;
 
     size_t len = strlen(src);
-    if (len > cap - 1) len = cap - 1;
+    if (len > cap - 1) {
+        len = cap - 1;
+        /* Cut before a character, not inside it, which would end the text in U+FFFD */
+        while (len > 0 && ((unsigned char)src[len] & 0xC0) == 0x80) --len;
+    }
     int n = MultiByteToWideChar(CP_UTF8, 0, src, (int)len, dst, (int)(cap - 1));
     dst[n > 0 ? n : 0] = L'\0';
 }

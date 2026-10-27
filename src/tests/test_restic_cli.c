@@ -427,6 +427,19 @@ static void test_exec_streams_and_exit_codes(void) {
     EXPECT_TRUE(res == RESTIC_ERR_CLI_FAILED, "Long stderr line");
     EXPECT_TRUE(wcslen(out.error_message) == 511, "Message truncated to the buffer size");
     restic_free_command_output(&out);
+
+    /* ... before a character cut by the limit, not inside it: 510 x "y", then two "é" (2 bytes each) */
+    long_args = (WCHAR*)calloc(2048, sizeof(WCHAR));
+    EXPECT_TRUE(long_args != NULL, "Allocate");
+    wcscpy_s(long_args, 2048, L"/c \"echo {\"message\":\"");
+    for (int i = 0; i < 510; ++i) wcscat_s(long_args, 2048, L"y");
+    wcscat_s(long_args, 2048, L"\\u00e9\\u00e9\"} 1>&2& exit /b 1\"");
+    res = run_cmd(long_args, NULL, &out);
+    free(long_args);
+    EXPECT_TRUE(res == RESTIC_ERR_CLI_FAILED, "Long JSON message");
+    EXPECT_TRUE(wcslen(out.error_message) == 510 && out.error_message[509] == L'y',
+                "Message cut before the character that did not fit, no U+FFFD");
+    restic_free_command_output(&out);
 }
 
 /* Credentials are injected, conflicting inherited variables removed, the rest inherited */
