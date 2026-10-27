@@ -3,5 +3,5 @@ type=wfx
 file=TCResticBrowser.wfx
 description=A Total Commander File System plugin (WFX) that lets you browse Restic backup repositories and copy files out of their snapshots, right in Total Commander's panels.
 defaultdir=TCResticBrowser
-version=2.3.1
-release-date=2026-10-26
+version=2.3.2
+release-date=2026-10-27

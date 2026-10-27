@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.3.2] – 2026-10-27
+
+### Fixed
+
+- **A long error message from restic no longer ends in `�`.** Cut to
+  fit the dialog, it could be cut inside a non-ASCII character.
+
 ## [v2.3.1] – 2026-10-26
 
 ### Fixed
@@ -394,6 +401,7 @@ by Pietro Partescano, the base of this fork was commit [c8481b43c9ab2867eee82471
   block.
 
 
+[v2.3.2]: https://github.com/michal-ruzicka/TCResticBrowser/compare/v2.3.1...v2.3.2
 [v2.3.1]: https://github.com/michal-ruzicka/TCResticBrowser/compare/v2.3.0...v2.3.1
 [v2.3.0]: https://github.com/michal-ruzicka/TCResticBrowser/compare/v2.2.0...v2.3.0
 [v2.2.0]: https://github.com/michal-ruzicka/TCResticBrowser/compare/v2.1.0...v2.2.0
