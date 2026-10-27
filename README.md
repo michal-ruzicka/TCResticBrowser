@@ -12,6 +12,12 @@
 > is his work, and many thanks to him for it, above all for the idea of the
 > plugin itself.
 >
+> **The two plugins are developed independently.** The original deliberately
+> stays lean, with a core set of features, while this fork has a broader
+> scope and follows its own path, as agreed with its author
+> ([upstream issue #3](https://github.com/goldfix/Restic_WFX_Plugin/issues/3#issuecomment-6427952842));
+> its versions start at 2.0.0, apart from the original's 1.*x* line.
+>
 > This fork started mainly to have **reproducible builds**: the same source
 > and the pinned toolchain give a byte-identical release ZIP, so anyone can
 > check that a published binary was built from the published source — see
