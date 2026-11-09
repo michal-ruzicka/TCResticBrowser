@@ -362,7 +362,7 @@ static void test_user_ini_overrides_plugin_ini(void) {
                 GetFileAttributesW(tc_ini) == INVALID_FILE_ATTRIBUTES,
                 "No INI file is auto-created on disk");
 
-    /* The shipped INI next to the DLL is used while there is no per-user one */
+    /* An INI next to the DLL is used while there is no per-user one */
     EXPECT_TRUE(write_file(plug_ini, "[Repositories]\r\nShipped=D:\\repo\r\n"), "Write plugin-directory INI");
     h = p.find_first_w(L"\\", &fd);
     EXPECT_TRUE(h != INVALID_HANDLE_VALUE, "Plugin-directory INI is used");

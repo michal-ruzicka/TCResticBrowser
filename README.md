@@ -576,8 +576,11 @@ In a standard installation the first two are the same file.
 
 The plugin ships only `TCResticBrowser.sample.ini`, with every option
 commented out and no effect of its own, so no repositories are listed until
-you create your settings. To configure the plugin for your user account,
-copy the sample to `%APPDATA%\GHISLER\TCResticBrowser.ini` and edit the copy;
+you create your settings. Every other setting has a default built in, but the
+repositories have to come from you. To configure the plugin for your user
+account, copy the sample from the plugin's folder (**Configuration → Options →
+Plugins → File system plugins → Configure** shows where it is) to
+`%APPDATA%\GHISLER\TCResticBrowser.ini` and edit the copy;
 a system-wide file is then ignored entirely. Updates of the plugin leave both
 files alone. The chosen file is re-read on
 every root listing and repository operation — edits take effect on the next
@@ -590,7 +593,8 @@ that is not valid UTF-8 is read in the Windows ANSI code page, so an INI
 saved for version 1.x keeps working.
 
 **Portable Total Commander:** copy the sample to `TCResticBrowser.ini` next
-to `wincmd.ini`; it travels with Total Commander, updates leave it alone, and
+to `wincmd.ini` (`cd %COMMANDER_INI%\..` in Total Commander's command line takes you
+there); it travels with Total Commander, updates leave it alone, and
 a `%APPDATA%\GHISLER\TCResticBrowser.ini` on the computer you run it on has no
 say over it. [`RootName`](#root-folder-name) is the one exception: Total
 Commander asks for it while installing the plugin, before telling the plugin
