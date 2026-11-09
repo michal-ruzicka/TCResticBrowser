@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Updating the plugin no longer overwrites your settings.** The release ZIP
+  now carries `TCResticBrowser.sample.ini` instead of `TCResticBrowser.ini`, so an update
+  leaves a `TCResticBrowser.ini` in the plugin folder alone. To change settings, copy
+  the sample to `TCResticBrowser.ini` and edit the copy (see *Configuration* in the
+  README). A `TCResticBrowser.ini` left there by an earlier version keeps working.
+
 ## [v2.3.2] – 2026-10-27
 
 ### Fixed

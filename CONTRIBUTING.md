@@ -54,7 +54,7 @@ linked against the static MSVC runtime, and contains no third-party code.
 | `build\` | CMake out-of-source build trees and the ZIP staging folder (gitignored) |
 | `dist\` | Released ZIP bundles (gitignored) |
 | `logo\` | SVG sources of the plugin icon `src\TCResticBrowser.ico` (see [Plugin Icon](#plugin-icon)) |
-| `src\` | C sources and headers, `CMakeLists.txt`, `.def`/`.rc`/`.ico`, `pluginst.inf`, the sample `TCResticBrowser.ini` |
+| `src\` | C sources and headers, `CMakeLists.txt`, `.def`/`.rc`/`.ico`, `pluginst.inf`, the sample `TCResticBrowser.sample.ini` |
 | `src\tests\` | Test programs and the libFuzzer targets |
 | `tmp\` | Optional live-test inputs `restic.exe` and `rclone.exe` and the generated test repository (gitignored) |
 | `.gitattributes` | Line-ending normalization rules |

@@ -814,15 +814,15 @@ static void test_missing_ini_is_harmless(void) {
     RemoveDirectoryW(appdata_dir);
     SetEnvironmentVariableW(L"APPDATA", saved_appdata);
 
-    /* Verify that the sample TCResticBrowser.ini the build stages next to this test is valid and all-commented */
+    /* Verify that the sample TCResticBrowser.sample.ini the build stages next to this test is valid and all-commented */
     WCHAR sample_ini[MAX_PATH];
     DWORD n = GetModuleFileNameW(NULL, sample_ini, MAX_PATH);
     WCHAR* slash = (n > 0 && n < MAX_PATH) ? wcsrchr(sample_ini, L'\\') : NULL;
     EXPECT_TRUE(slash != NULL, "Directory of the test executable is known");
     *slash = L'\0';
-    wcscat_s(sample_ini, MAX_PATH, L"\\TCResticBrowser.ini");
+    wcscat_s(sample_ini, MAX_PATH, L"\\TCResticBrowser.sample.ini");
     EXPECT_TRUE(config_load_from_file(sample_ini, &cfg) && cfg.repo_count == 0,
-                "Staged TCResticBrowser.ini template exists and has all repositories commented out");
+                "Staged TCResticBrowser.sample.ini exists and has all repositories commented out");
     EXPECT_WSTR_EQ(cfg.root_name, CONFIG_DEFAULT_ROOT_NAME, "Sample INI leaves RootName commented out");
     config_free(&cfg);
 

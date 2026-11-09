@@ -84,7 +84,7 @@ BOOL config_get_user_ini_path(WCHAR* out_path, size_t out_capacity);
 /**
  * Resolves the active TCResticBrowser.ini. The first existing file is used in full (no merging):
  * 1. %APPDATA%\GHISLER\TCResticBrowser.ini - per-user override.
- * 2. <plugin_dir>\TCResticBrowser.ini - system-wide file shipped with the plugin.
+ * 2. <plugin_dir>\TCResticBrowser.ini - system-wide file (the plugin ships only a sample of it).
  *
  * Returns TRUE if an existing INI file was found at out_path, or FALSE when neither file exists
  * (in which case out_path receives the plugin-directory path, if known).

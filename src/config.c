@@ -252,7 +252,7 @@ BOOL config_resolve_ini_path(WCHAR* out_path, size_t out_capacity) {
         return TRUE;
     }
 
-    /* 2. System-wide file shipped with the plugin: <plugin_dir>\TCResticBrowser.ini */
+    /* 2. System-wide file: <plugin_dir>\TCResticBrowser.ini */
     if (g_plugin_dir[0] != L'\0') {
         join_path(g_plugin_dir, CONFIG_INI_FILENAME, out_path, out_capacity);
         return file_exists(out_path);
