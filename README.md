@@ -593,7 +593,7 @@ that is not valid UTF-8 is read in the Windows ANSI code page, so an INI
 saved for version 1.x keeps working.
 
 **Portable Total Commander:** copy the sample to `TCResticBrowser.ini` next
-to `wincmd.ini` (`cd %COMMANDER_INI%\..` in Total Commander's command line takes you
+to `wincmd.ini` (`cd %COMMANDER_INI%` in Total Commander's command line takes you
 there); it travels with Total Commander, updates leave it alone, and
 a `%APPDATA%\GHISLER\TCResticBrowser.ini` on the computer you run it on has no
 say over it. [`RootName`](#root-folder-name) is the one exception: Total
