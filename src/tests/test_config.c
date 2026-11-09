@@ -88,7 +88,7 @@ static void use_temp_appdata(const WCHAR* appdata_dir, WCHAR* out_user_dir, size
     CreateDirectoryW(out_user_dir, NULL);
 }
 
-/* Test 1: Directory normalization; FsSetDefaultParams does not influence the INI lookup */
+/* Test 1: Directory normalization; FsSetDefaultParams does not move the per-user INI */
 static void test_plugin_dir_and_default_params(void) {
     config_set_plugin_dir(L"  \"C:\\TotalCmd\\plugins\\wfx\\restic\\\"  ");
     EXPECT_WSTR_EQ(config_get_plugin_dir(), L"C:\\TotalCmd\\plugins\\wfx\\restic", "Trim and strip trailing backslash");

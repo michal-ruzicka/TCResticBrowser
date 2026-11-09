@@ -1931,12 +1931,9 @@ int __stdcall FsInitW(
     return 0;
 }
 
-/*
- * DefaultIniName is deliberately ignored: like the author's other Total Commander plugins, the
- * configuration is looked up in %APPDATA%\GHISLER and the plugin directory (see config.h).
- */
+/* DefaultIniName tells where Total Commander keeps its settings: the first place for our INI (see config.h) */
 void __stdcall FsSetDefaultParams(FsDefaultParamStruct* dps) {
-    (void)dps;
+    if (dps) config_set_tc_default_ini(dps->DefaultIniName);
 }
 
 /* Logs the effective configuration (repository credentials redacted) */

@@ -563,12 +563,16 @@ A fully commented sample configuration file
 
 #### Where to Place `TCResticBrowser.ini`
 
-Settings live in `TCResticBrowser.ini`. The plugin reads it from two locations
-and uses the **first one that exists** — values are not merged across
-files:
+Settings live in `TCResticBrowser.ini`. The plugin looks for it in three
+locations and uses the **first one that exists** — values are not merged
+across files:
 
-1. `%APPDATA%\GHISLER\TCResticBrowser.ini` — per-user override
-2. `<plugin install dir>\TCResticBrowser.ini` — system-wide default
+1. the folder holding Total Commander's `wincmd.ini`, as Total Commander
+   tells the plugin
+2. `%APPDATA%\GHISLER\TCResticBrowser.ini` — per-user override
+3. `<plugin install dir>\TCResticBrowser.ini` — system-wide default
+
+In a standard installation the first two are the same file.
 
 The plugin ships only `TCResticBrowser.sample.ini`, with every option
 commented out and no effect of its own, so no repositories are listed until
@@ -585,10 +589,13 @@ work — just save the file as UTF-8 (the default in most editors). A file
 that is not valid UTF-8 is read in the Windows ANSI code page, so an INI
 saved for version 1.x keeps working.
 
-**Portable Total Commander:** copy the sample to `TCResticBrowser.ini` in the
-plugin folder, which travels with Total Commander and which updates leave
-alone. A `%APPDATA%\GHISLER\TCResticBrowser.ini` on the computer you run it on
-would take precedence.
+**Portable Total Commander:** copy the sample to `TCResticBrowser.ini` next
+to `wincmd.ini`; it travels with Total Commander, updates leave it alone, and
+a `%APPDATA%\GHISLER\TCResticBrowser.ini` on the computer you run it on has no
+say over it. [`RootName`](#root-folder-name) is the one exception: Total
+Commander asks for it while installing the plugin, before telling the plugin
+where its settings are, so a portable install reads it from the other two
+locations.
 
 #### Password Timeout
 

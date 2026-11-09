@@ -71,6 +71,13 @@ void config_set_plugin_dir(const WCHAR* dir_path);
 void config_set_plugin_dir_from_module(HMODULE hModule);
 
 /**
+ * Remembers the folder of DefaultIniName from FsSetDefaultParams: Total Commander's own settings
+ * folder, the one holding wincmd.ini. Only the folder is used, the file named there is shared by
+ * all file system plugins. NULL or a path that is not absolute forgets it.
+ */
+void config_set_tc_default_ini(const char* default_ini_name);
+
+/**
  * Returns the currently configured plugin directory (empty string if unset).
  */
 const WCHAR* config_get_plugin_dir(void);
@@ -83,8 +90,9 @@ BOOL config_get_user_ini_path(WCHAR* out_path, size_t out_capacity);
 
 /**
  * Resolves the active TCResticBrowser.ini. The first existing file is used in full (no merging):
- * 1. %APPDATA%\GHISLER\TCResticBrowser.ini - per-user override.
- * 2. <plugin_dir>\TCResticBrowser.ini - system-wide file (the plugin ships only a sample of it).
+ * 1. <folder of wincmd.ini>\TCResticBrowser.ini - Total Commander's own settings folder.
+ * 2. %APPDATA%\GHISLER\TCResticBrowser.ini - per-user override.
+ * 3. <plugin_dir>\TCResticBrowser.ini - system-wide file (the plugin ships only a sample of it).
  *
  * Returns TRUE if an existing INI file was found at out_path, or FALSE when neither file exists
  * (in which case out_path receives the plugin-directory path, if known).

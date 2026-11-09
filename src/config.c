@@ -20,6 +20,7 @@
 
 /* Module-level directory state initialized at plugin load time */
 static WCHAR g_plugin_dir[CONFIG_MAX_PATH] = {0};
+static WCHAR g_tc_settings_dir[CONFIG_MAX_PATH] = {0}; /* Folder of wincmd.ini, from FsSetDefaultParams */
 
 static BOOL is_space_char(WCHAR c) {
     return (c == L' ' || c == L'\t' || c == L'\r' || c == L'\n');
@@ -221,6 +222,17 @@ const WCHAR* config_get_plugin_dir(void) {
     return g_plugin_dir;
 }
 
+void config_set_tc_default_ini(const char* default_ini_name) {
+    g_tc_settings_dir[0] = L'\0';
+    if (!default_ini_name) return;
+    WCHAR path[CONFIG_MAX_PATH] = {0};
+    int len = MultiByteToWideChar(CP_ACP, 0, default_ini_name, (int)strnlen(default_ini_name, MAX_PATH), path,
+                                  CONFIG_MAX_PATH - 1);
+    if (len <= 0 || !config_is_absolute_path(path)) return; /* Never relative to the current directory */
+    extract_parent_dir(path, g_tc_settings_dir, CONFIG_MAX_PATH);
+    strip_trailing_separators(g_tc_settings_dir);
+}
+
 BOOL config_get_user_ini_path(WCHAR* out_path, size_t out_capacity) {
     if (!out_path || out_capacity == 0) return FALSE;
     out_path[0] = L'\0';
@@ -245,14 +257,22 @@ BOOL config_resolve_ini_path(WCHAR* out_path, size_t out_capacity) {
     if (!out_path || out_capacity == 0) return FALSE;
     out_path[0] = L'\0';
 
-    /* 1. Per-user override: %APPDATA%\GHISLER\TCResticBrowser.ini */
+    /* 1. Total Commander's own settings folder: <folder of wincmd.ini>\TCResticBrowser.ini */
+    WCHAR tc_candidate[CONFIG_MAX_PATH] = {0};
+    if (g_tc_settings_dir[0] != L'\0' && join_path(g_tc_settings_dir, CONFIG_INI_FILENAME, tc_candidate, CONFIG_MAX_PATH) &&
+        file_exists(tc_candidate)) {
+        wcsncpy_s(out_path, out_capacity, tc_candidate, _TRUNCATE);
+        return TRUE;
+    }
+
+    /* 2. Per-user override: %APPDATA%\GHISLER\TCResticBrowser.ini */
     WCHAR user_candidate[CONFIG_MAX_PATH] = {0};
     if (config_get_user_ini_path(user_candidate, CONFIG_MAX_PATH) && file_exists(user_candidate)) {
         wcsncpy_s(out_path, out_capacity, user_candidate, _TRUNCATE);
         return TRUE;
     }
 
-    /* 2. System-wide file: <plugin_dir>\TCResticBrowser.ini */
+    /* 3. System-wide file: <plugin_dir>\TCResticBrowser.ini */
     if (g_plugin_dir[0] != L'\0') {
         join_path(g_plugin_dir, CONFIG_INI_FILENAME, out_path, out_capacity);
         return file_exists(out_path);
