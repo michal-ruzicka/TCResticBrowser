@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.3.3] – 2026-11-11
+
+### Added
+
+- **Portable and redirected Total Commander installs.** `TCResticBrowser.ini` is now
+  looked for first in Total Commander's own settings folder, the one holding
+  `wincmd.ini`, which Total Commander tells the plugin. In a standard
+  installation that is `%APPDATA%\GHISLER` as before, so nothing changes there.
+
+### Changed
+
+- **Updating the plugin no longer overwrites your settings.** The release ZIP
+  now carries `TCResticBrowser.sample.ini` instead of `TCResticBrowser.ini`, so an update
+  leaves a `TCResticBrowser.ini` in the plugin folder alone. To change settings, copy
+  the sample to `TCResticBrowser.ini` and edit the copy (see *Configuration* in the
+  README). A `TCResticBrowser.ini` left there by an earlier version keeps working.
+
 ## [v2.3.2] – 2026-10-27
 
 ### Fixed
@@ -401,6 +418,7 @@ by Pietro Partescano, the base of this fork was commit [c8481b43c9ab2867eee82471
   block.
 
 
+[v2.3.3]: https://github.com/michal-ruzicka/TCResticBrowser/compare/v2.3.2...v2.3.3
 [v2.3.2]: https://github.com/michal-ruzicka/TCResticBrowser/compare/v2.3.1...v2.3.2
 [v2.3.1]: https://github.com/michal-ruzicka/TCResticBrowser/compare/v2.3.0...v2.3.1
 [v2.3.0]: https://github.com/michal-ruzicka/TCResticBrowser/compare/v2.2.0...v2.3.0

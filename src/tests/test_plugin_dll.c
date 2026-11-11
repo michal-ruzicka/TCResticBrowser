@@ -324,8 +324,9 @@ static void test_primary_ini_next_to_dll(void) {
 static WCHAR g_user_dir[MAX_PATH];
 
 /*
- * Scenario B: the per-user %APPDATA%\GHISLER\TCResticBrowser.ini wins over the INI next to the DLL;
- * DefaultIniName from FsSetDefaultParams is ignored and no INI is ever auto-created.
+ * Scenario B: the INI in Total Commander's settings folder (DefaultIniName from FsSetDefaultParams)
+ * wins over the per-user %APPDATA%\GHISLER\TCResticBrowser.ini, which wins over the INI next to the
+ * DLL; no INI is ever auto-created.
  */
 static void test_user_ini_overrides_plugin_ini(void) {
     WCHAR dir[MAX_PATH], plug_ini[MAX_PATH], user_ini[MAX_PATH], tc_dir[MAX_PATH], tc_ini[MAX_PATH];
@@ -342,8 +343,7 @@ static void test_user_ini_overrides_plugin_ini(void) {
     EXPECT_TRUE(p.init_w && p.set_default_params && p.find_first_w && p.find_next_w && p.find_close,
                 "Entry points resolved");
 
-    /* Total Commander's settings folder pointing elsewhere (e.g. a portable install) is not consulted */
-    EXPECT_TRUE(write_file(tc_ini, "[Repositories]\r\nFromDefaultIniName=D:\\repo\r\n"), "Write INI next to wincmd.ini");
+    /* Total Commander's settings folder elsewhere than %APPDATA%\GHISLER, e.g. a portable install */
     DefaultParams dps;
     memset(&dps, 0, sizeof(dps));
     dps.size = (int)sizeof(dps);
@@ -356,12 +356,13 @@ static void test_user_ini_overrides_plugin_ini(void) {
     SetLastError(0);
     HANDLE h = p.find_first_w(L"\\", &fd);
     EXPECT_TRUE(h == INVALID_HANDLE_VALUE && GetLastError() == ERROR_NO_MORE_FILES,
-                "No INI in %APPDATA%\\GHISLER or the plugin directory -> empty root");
+                "No INI in any of the three folders -> empty root");
     EXPECT_TRUE(GetFileAttributesW(plug_ini) == INVALID_FILE_ATTRIBUTES &&
-                GetFileAttributesW(user_ini) == INVALID_FILE_ATTRIBUTES,
+                GetFileAttributesW(user_ini) == INVALID_FILE_ATTRIBUTES &&
+                GetFileAttributesW(tc_ini) == INVALID_FILE_ATTRIBUTES,
                 "No INI file is auto-created on disk");
 
-    /* The shipped INI next to the DLL is used while there is no per-user one */
+    /* An INI next to the DLL is used while there is no per-user one */
     EXPECT_TRUE(write_file(plug_ini, "[Repositories]\r\nShipped=D:\\repo\r\n"), "Write plugin-directory INI");
     h = p.find_first_w(L"\\", &fd);
     EXPECT_TRUE(h != INVALID_HANDLE_VALUE, "Plugin-directory INI is used");
@@ -375,6 +376,15 @@ static void test_user_ini_overrides_plugin_ini(void) {
     EXPECT_WSTR_EQ(fd.cFileName, L"Personal", "Alias from the per-user INI");
     EXPECT_TRUE(!p.find_next_w(h, &fd), "Plugin-directory INI is not merged in");
     p.find_close(h);
+
+    /* An INI next to wincmd.ini takes over from both, also without a reload */
+    EXPECT_TRUE(write_file(tc_ini, "[Repositories]\r\nFromDefaultIniName=D:\\repo\r\n"), "Write INI next to wincmd.ini");
+    h = p.find_first_w(L"\\", &fd);
+    EXPECT_TRUE(h != INVALID_HANDLE_VALUE, "INI in Total Commander's settings folder is used");
+    EXPECT_WSTR_EQ(fd.cFileName, L"FromDefaultIniName", "Alias from the INI next to wincmd.ini");
+    EXPECT_TRUE(!p.find_next_w(h, &fd), "Per-user INI is not merged in");
+    p.find_close(h);
+    EXPECT_TRUE(DeleteFileW(tc_ini), "Remove the INI next to wincmd.ini");
 
     /* RootName from the active INI is what the installer gets from FsGetDefRootName */
     char root_name[64] = {0};

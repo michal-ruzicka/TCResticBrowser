@@ -27,7 +27,8 @@ REM     TCResticBrowser.wfx             (32-bit plugin DLL)
 REM     TCResticBrowser.wfx64           (64-bit plugin DLL)
 REM     sha256sums.sha256               (SHA-256 of every other staged file)
 REM     pluginst.inf                    (TC auto-installer metadata)
-REM     TCResticBrowser.ini             (sample config)
+REM     TCResticBrowser.sample.ini      (sample config; never overwrites a
+REM                                      user's TCResticBrowser.ini on update)
 REM     *.md                            (all repo-root Markdown docs,
 REM                                      LICENSE.md included)
 REM   dist\
@@ -54,8 +55,8 @@ REM With several Visual Studio installations, set TCRB_VSINSTALL to the folder
 REM of the one to use (CI sets it to C:\BuildTools); otherwise vswhere picks
 REM the newest.
 REM ---------------------------------------------------------------------------
-set EXPECTED_VS=18.11.2
-set EXPECTED_CL=19.51.36260
+set EXPECTED_VS=18.12.0
+set EXPECTED_CL=19.51.36263
 set CMAKE_T=14.51
 set CMAKE_SDK=10.0.26100.0
 
@@ -181,7 +182,7 @@ if not exist "%OUT%" mkdir "%OUT%"
 copy /Y "%BUILD%\x64\TCResticBrowser.wfx64" "%STAGE%\"             >nul
 copy /Y "%BUILD%\x86\TCResticBrowser.wfx"   "%STAGE%\"             >nul
 copy /Y "%SRC%\pluginst.inf"         "%STAGE%\"             >nul
-copy /Y "%SRC%\TCResticBrowser.ini"  "%STAGE%\"             >nul
+copy /Y "%SRC%\TCResticBrowser.sample.ini" "%STAGE%\"      >nul
 copy /Y "%ROOT%\*.md"                "%STAGE%\"             >nul
 
 echo.

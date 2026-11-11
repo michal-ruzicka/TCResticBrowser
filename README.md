@@ -150,7 +150,7 @@ auto-installer:**
 2. In Total Commander, **navigate to the ZIP** file and press **Enter**.
 3. TC detects the bundled `pluginst.inf` and asks whether to install the
    plugin — **confirm** (default folder: `plugins\wfx\TCResticBrowser`).
-4. Copy `TCResticBrowser.ini` from the plugin folder to
+4. Copy `TCResticBrowser.sample.ini` from the plugin folder to
    `%APPDATA%\GHISLER\TCResticBrowser.ini` and add your repositories to the
    copy (see [Configuration](#configuration)). For a different folder name
    than *TCResticBrowser*, see [Root Folder Name](#root-folder-name): it is
@@ -163,9 +163,8 @@ folder (for example `C:\Tools\TCResticBrowser\`) and add `TCResticBrowser.wfx`
 (32-bit TC) or `TCResticBrowser.wfx64` (64-bit TC) under **Configuration →
 Options → Plugins → File system plugins → Configure → Add**.
 
-> Upgrading replaces the files in the plugin folder, including the sample
-> `TCResticBrowser.ini` there; your own copy in `%APPDATA%\GHISLER` is not
-> touched.
+> Upgrading replaces the plugin and `TCResticBrowser.sample.ini`, never your
+> settings: the release ZIP contains no `TCResticBrowser.ini`.
 
 ### Getting Restic
 
@@ -560,22 +559,30 @@ names are checked the same way (see [Network Shares](#network-shares-unc-paths))
 ### Configuration
 
 A fully commented sample configuration file
-([`src/TCResticBrowser.ini`](src/TCResticBrowser.ini)) ships in the release ZIP.
+([`src/TCResticBrowser.sample.ini`](src/TCResticBrowser.sample.ini)) ships in the release ZIP.
 
 #### Where to Place `TCResticBrowser.ini`
 
-Settings live in `TCResticBrowser.ini`. The plugin reads it from two locations
-and uses the **first one that exists** — values are not merged across
-files:
+Settings live in `TCResticBrowser.ini`. The plugin looks for it in three
+locations and uses the **first one that exists** — values are not merged
+across files:
 
-1. `%APPDATA%\GHISLER\TCResticBrowser.ini` — per-user override
-2. `<plugin install dir>\TCResticBrowser.ini` — system-wide default, shipped
-   with the plugin
+1. the folder holding Total Commander's `wincmd.ini`, as Total Commander
+   tells the plugin
+2. `%APPDATA%\GHISLER\TCResticBrowser.ini` — per-user override
+3. `<plugin install dir>\TCResticBrowser.ini` — system-wide default
 
-The shipped INI has every option commented out, so no repositories are
-listed until you add some. To configure the plugin for your user account,
-copy that file to `%APPDATA%\GHISLER\TCResticBrowser.ini` and edit the copy;
-the system-wide file is then ignored entirely. The chosen file is re-read on
+In a standard installation the first two are the same file.
+
+The plugin ships only `TCResticBrowser.sample.ini`, with every option
+commented out and no effect of its own, so no repositories are listed until
+you create your settings. Every other setting has a default built in, but the
+repositories have to come from you. To configure the plugin for your user
+account, copy the sample from the plugin's folder (**Configuration → Options →
+Plugins → File system plugins → Configure** shows where it is) to
+`%APPDATA%\GHISLER\TCResticBrowser.ini` and edit the copy;
+a system-wide file is then ignored entirely. Updates of the plugin leave both
+files alone. The chosen file is re-read on
 every root listing and repository operation — edits take effect on the next
 refresh (**Ctrl+R**). The plugin never creates or modifies either file.
 
@@ -585,11 +592,14 @@ work — just save the file as UTF-8 (the default in most editors). A file
 that is not valid UTF-8 is read in the Windows ANSI code page, so an INI
 saved for version 1.x keeps working.
 
-**Portable Total Commander:** keep your configuration in the
-`TCResticBrowser.ini` in the plugin folder, which travels with Total
-Commander. Back it up before installing a new version of the plugin, as the
-installation replaces it with the sample. A `%APPDATA%\GHISLER\TCResticBrowser.ini`
-on the computer you run it on would take precedence.
+**Portable Total Commander:** copy the sample to `TCResticBrowser.ini` next
+to `wincmd.ini` (`cd %COMMANDER_INI%` in Total Commander's command line takes you
+there); it travels with Total Commander, updates leave it alone, and
+a `%APPDATA%\GHISLER\TCResticBrowser.ini` on the computer you run it on has no
+say over it. [`RootName`](#root-folder-name) is the one exception: Total
+Commander asks for it while installing the plugin, before telling the plugin
+where its settings are, so a portable install reads it from the other two
+locations.
 
 #### Password Timeout
 
